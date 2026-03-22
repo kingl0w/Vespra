@@ -51,17 +51,20 @@ def pre_fetch_risk(protocol):
         req = Request(f"https://api.llama.fi/protocol/{protocol}", method="GET")
         with urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read())
-        current_tvl = data.get("currentTvl", 0) or 0
         tvl_array = data.get("tvl", [])
-        audits = data.get("audits", []) or []
-        listed_at = data.get("listedAt", 0) or 0
+        audits = data.get("audits") or data.get("audit_links") or data.get("auditLinks") or []
+
+        # Current TVL: last entry in tvl array
+        current_tvl = 0
+        latest_tvl = 0
+        if tvl_array and isinstance(tvl_array[-1], dict):
+            latest_tvl = tvl_array[-1].get("totalLiquidityUSD", 0) or 0
+            current_tvl = latest_tvl
 
         # TVL trend: compare latest vs 30-day-ago value
         tvl_trend = 0
-        if tvl_array and len(tvl_array) >= 2:
-            latest_tvl = tvl_array[-1].get("totalLiquidityUSD", 0) if isinstance(tvl_array[-1], dict) else 0
-            # Find value closest to 30 days ago
-            target_ts = tvl_array[-1].get("date", 0) - (30 * 86400) if isinstance(tvl_array[-1], dict) else 0
+        if tvl_array and len(tvl_array) >= 2 and latest_tvl > 0:
+            target_ts = tvl_array[-1].get("date", 0) - (30 * 86400)
             past_val = None
             for entry in tvl_array:
                 if isinstance(entry, dict) and entry.get("date", 0) <= target_ts:
@@ -69,10 +72,12 @@ def pre_fetch_risk(protocol):
             if past_val and past_val > 0:
                 tvl_trend = round(((latest_tvl - past_val) / past_val) * 100, 2)
 
-        # Age in days
+        # Age in days: derived from first tvl array entry date
         age_days = 0
-        if listed_at > 0:
-            age_days = int((time.time() - listed_at) / 86400)
+        if tvl_array and isinstance(tvl_array[0], dict):
+            first_date = tvl_array[0].get("date", 0) or 0
+            if first_date > 0:
+                age_days = int((time.time() - first_date) / 86400)
 
         return {
             "tvl": current_tvl,
@@ -82,6 +87,48 @@ def pre_fetch_risk(protocol):
         }
     except Exception as e:
         return {"error": str(e), "tvl": 0, "tvl_trend": 0, "audits": [], "age_days": 0}
+
+
+BASE_TOKEN_ADDRESSES = {
+    8453: {
+        "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "WETH": "0x4200000000000000000000000000000000000006",
+        "DAI":  "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb",
+    }
+}
+
+def pre_fetch_trader(token_in, token_out, amount_wei, chain_id=8453):
+    """Fetch live swap quote from 1inch aggregator for Trader agent context."""
+    try:
+        api_key = os.environ.get("ONEINCH_API_KEY", "").strip()
+        tokens = BASE_TOKEN_ADDRESSES.get(chain_id, {})
+        src = tokens.get(token_in.upper(), token_in)
+        dst = tokens.get(token_out.upper(), token_out)
+        url = (
+            f"https://api.1inch.dev/swap/v6.0/{chain_id}/quote"
+            f"?src={src}&dst={dst}&amount={amount_wei}"
+        )
+        req = Request(url, headers={
+            "Authorization": f"Bearer {api_key}",
+            "accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (compatible; Vespra/1.0)",
+        })
+        with urlopen(req, timeout=8) as resp:
+            raw = resp.read()
+        print(f"1inch response: {raw}", flush=True)
+        data = json.loads(raw)
+        dst_amount = data.get("dstAmount", "0")
+        return {
+            "token_in": src,
+            "token_out": dst,
+            "amount_in": str(amount_wei),
+            "amount_out": str(dst_amount),
+            "price_impact": 0.0,
+            "gas_estimate": 0,
+            "chain_id": chain_id,
+        }
+    except Exception as e:
+        return {"error": str(e), "amount_out": 0, "price_impact": 0, "gas_estimate": 0}
 
 
 AGENTS = {
@@ -207,31 +254,25 @@ Rules:
 Do NOT use tools, search, read files, or make HTTP requests. Use training knowledge only.""",
 
     "trader": """You are Trader, the swap specialist of the Vespra DeFi agent swarm.
-You build token swap transactions using your training knowledge of DEX protocols.
-Use your knowledge of token addresses, router contracts, and DEX mechanics.
+You MUST respond with valid JSON only. No prose, no markdown. Use LIVE_QUOTE_DATA to build the swap intent.
 
-Return ONLY the JSON object. No preamble, no explanation, no markdown fences, no reasoning.
-Start your response with { and end with }. Format:
+Output schema:
 {
-  "status": "ready|no_route|slippage_exceeded",
-  "swap": {
-    "chain": "base|arbitrum|ethereum",
-    "token_in": {"address": "0x...", "symbol": "...", "decimals": 18},
-    "token_out": {"address": "0x...", "symbol": "...", "decimals": 18},
-    "amount_in": "...",
-    "expected_out": "...",
-    "minimum_out": "...",
-    "slippage_bps": 50,
-    "aggregator": "1inch|paraswap|uniswap",
-    "router_address": "0x...",
-    "calldata": "0x..."
-  },
-  "executor_instruction": "Send TX to router 0x... with calldata 0x... on chain ..."
+  "action": "swap",
+  "token_in": "string (address)",
+  "token_out": "string (address)",
+  "amount_in": "string (wei)",
+  "min_amount_out": "string (wei, apply 1% slippage)",
+  "route": "1inch",
+  "chain": "string",
+  "gas_estimate": int,
+  "price_impact": float,
+  "executor_ready": bool
 }
 
+executor_ready = false if price_impact > 2.0 or if LIVE_QUOTE_DATA contains an error.
 Rules: Never execute TXs directly — always output instructions for Executor.
-Reject swaps with >5% price impact unless explicitly approved.
-Do NOT use tools, search, read files, or make HTTP requests. Use training knowledge only.""",
+Do NOT use tools, search, read files, or make HTTP requests.""",
 
     "yield": """You are Yield, the lending protocol manager of the Vespra DeFi agent swarm.
 You manage positions in Aave, Compound, and similar protocols using your training knowledge.
@@ -736,6 +777,27 @@ def call_agent(agent_key, message):
         pool_data["data_timestamp"] = data_timestamp
         scout_context = f"\n\nLIVE_POOL_DATA:\n{json.dumps(pool_data)}\n\nSet data_timestamp to \"{data_timestamp}\" in your response."
 
+    # Trader: inject live 1inch quote data before the user message
+    trader_context = ""
+    if agent_key == "trader":
+        # Parse token_in, token_out from message
+        t_in, t_out = None, None
+        swap_patterns = [
+            r"(?i)swap\s+(\w+)\s+to\s+(\w+)",
+            r"(?i)(\w+)\s*->\s*(\w+)",
+            r"(?i)trade\s+(\w+)\s+for\s+(\w+)",
+        ]
+        for pat in swap_patterns:
+            m = re.search(pat, message)
+            if m:
+                t_in, t_out = m.group(1).upper(), m.group(2).upper()
+                break
+        if t_in and t_out:
+            # Default amount: 100 USDC in wei (6 decimals)
+            amount_wei = 100000000
+            quote_data = pre_fetch_trader(t_in, t_out, amount_wei)
+            trader_context = f"\n\nLIVE_QUOTE_DATA:\n{json.dumps(quote_data)}"
+
     # Risk: inject live DeFi Llama protocol data before the user message
     risk_context = ""
     if agent_key == "risk":
@@ -759,7 +821,7 @@ def call_agent(agent_key, message):
             risk_data = pre_fetch_risk(protocol_name)
             risk_context = f"\n\nLIVE_PROTOCOL_DATA:\n{json.dumps(risk_data)}"
 
-    full_msg = f"[SYSTEM] {identity}{scout_context}{risk_context}\n\n[TASK] {message}" if identity else message
+    full_msg = f"[SYSTEM] {identity}{scout_context}{risk_context}{trader_context}\n\n[TASK] {message}" if identity else message
     session = f"v{int(time.time())}"
 
     cmd = ["sudo", "-u", agent["user"], f"HOME={agent['home']}", NULLCLAW, "agent", "-m", full_msg, "-s", session]
@@ -799,6 +861,16 @@ def call_agent(agent_key, message):
             try:
                 parsed = extract_json(response)
                 if "opportunities" not in parsed:
+                    return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
+                return {"response": json.dumps(parsed), "status": "ok", "agent": agent_key}
+            except (json.JSONDecodeError, ValueError):
+                return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
+
+        # Trader post-processing: validate JSON schema
+        if agent_key == "trader" and response:
+            try:
+                parsed = extract_json(response)
+                if "action" not in parsed or "executor_ready" not in parsed:
                     return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
                 return {"response": json.dumps(parsed), "status": "ok", "agent": agent_key}
             except (json.JSONDecodeError, ValueError):
