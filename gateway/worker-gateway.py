@@ -45,6 +45,45 @@ def pre_fetch_scout():
         return {"pool_count": 0, "top_pools": [], "error": str(e)}
 
 
+def pre_fetch_risk(protocol):
+    """Fetch live protocol data from DeFi Llama for Risk agent context."""
+    try:
+        req = Request(f"https://api.llama.fi/protocol/{protocol}", method="GET")
+        with urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        current_tvl = data.get("currentTvl", 0) or 0
+        tvl_array = data.get("tvl", [])
+        audits = data.get("audits", []) or []
+        listed_at = data.get("listedAt", 0) or 0
+
+        # TVL trend: compare latest vs 30-day-ago value
+        tvl_trend = 0
+        if tvl_array and len(tvl_array) >= 2:
+            latest_tvl = tvl_array[-1].get("totalLiquidityUSD", 0) if isinstance(tvl_array[-1], dict) else 0
+            # Find value closest to 30 days ago
+            target_ts = tvl_array[-1].get("date", 0) - (30 * 86400) if isinstance(tvl_array[-1], dict) else 0
+            past_val = None
+            for entry in tvl_array:
+                if isinstance(entry, dict) and entry.get("date", 0) <= target_ts:
+                    past_val = entry.get("totalLiquidityUSD", 0)
+            if past_val and past_val > 0:
+                tvl_trend = round(((latest_tvl - past_val) / past_val) * 100, 2)
+
+        # Age in days
+        age_days = 0
+        if listed_at > 0:
+            age_days = int((time.time() - listed_at) / 86400)
+
+        return {
+            "tvl": current_tvl,
+            "tvl_trend": tvl_trend,
+            "audits": audits,
+            "age_days": age_days,
+        }
+    except Exception as e:
+        return {"error": str(e), "tvl": 0, "tvl_trend": 0, "audits": [], "age_days": 0}
+
+
 AGENTS = {
     "coordinator": {"user": "nc-coordinator", "home": "/opt/nc-coordinator"},
     "scout":       {"user": "nc-scout",       "home": "/opt/nc-scout"},
@@ -98,10 +137,28 @@ Rules: No transactions, no keys. Use training knowledge only.
 Do NOT use tools, search, or read files.""",
 
     "risk": """You are Risk, safety evaluator of the Vespra DeFi agent swarm.
-Return ONLY valid JSON — no commentary, no markdown, no explanation.
-Output: JSON array of objects: {protocol, chain, score, factors: [{category, rating, detail}], recommendation}.
-Score: LOW/MEDIUM/HIGH/CRITICAL. Keep recommendations under 20 words. Be conservative.
-Rules: No transactions, no keys. Use training knowledge only.
+You MUST respond with valid JSON only. No prose, no markdown. Use LIVE_PROTOCOL_DATA to score the protocol.
+
+Output schema:
+{
+  "protocol": "string",
+  "chain": "string",
+  "score": "LOW|MEDIUM|HIGH|CRITICAL",
+  "factors": [{"category": "string", "rating": "PASS|WARN|FAIL", "detail": "string"}],
+  "recommendation": "string (max 20 words)",
+  "gate_pass": true/false
+}
+
+gate_pass = true ONLY when score is LOW or MEDIUM. Otherwise false.
+
+Scoring hints (use LIVE_PROTOCOL_DATA values):
+- TVL: > $10M = PASS, $1M-$10M = WARN, < $1M = FAIL
+- TVL trend: > -20% = PASS, -20% to -50% = WARN, < -50% = FAIL
+- Audits: has audits = PASS, no audits = FAIL
+- Age: > 180 days = PASS, 30-180 days = WARN, < 30 days = FAIL
+
+Be conservative. When in doubt, rate higher risk.
+Rules: No transactions, no keys.
 Do NOT use tools, search, or read files.""",
 
     "executor": """You are Executor, the transaction bridge of the Vespra DeFi agent swarm.
@@ -679,7 +736,30 @@ def call_agent(agent_key, message):
         pool_data["data_timestamp"] = data_timestamp
         scout_context = f"\n\nLIVE_POOL_DATA:\n{json.dumps(pool_data)}\n\nSet data_timestamp to \"{data_timestamp}\" in your response."
 
-    full_msg = f"[SYSTEM] {identity}{scout_context}\n\n[TASK] {message}" if identity else message
+    # Risk: inject live DeFi Llama protocol data before the user message
+    risk_context = ""
+    if agent_key == "risk":
+        # Extract protocol name from message
+        msg_lower = message.lower()
+        protocol_name = None
+        for keyword in ["analyze", "score", "check", "risk"]:
+            if keyword in msg_lower:
+                parts = msg_lower.split(keyword, 1)[1].strip().split()
+                # Skip filler words like "risk", "for", "of"
+                for word in parts:
+                    if word not in ("risk", "for", "of", "the", "protocol"):
+                        protocol_name = word.strip(".,!?\"'")
+                        break
+                if protocol_name:
+                    break
+        if not protocol_name:
+            # Fallback: first word of message
+            protocol_name = message.strip().split()[0].lower() if message.strip() else ""
+        if protocol_name:
+            risk_data = pre_fetch_risk(protocol_name)
+            risk_context = f"\n\nLIVE_PROTOCOL_DATA:\n{json.dumps(risk_data)}"
+
+    full_msg = f"[SYSTEM] {identity}{scout_context}{risk_context}\n\n[TASK] {message}" if identity else message
     session = f"v{int(time.time())}"
 
     cmd = ["sudo", "-u", agent["user"], f"HOME={agent['home']}", NULLCLAW, "agent", "-m", full_msg, "-s", session]
@@ -703,6 +783,16 @@ def call_agent(agent_key, message):
             km_result = execute_keymaster_plan(response)
             # NullBoiler expects "response" to be a string, not an object
             return {"response": json.dumps(km_result), "status": "ok", "agent": agent_key}
+
+        # Risk post-processing: validate JSON schema
+        if agent_key == "risk" and response:
+            try:
+                parsed = extract_json(response)
+                if "score" not in parsed or "gate_pass" not in parsed:
+                    return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
+                return {"response": json.dumps(parsed), "status": "ok", "agent": agent_key}
+            except (json.JSONDecodeError, ValueError):
+                return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
 
         # Scout post-processing: validate JSON schema
         if agent_key == "scout" and response:
