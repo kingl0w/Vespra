@@ -1,0 +1,80 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  keymaster:
+    build: ./keymaster
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9100:9100"
+    environment:
+      - MASTER_PASSWORD=${KEYMASTER_MASTER_PASSWORD}
+      - BEARER_TOKEN=${KEYMASTER_BEARER_TOKEN}
+      - RPC_URL=${RPC_URL}
+      - CHAIN_ID=${CHAIN_ID}
+      - REDIS_URL=${REDIS_URL}
+      - PORT=${KEYMASTER_PORT:-9100}
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  nullboiler:
+    build: ./nullboiler
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9090:9090"
+    environment:
+      - REDIS_URL=${REDIS_URL}
+      - PORT=${NULLBOILER_PORT:-9090}
+    volumes:
+      - nullboiler_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  gateway:
+    build: ./gateway
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9000:9000"
+    environment:
+      - LLM_PROVIDER=${LLM_PROVIDER}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_MODEL=${LLM_MODEL}
+      - KEYMASTER_URL=http://keymaster:9100
+      - KEYMASTER_BEARER_TOKEN=${KEYMASTER_BEARER_TOKEN}
+      - NULLBOILER_URL=http://nullboiler:9090
+      - REDIS_URL=${REDIS_URL}
+      - PORT=${GATEWAY_PORT:-9000}
+    depends_on:
+      - keymaster
+      - nullboiler
+      - redis
+
+  proxy:
+    build: ./proxy
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9200:9200"
+    environment:
+      - GATEWAY_URL=http://gateway:9000
+      - KEYMASTER_URL=http://keymaster:9100
+      - KEYMASTER_BEARER_TOKEN=${KEYMASTER_BEARER_TOKEN}
+      - PORT=${PROXY_PORT:-9200}
+    depends_on:
+      - gateway
+      - keymaster
+
+volumes:
+  redis_data:
+  nullboiler_data:

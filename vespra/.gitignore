@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+dashboard/node_modules/
+
+# Build outputs
+nullboiler/zig-out/
+nullboiler/.zig-cache/
+keymaster/target/
+dashboard/dist/
+
+# Runtime / DB
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets
+.env
+*.key
+*.pem
+
+# Backups / temp
+*.bak*
+*.bak.*
+
+# Claude local config
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Gateway runtime reports
+gateway/reports/
+
+# NullBoiler internal docker-compose (superseded by root)
+nullboiler/docker-compose.yml
+
+# SQLite deps (bundled C source, large)
+nullboiler/deps/sqlite/sqlite3.c
+nullboiler/deps/sqlite/sqlite3.h
+nullboiler/deps/sqlite/sqlite3ext.h
