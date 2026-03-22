@@ -15,6 +15,36 @@ KEYMASTER = "http://127.0.0.1:9100"
 KEYMASTER_TOKEN = os.environ.get("VESPRA_KM_AUTH_TOKEN", "")
 TIMEOUT = 120
 
+def pre_fetch_scout():
+    """Fetch live pool data from DeFi Llama for Scout agent context."""
+    try:
+        req = Request("https://yields.llama.fi/pools", method="GET")
+        with urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        pools = data.get("data", [])
+        filtered = [
+            p for p in pools
+            if (p.get("tvlUsd") or 0) >= 500_000 and (p.get("apy") or 0) >= 1.0
+        ]
+        filtered.sort(key=lambda p: p.get("apy", 0), reverse=True)
+        top = filtered[:20]
+        top_pools = [
+            {
+                "protocol": p.get("project", ""),
+                "pool": p.get("symbol", ""),
+                "chain": p.get("chain", ""),
+                "apy": round(p.get("apy", 0), 2),
+                "tvl_usd": int(p.get("tvlUsd", 0)),
+                "il_risk": p.get("ilRisk", "unknown"),
+                "stable": bool(p.get("stablecoin", False)),
+            }
+            for p in top
+        ]
+        return {"pool_count": len(filtered), "top_pools": top_pools}
+    except Exception as e:
+        return {"pool_count": 0, "top_pools": [], "error": str(e)}
+
+
 AGENTS = {
     "coordinator": {"user": "nc-coordinator", "home": "/opt/nc-coordinator"},
     "scout":       {"user": "nc-scout",       "home": "/opt/nc-scout"},
@@ -35,31 +65,29 @@ Rules: No transactions, no keys, no fabrication. Summarize only what you receive
 Do NOT use tools, search, or read files.""",
 
     "scout": """You are Scout, yield discovery agent of the Vespra DeFi swarm.
-Return ONLY valid JSON — no commentary, no markdown, no explanation.
-Output: JSON array of max 5 objects with this exact schema:
+You MUST respond with valid JSON only matching the schema below. No prose, no markdown.
+Base your analysis on the LIVE_POOL_DATA provided.
+
+Output schema:
 {
-  "protocol": "Aave V3",
-  "chain": "base",
-  "type": "lending_supply|lp_concentrated|lp_stable|lp_volatile|staking|vault",
-  "pair": "USDC/WETH",
-  "pool_address": "0x...",
-  "apy": "12.5%",
-  "tvl": "$45.2M",
-  "strategy_detail": "Supply USDC to Aave V3 lending pool on Base. Current utilization 78%, variable rate.",
-  "risk_notes": "Smart contract risk, utilization spike risk",
-  "url": "https://app.aave.com/reserve-overview/?underlyingAsset=0x..."
+  "opportunities": [
+    {
+      "protocol": "string",
+      "pool": "string (symbol)",
+      "chain": "string",
+      "apy": float,
+      "tvl_usd": int,
+      "risk_tier": "LOW|MEDIUM|HIGH",
+      "recommended_action": "string"
+    }
+  ],
+  "summary": "string",
+  "data_timestamp": "ISO 8601 UTC"
 }
 
-REQUIRED FIELDS — include ALL of them:
-- type: must be one of lending_supply, lp_concentrated, lp_stable, lp_volatile, staking, vault
-- pair: the actual token pair or single asset (e.g., "USDC", "USDC/WETH", "ETH/stETH")
-- pool_address: contract address if known from training data, otherwise "unknown"
-- strategy_detail: SPECIFIC actionable description of what the user would DO. Not "Aerodrome LP" but "Provide USDC/WETH concentrated liquidity in Aerodrome CL pool, tick range ±5% around current price. Requires ~$5k minimum for meaningful fees."
-- tvl: human-readable format with $ prefix (e.g., "$12.5M", "$450K")
-- apy: include % suffix
-
-Thresholds: stablecoin lending >8% APY, LP >25% APY, new pools >$500k TVL.
-Rules: No transactions, no keys. Use training knowledge only.
+Risk tier logic: apy > 50 = HIGH, 10-50 = MEDIUM, < 10 = LOW.
+Return max 5 opportunities, sorted by risk-adjusted value.
+Rules: No transactions, no keys. Analyze LIVE_POOL_DATA only.
 Do NOT use tools, search, or read files.""",
 
     "sentinel": """You are Sentinel, position monitor of the Vespra DeFi agent swarm.
@@ -641,7 +669,17 @@ def call_agent(agent_key, message):
         return {"error": f"unknown agent: {agent_key}", "status": "failed"}
 
     identity = IDENTITIES.get(agent_key, "")
-    full_msg = f"[SYSTEM] {identity}\n\n[TASK] {message}" if identity else message
+
+    # Scout: inject live DeFi Llama pool data before the user message
+    scout_context = ""
+    if agent_key == "scout":
+        from datetime import datetime, timezone
+        pool_data = pre_fetch_scout()
+        data_timestamp = datetime.now(timezone.utc).isoformat()
+        pool_data["data_timestamp"] = data_timestamp
+        scout_context = f"\n\nLIVE_POOL_DATA:\n{json.dumps(pool_data)}\n\nSet data_timestamp to \"{data_timestamp}\" in your response."
+
+    full_msg = f"[SYSTEM] {identity}{scout_context}\n\n[TASK] {message}" if identity else message
     session = f"v{int(time.time())}"
 
     cmd = ["sudo", "-u", agent["user"], f"HOME={agent['home']}", NULLCLAW, "agent", "-m", full_msg, "-s", session]
@@ -665,6 +703,16 @@ def call_agent(agent_key, message):
             km_result = execute_keymaster_plan(response)
             # NullBoiler expects "response" to be a string, not an object
             return {"response": json.dumps(km_result), "status": "ok", "agent": agent_key}
+
+        # Scout post-processing: validate JSON schema
+        if agent_key == "scout" and response:
+            try:
+                parsed = extract_json(response)
+                if "opportunities" not in parsed:
+                    return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
+                return {"response": json.dumps(parsed), "status": "ok", "agent": agent_key}
+            except (json.JSONDecodeError, ValueError):
+                return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
 
         return {"response": response, "status": "ok", "agent": agent_key}
     except subprocess.TimeoutExpired:
