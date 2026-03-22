@@ -100,7 +100,7 @@ BASE_TOKEN_ADDRESSES = {
 def pre_fetch_trader(token_in, token_out, amount_wei, chain_id=8453):
     """Fetch live swap quote from 1inch aggregator for Trader agent context."""
     try:
-        api_key = os.environ["ONEINCH_API_KEY"]
+        api_key = os.environ.get("ONEINCH_API_KEY", "").strip()
         tokens = BASE_TOKEN_ADDRESSES.get(chain_id, {})
         src = tokens.get(token_in.upper(), token_in)
         dst = tokens.get(token_out.upper(), token_out)
@@ -111,16 +111,20 @@ def pre_fetch_trader(token_in, token_out, amount_wei, chain_id=8453):
         req = Request(url, headers={
             "Authorization": f"Bearer {api_key}",
             "accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (compatible; Vespra/1.0)",
         })
         with urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read())
+            raw = resp.read()
+        print(f"1inch response: {raw}", flush=True)
+        data = json.loads(raw)
+        dst_amount = data.get("dstAmount", "0")
         return {
             "token_in": src,
             "token_out": dst,
             "amount_in": str(amount_wei),
-            "amount_out": str(data.get("toAmount", 0)),
-            "price_impact": float(data.get("estimatedGas", 0)),
-            "gas_estimate": int(data.get("estimatedGas", 0)),
+            "amount_out": str(dst_amount),
+            "price_impact": 0.0,
+            "gas_estimate": 0,
             "chain_id": chain_id,
         }
     except Exception as e:
