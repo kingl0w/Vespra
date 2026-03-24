@@ -49,33 +49,137 @@ if LLM_PROVIDER not in _SUPPORTED_PROVIDERS:
 _RESOLVED_MODEL = LLM_MODEL or _PROVIDER_DEFAULTS[LLM_PROVIDER]
 
 def pre_fetch_scout():
-    """Fetch live pool data from DeFi Llama for Scout agent context."""
+    """Fetch live pool data from DeFi Llama for Scout agent.
+
+    Multi-chain, momentum-scored, with price feed integration.
+    """
+    from datetime import datetime, timezone
     try:
         req = Request("https://yields.llama.fi/pools", method="GET")
         with urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read())
         pools = data.get("data", [])
+
+        # Filter: min TVL $500k, min APY 1%, only configured chains
         filtered = [
             p for p in pools
-            if (p.get("tvlUsd") or 0) >= 500_000 and (p.get("apy") or 0) >= 1.0
+            if (p.get("tvlUsd") or 0) >= 500_000
+            and (p.get("apy") or 0) >= 1.0
+            and p.get("chain", "") in SCOUT_CHAINS
         ]
-        filtered.sort(key=lambda p: p.get("apy", 0), reverse=True)
-        top = filtered[:20]
-        top_pools = [
-            {
-                "protocol": p.get("project", ""),
-                "pool": p.get("symbol", ""),
-                "chain": p.get("chain", ""),
-                "apy": round(p.get("apy", 0), 2),
-                "tvl_usd": int(p.get("tvlUsd", 0)),
-                "il_risk": p.get("ilRisk", "unknown"),
-                "stable": bool(p.get("stablecoin", False)),
-            }
-            for p in top
-        ]
-        return {"pool_count": len(filtered), "top_pools": top_pools}
+
+        # Fetch price data from DeFi Llama coins API for top tokens
+        price_map = {}
+        try:
+            # Build coin list from top pool symbols
+            symbols = list({p.get("symbol", "").split("-")[0] for p in filtered[:50]})
+            # DeFi Llama coins batch price endpoint
+            coin_ids = ",".join(f"coingecko:{s.lower()}" for s in symbols[:20])
+            price_req = Request(
+                f"https://coins.llama.fi/prices/current/{coin_ids}",
+                method="GET",
+            )
+            with urlopen(price_req, timeout=6) as pr:
+                price_data = json.loads(pr.read())
+            for key, val in price_data.get("coins", {}).items():
+                symbol = key.replace("coingecko:", "").upper()
+                price_map[symbol] = {
+                    "price_usd":          val.get("price", 0.0),
+                    "price_change_24h":   val.get("change_24h") or 0.0,
+                }
+        except Exception:
+            pass  # Price feed is best-effort
+
+        scored = []
+        for p in filtered:
+            apy          = p.get("apy") or 0.0
+            tvl          = p.get("tvlUsd") or 0
+            tvl_7d       = p.get("tvlUsd7d") or tvl  # fallback to current if missing
+            vol_24h      = p.get("volumeUsd1d") or 0.0
+            vol_7d_avg   = (p.get("volumeUsd7d") or 0.0) / 7
+            il_risk      = p.get("ilRisk", "unknown")
+            symbol       = p.get("symbol", "")
+            chain        = p.get("chain", "")
+
+            # TVL 7d change %
+            tvl_change_7d_pct = 0.0
+            if tvl_7d and tvl_7d > 0:
+                tvl_change_7d_pct = round(((tvl - tvl_7d) / tvl_7d) * 100, 2)
+
+            # Volume spike: today vs 7d average
+            vol_spike = 0.0
+            if vol_7d_avg > 0:
+                vol_spike = round(((vol_24h - vol_7d_avg) / vol_7d_avg) * 100, 2)
+
+            # Normalize APY score: cap at 200% to avoid outlier distortion
+            apy_norm = min(apy, 200.0) / 200.0
+
+            # Normalize TVL trend: -100% to +100% range → 0 to 1
+            tvl_norm = max(0.0, min(1.0, (tvl_change_7d_pct + 100) / 200))
+
+            # Normalize volume spike: cap at 500% → 0 to 1
+            vol_norm = max(0.0, min(1.0, (vol_spike + 100) / 600))
+
+            # Composite momentum score (weighted)
+            momentum_score = round(
+                (apy_norm * 0.4) + (tvl_norm * 0.3) + (vol_norm * 0.3),
+                4,
+            )
+
+            # Entry signal based on momentum score
+            if momentum_score >= 0.65:
+                entry_signal = "strong"
+            elif momentum_score >= 0.45:
+                entry_signal = "moderate"
+            elif momentum_score >= 0.25:
+                entry_signal = "weak"
+            else:
+                entry_signal = "none"
+
+            # Price data for primary token in pair
+            base_token = symbol.split("-")[0].upper() if "-" in symbol else symbol.upper()
+            price_info = price_map.get(base_token, {})
+
+            scored.append({
+                "protocol":           p.get("project", ""),
+                "pool":               symbol,
+                "chain":              chain,
+                "apy":                round(apy, 2),
+                "tvl_usd":            int(tvl),
+                "il_risk":            il_risk,
+                "stable":             bool(p.get("stablecoin", False)),
+                "tvl_change_7d_pct":  tvl_change_7d_pct,
+                "volume_24h":         int(vol_24h),
+                "volume_spike_pct":   vol_spike,
+                "momentum_score":     momentum_score,
+                "entry_signal":       entry_signal,
+                "price_usd":          price_info.get("price_usd", 0.0),
+                "price_change_24h_pct": price_info.get("price_change_24h", 0.0),
+            })
+
+        # Sort by momentum score descending, take top 20
+        scored.sort(key=lambda p: p["momentum_score"], reverse=True)
+        top = scored[:20]
+
+        # Summary stats
+        strong_signals = sum(1 for p in top if p["entry_signal"] == "strong")
+        chains_covered = list({p["chain"] for p in top})
+
+        data_timestamp = datetime.now(timezone.utc).isoformat()
+        return {
+            "pool_count":      len(filtered),
+            "top_pools":       top,
+            "chains_scanned":  chains_covered,
+            "strong_signals":  strong_signals,
+            "data_timestamp":  data_timestamp,
+        }
     except Exception as e:
-        return {"pool_count": 0, "top_pools": [], "error": str(e)}
+        from datetime import datetime, timezone
+        return {
+            "pool_count": 0, "top_pools": [], "chains_scanned": [],
+            "strong_signals": 0, "error": str(e),
+            "data_timestamp": datetime.now(timezone.utc).isoformat(),
+        }
 
 
 def pre_fetch_risk(protocol):
@@ -165,6 +269,13 @@ def pre_fetch_trader(token_in, token_out, amount_wei, chain_id=8453):
 
 
 CHAIN_MAP = {1: "Ethereum", 8453: "Base", 42161: "Arbitrum"}
+
+# Chains Scout scans — configurable via env var
+SCOUT_CHAINS = [
+    c.strip().capitalize()
+    for c in os.environ.get("SCOUT_CHAINS", "Base,Arbitrum").split(",")
+    if c.strip()
+]
 
 def pre_fetch_yield(chain_id=1):
     """Fetch live Aave V3 market rates and gas price for Yield agent context."""
@@ -791,29 +902,36 @@ status rules:
 Rules: No transactions, no keys. Summarize DAG_REPORT only.
 Do NOT use tools, search, or read files.""",
 
-    "scout": """You are Scout, yield discovery agent of the Vespra DeFi swarm.
-You MUST respond with valid JSON only matching the schema below. No prose, no markdown.
-Base your analysis on the LIVE_POOL_DATA provided.
+    "scout": """You are Scout, market intelligence agent of the Vespra DeFi swarm.
+You MUST respond with valid JSON only. No prose, no markdown. Base your analysis on LIVE_POOL_DATA.
 
 Output schema:
 {
   "opportunities": [
     {
       "protocol": "string",
-      "pool": "string (symbol)",
+      "pool": "string",
       "chain": "string",
       "apy": float,
       "tvl_usd": int,
+      "momentum_score": float,
+      "entry_signal": "strong|moderate|weak|none",
+      "tvl_change_7d_pct": float,
+      "price_change_24h_pct": float,
       "risk_tier": "LOW|MEDIUM|HIGH",
       "recommended_action": "string"
     }
   ],
   "summary": "string",
+  "top_chain": "string",
+  "strong_signal_count": int,
   "data_timestamp": "ISO 8601 UTC"
 }
 
 Risk tier logic: apy > 50 = HIGH, 10-50 = MEDIUM, < 10 = LOW.
-Return max 5 opportunities, sorted by risk-adjusted value.
+Prioritize opportunities where entry_signal is "strong" or "moderate".
+Flag any pool with price_change_24h_pct > 10 as a momentum candidate for Trader.
+Return max 5 opportunities sorted by momentum_score descending.
 Rules: No transactions, no keys. Analyze LIVE_POOL_DATA only.
 Do NOT use tools, search, or read files.""",
 
@@ -1453,11 +1571,8 @@ def call_agent(agent_key, message):
     # Scout: inject live DeFi Llama pool data before the user message
     scout_context = ""
     if agent_key == "scout":
-        from datetime import datetime, timezone
         pool_data = pre_fetch_scout()
-        data_timestamp = datetime.now(timezone.utc).isoformat()
-        pool_data["data_timestamp"] = data_timestamp
-        scout_context = f"\n\nLIVE_POOL_DATA:\n{json.dumps(pool_data)}\n\nSet data_timestamp to \"{data_timestamp}\" in your response."
+        scout_context = f"\n\nLIVE_POOL_DATA:\n{json.dumps(pool_data)}\n\nSet data_timestamp to \"{pool_data.get('data_timestamp','')}\" in your response."
 
     # Trader: inject live 1inch quote data before the user message
     trader_context = ""
