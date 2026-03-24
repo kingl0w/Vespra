@@ -1967,15 +1967,16 @@ def call_agent(agent_key, message):
         if agent_key == "sentinel" and response:
             try:
                 parsed = extract_json(response)
-                items = parsed if isinstance(parsed, list) else [parsed]
-                required_keys = {"wallet", "chain", "balance_eth", "positions", "alerts", "trigger_dag"}
-                for item in items:
-                    missing = required_keys - set(item.keys())
-                    if missing:
-                        return {"response": json.dumps({"error": "invalid_schema", "missing": list(missing), "raw": response[:500]}), "status": "ok", "agent": agent_key}
-                for item in items:
-                    if item.get("trigger_dag") == "health-monitor-exit":
-                        log.warning(f"SENTINEL DAG TRIGGER: health-monitor-exit for wallet {item.get('wallet', '?')[:12]}...")
+                required_keys = {"wallets", "trade_positions", "total_portfolio_usd", "overall_status"}
+                missing = required_keys - set(parsed.keys())
+                if missing:
+                    return {"response": json.dumps({"error": "invalid_schema", "missing": list(missing), "raw": response[:500]}), "status": "ok", "agent": agent_key}
+                # Log DAG triggers and critical status
+                if parsed.get("overall_status") == "critical":
+                    log.warning(f"SENTINEL CRITICAL: worst_position={parsed.get('worst_position')} alerts={parsed.get('wallets', [{}])[0].get('alerts', []) if parsed.get('wallets') else []}")
+                for w in parsed.get("wallets", []):
+                    if w.get("trigger_dag") == "health-monitor-exit":
+                        log.warning(f"SENTINEL DAG TRIGGER: health-monitor-exit for wallet {w.get('wallet', '?')[:12]}...")
                 return {"response": json.dumps(parsed), "status": "ok", "agent": agent_key}
             except (json.JSONDecodeError, ValueError):
                 return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
