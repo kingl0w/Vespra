@@ -1726,6 +1726,20 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path == "/pending-approvals":
+            try:
+                r = _redis_client()
+                items = r.lrange("vespra:pending_approvals", 0, 49)
+                parsed_items = []
+                for item in items:
+                    try:
+                        parsed_items.append(json.loads(item))
+                    except Exception:
+                        pass
+                self._json(200, {"count": len(parsed_items), "approvals": parsed_items})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
         if self.path == "/queue/status":
             depth = queue_depth()
             self._json(200, {
