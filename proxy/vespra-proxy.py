@@ -21,6 +21,102 @@ CF_ACCESS_REQUIRED = os.environ.get("VESPRA_CF_ACCESS_REQUIRED", "").lower() == 
 # ─── Route table ──────────────────────────────────────────────────
 # /api/<prefix>/[rest] → http://localhost:<port>/<target_prefix>/[rest]
 
+import threading, time as _time
+
+# ─── Rate limiting config (token bucket, per IP) ──────────────────
+RL_AGENT_RPM      = int(os.environ.get("RL_AGENT_RPM",      "10"))   # /api/agent/*  per min
+RL_WALLET_RPH     = int(os.environ.get("RL_WALLET_RPH",     "5"))    # wallet create per hour
+RL_TX_RPH         = int(os.environ.get("RL_TX_RPH",         "20"))   # tx send/dispatch per hour
+
+# Paths that map to each limit bucket
+_RL_AGENT_PREFIXES  = ("/api/agent", "/api/swarm")
+_RL_WALLET_PREFIXES = ("/api/wallet",)    # POST only
+_RL_TX_PREFIXES     = ("/api/tx", "/api/dispatch")  # POST only
+
+
+class _TokenBucket:
+    """Thread-safe token bucket for a single IP+bucket key.
+
+    capacity  — max tokens (burst size = limit value)
+    refill_rate — tokens per second
+    """
+    __slots__ = ("_lock", "_tokens", "_last", "_capacity", "_rate")
+
+    def __init__(self, capacity: float, refill_rate: float):
+        self._lock     = threading.Lock()
+        self._tokens   = float(capacity)
+        self._last     = _time.monotonic()
+        self._capacity = capacity
+        self._rate     = refill_rate  # tokens/sec
+
+    def consume(self) -> tuple[bool, float]:
+        """Try to consume one token. Returns (allowed, retry_after_seconds)."""
+        with self._lock:
+            now = _time.monotonic()
+            elapsed = now - self._last
+            self._last = now
+            self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return True, 0.0
+            # Seconds until next token available
+            wait = (1.0 - self._tokens) / self._rate
+            return False, wait
+
+
+class RateLimiter:
+    """Per-IP token bucket registry with three named buckets."""
+
+    def __init__(self):
+        self._lock    = threading.Lock()
+        self._buckets: dict[str, _TokenBucket] = {}
+        # Bucket configs: (capacity, refill_rate_per_sec)
+        self._configs = {
+            "agent":  (float(RL_AGENT_RPM),  RL_AGENT_RPM  / 60.0),
+            "wallet": (float(RL_WALLET_RPH), RL_WALLET_RPH / 3600.0),
+            "tx":     (float(RL_TX_RPH),     RL_TX_RPH     / 3600.0),
+        }
+
+    def _key(self, ip: str, bucket: str) -> str:
+        return f"{ip}:{bucket}"
+
+    def _get_bucket(self, ip: str, bucket: str) -> _TokenBucket:
+        key = self._key(ip, bucket)
+        with self._lock:
+            if key not in self._buckets:
+                cap, rate = self._configs[bucket]
+                self._buckets[key] = _TokenBucket(cap, rate)
+            return self._buckets[key]
+
+    def check(self, ip: str, bucket: str) -> tuple[bool, float]:
+        """Returns (allowed, retry_after_seconds)."""
+        return self._get_bucket(ip, bucket).consume()
+
+    def classify(self, method: str, path: str) -> str | None:
+        """Return bucket name for this request, or None if not rate-limited."""
+        if any(path.startswith(p) for p in _RL_AGENT_PREFIXES):
+            return "agent"
+        if method == "POST":
+            if any(path.startswith(p) for p in _RL_WALLET_PREFIXES):
+                return "wallet"
+            if any(path.startswith(p) for p in _RL_TX_PREFIXES):
+                return "tx"
+        return None
+
+
+# Module-level singleton
+_rate_limiter = RateLimiter()
+
+
+def _get_client_ip(headers) -> str:
+    """Extract real client IP, preferring Cloudflare headers."""
+    # CF-Connecting-IP is set by Cloudflare Tunnel and is trustworthy
+    cf_ip = headers.get("Cf-Connecting-Ip") or headers.get("X-Real-Ip")
+    if cf_ip:
+        return cf_ip.strip()
+    return "unknown"
+
+
 ROUTES = {
     # Health aggregation
     "health/gateway":   ("localhost:9000",  "/health"),
@@ -104,12 +200,45 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if not self._check_cf_access():
             return
 
+        # ── Rate limiting ─────────────────────────────────────────
+        bucket = _rate_limiter.classify(method, self.path)
+        if bucket:
+            client_ip = _get_client_ip(self.headers)
+            allowed, retry_after = _rate_limiter.check(client_ip, bucket)
+            if not allowed:
+                retry_ceil = int(retry_after) + 1
+                sys.stderr.write(
+                    f"[proxy] RATE_LIMIT ip={client_ip} bucket={bucket} "
+                    f"path={self.path} retry_after={retry_ceil}s\n"
+                )
+                body = json.dumps({
+                    "error":       "rate limit exceeded",
+                    "bucket":      bucket,
+                    "retry_after": retry_ceil,
+                }).encode()
+                self.send_response(429)
+                for k, v in self._cors_headers().items():
+                    self.send_header(k, v)
+                self.send_header("Content-Type",   "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Retry-After",    str(retry_ceil))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
         host, upstream_path = resolve_route(self.path)
 
         if not host:
-            # /api/health with no suffix → aggregate all health checks
             if self.path == "/api/health":
                 return self._health_aggregate()
+            if self.path == "/api/rate-limits":
+                return self._send_json(200, {
+                    "limits": {
+                        "agent":  {"max": RL_AGENT_RPM,  "window": "1m", "paths": list(_RL_AGENT_PREFIXES)},
+                        "wallet": {"max": RL_WALLET_RPH, "window": "1h", "paths": list(_RL_WALLET_PREFIXES)},
+                        "tx":     {"max": RL_TX_RPH,     "window": "1h", "paths": list(_RL_TX_PREFIXES)},
+                    }
+                })
             self._send_json(404, {"error": "not found"})
             return
 
@@ -210,6 +339,7 @@ if __name__ == "__main__":
     print(f"  CORS origin: {ALLOWED_ORIGIN}", flush=True)
     print(f"  CF Access required: {CF_ACCESS_REQUIRED}", flush=True)
     print(f"  Keymaster token: {'set' if KEYMASTER_TOKEN else 'NOT SET'}", flush=True)
+    print(f"  Rate limits: agent={RL_AGENT_RPM}/min  wallet={RL_WALLET_RPH}/hr  tx={RL_TX_RPH}/hr", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
