@@ -595,7 +595,7 @@ def pre_fetch_launcher(name, symbol, supply_human, decimals=18, chain="base"):
     from datetime import datetime, timezone
     try:
         # Convert human supply to wei
-        total_supply_wei = int(float(supply_human) * (10 ** decimals))
+        total_supply_wei = int(supply_human) * (10 ** decimals)
 
         # ABI-encode constructor args
         constructor_args = abi_encode_constructor(name, symbol, total_supply_wei, decimals)
@@ -1537,7 +1537,7 @@ def call_agent(agent_key, message):
         l_decimals = 18
 
         # Try to extract: name, symbol, supply from message
-        name_m   = _re.search(r'(?i)name[:\s]+(["\']?)([A-Za-z0-9 ]+)\1', msg_text)
+        name_m   = _re.search(r'(?i)name[:\s]+(["\']?)([A-Za-z0-9]+)\1', msg_text)
         symbol_m = _re.search(r'(?i)symbol[:\s]+(["\']?)([A-Z0-9]{2,10})\1', msg_text)
         supply_m = _re.search(r'(?i)supply[:\s]+([\d,]+)', msg_text)
         dec_m    = _re.search(r'(?i)decimals?[:\s]+(\d+)', msg_text)
