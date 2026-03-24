@@ -316,6 +316,142 @@ pub async fn send_native(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SendTxRequest {
+    pub wallet_id: String,
+    pub to: Option<String>,         // None = contract deployment
+    pub value_eth: Option<String>,  // default "0"
+    pub data: Option<String>,       // 0x-prefixed hex calldata
+}
+
+pub async fn send_tx_with_data(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SendTxRequest>,
+) -> AppResult<Json<Value>> {
+    use alloy::primitives::keccak256;
+
+    let wallet = state.keystore.get_wallet(&req.wallet_id)?;
+    if !wallet.active {
+        return Err(AppError::BadRequest("Wallet is deactivated".into()));
+    }
+
+    let chain = state.config.get_chain(&wallet.chain)
+        .ok_or_else(|| AppError::ChainNotConfigured(wallet.chain.clone()))?;
+
+    let value = match &req.value_eth {
+        Some(v) if !v.is_empty() && v != "0" => eth_to_u256(v)?,
+        _ => U256::ZERO,
+    };
+
+    // Decode hex calldata
+    let data_bytes: Option<Vec<u8>> = match &req.data {
+        Some(hex_str) if !hex_str.is_empty() && hex_str != "0x" => {
+            let clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+            Some(hex::decode(clean)
+                .map_err(|e| AppError::BadRequest(format!("Invalid calldata hex: {e}")))?)
+        }
+        _ => None,
+    };
+
+    // Compute data hash for audit trail
+    let data_hash = data_bytes.as_ref()
+        .map(|b| format!("{:?}", keccak256(b)))
+        .unwrap_or_else(|| "none".to_string());
+
+    let to_ref = req.to.as_deref();
+
+    // Address validation for non-deploy transactions
+    if let Some(to_str) = to_ref {
+        let to_lower = to_str.trim().to_lowercase();
+        let zero = "0x0000000000000000000000000000000000000000";
+        if to_lower != zero && to_lower == wallet.address.to_lowercase() {
+            return Err(AppError::BadRequest("Cannot send to wallet's own address".into()));
+        }
+    }
+
+    // Simulate before broadcast
+    let sim = rpc::simulate_tx_with_data(chain, &wallet.address, to_ref, value, data_bytes.clone()).await;
+    let (simulated, simulation_result, revert_reason) = match sim {
+        Ok(()) => (true, "success".to_string(), None::<String>),
+        Err(e) => {
+            let reason = e.to_string();
+            tracing::warn!(wallet_id = %req.wallet_id, reason = %reason, "send_tx simulation reverted");
+            state.keystore.log_tx(
+                &req.wallet_id, &wallet.chain, None,
+                "send_tx", req.to.as_deref().unwrap_or("deploy"), "0",
+                "simulation_failed", Some(&reason),
+            )?;
+            return Ok(Json(json!({
+                "status": "simulation_failed",
+                "simulated": true,
+                "simulation_result": "revert",
+                "revert_reason": reason,
+                "data_hash": data_hash,
+                "attempts": 0,
+            })));
+        }
+    };
+
+    // Broadcast with retry
+    let mut pk_bytes = crypto::decrypt_key(&wallet.encrypted_key, &state.master_password)?;
+    let max_attempts = 3u32;
+    let mut last_error = String::new();
+    let mut attempts = 0u32;
+    let mut result = Ok(String::new());
+
+    for attempt in 1..=max_attempts {
+        attempts = attempt;
+        result = rpc::send_tx(chain, &pk_bytes, to_ref, value, data_bytes.clone()).await;
+        match &result {
+            Ok(_) => break,
+            Err(e) => {
+                last_error = e.to_string();
+                let transient = last_error.contains("timeout")
+                    || last_error.contains("503")
+                    || last_error.contains("rate limit")
+                    || last_error.contains("connection");
+                tracing::warn!(attempt = attempt, error = %last_error, "send_tx attempt failed");
+                if !transient || attempt == max_attempts { break; }
+                tokio::time::sleep(tokio::time::Duration::from_millis(1000 * 2u64.pow(attempt - 1))).await;
+            }
+        }
+    }
+    crypto::zeroize_bytes(&mut pk_bytes);
+
+    match result {
+        Ok(tx_hash) => {
+            let to_label = req.to.as_deref().unwrap_or("deploy");
+            state.keystore.log_tx(
+                &req.wallet_id, &wallet.chain, Some(&tx_hash),
+                "send_tx", to_label, &format!("{value}"),
+                "confirmed", None,
+            )?;
+            tracing::info!(wallet_id = %req.wallet_id, tx_hash = %tx_hash, data_hash = %data_hash, "send_tx confirmed");
+            Ok(Json(json!({
+                "status": "ok",
+                "tx_hash": tx_hash,
+                "from": wallet.address,
+                "to": req.to,
+                "value_eth": req.value_eth.unwrap_or_else(|| "0".into()),
+                "chain": wallet.chain,
+                "data_hash": data_hash,
+                "simulated": simulated,
+                "simulation_result": simulation_result,
+                "revert_reason": revert_reason,
+                "attempts": attempts,
+            })))
+        }
+        Err(e) => {
+            state.keystore.log_tx(
+                &req.wallet_id, &wallet.chain, None,
+                "send_tx", req.to.as_deref().unwrap_or("deploy"), "0",
+                "failed", Some(&e.to_string()),
+            )?;
+            Err(e)
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SweepRequest {
     pub wallet_id: String,
 }
@@ -446,6 +582,7 @@ pub async fn dispatch(
         "get_all_balances" => dispatch_get_all_balances(state, &input).await,
         "chain_status" => dispatch_chain_status(state, &input).await,
         "send_native" => dispatch_send_native(state, &input).await,
+        "send_tx" => dispatch_send_tx(state, &input).await,
         "sweep" => dispatch_sweep(state, &input).await,
         "get_tx_log" => dispatch_get_tx_log(state, &input).await,
         "health" => Ok(json!({
@@ -454,7 +591,7 @@ pub async fn dispatch(
             "version": env!("CARGO_PKG_VERSION"),
         })),
         _ => Err(format!("Unknown action: '{action}'. Available: create_wallet, list_wallets, get_wallet, \
-            deactivate_wallet, update_cap, get_balance, get_all_balances, chain_status, send_native, sweep, get_tx_log, health")),
+            deactivate_wallet, update_cap, get_balance, get_all_balances, chain_status, send_native, send_tx, sweep, get_tx_log, health")),
     };
 
     match result {
@@ -566,6 +703,17 @@ async fn dispatch_send_native(state: Arc<AppState>, input: &Value) -> Result<Val
         amount_eth: str_or_num_field(input, "amount_eth").ok_or("missing amount_eth")?,
     };
     let Json(v) = send_native(State(state), Json(req)).await.map_err(|e| e.to_string())?;
+    Ok(v)
+}
+
+async fn dispatch_send_tx(state: Arc<AppState>, input: &Value) -> Result<Value, String> {
+    let req = SendTxRequest {
+        wallet_id: str_field(input, "wallet_id").ok_or("missing wallet_id")?.to_string(),
+        to:        str_field(input, "to").map(String::from),
+        value_eth: str_or_num_field(input, "value_eth"),
+        data:      str_field(input, "data").map(String::from),
+    };
+    let Json(v) = send_tx_with_data(State(state), Json(req)).await.map_err(|e| e.to_string())?;
     Ok(v)
 }
 

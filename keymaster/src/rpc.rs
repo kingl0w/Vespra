@@ -17,22 +17,49 @@ pub async fn get_balance(chain: &ChainConfig, address: &str) -> AppResult<U256> 
         .map_err(|e| AppError::Rpc(format!("Balance query failed: {e}")))
 }
 
-pub async fn send_native(
-    chain: &ChainConfig, private_key_bytes: &[u8], to: &str, value: U256,
+pub async fn send_tx(
+    chain: &ChainConfig,
+    private_key_bytes: &[u8],
+    to: Option<&str>,
+    value: U256,
+    data: Option<Vec<u8>>,
 ) -> AppResult<String> {
+    use alloy::primitives::Bytes;
+
     let signer = PrivateKeySigner::from_slice(private_key_bytes)
         .map_err(|e| AppError::Transaction(format!("Invalid private key: {e}")))?;
     let wallet = EthereumWallet::from(signer);
-    let to_addr = Address::from_str(to)
-        .map_err(|e| AppError::BadRequest(format!("Invalid to address: {e}")))?;
+
     let provider = ProviderBuilder::new()
         .with_recommended_fillers()
         .wallet(wallet)
         .on_http(chain.rpc_url.parse().map_err(|e| AppError::Rpc(format!("Invalid RPC URL: {e}")))?);
-    let tx = TransactionRequest::default().to(to_addr).value(value);
+
+    let mut tx = TransactionRequest::default().value(value);
+
+    if let Some(to_str) = to {
+        let to_addr = Address::from_str(to_str)
+            .map_err(|e| AppError::BadRequest(format!("Invalid to address: {e}")))?;
+        tx = tx.to(to_addr);
+    }
+    // to=None means contract deployment (CREATE)
+
+    if let Some(calldata) = data {
+        tx = tx.input(Bytes::from(calldata).into());
+    }
+
     let pending = provider.send_transaction(tx).await
-        .map_err(|e| AppError::Transaction(format!("Send failed: {e}")))?;
+        .map_err(|e| AppError::Transaction(format!("Transaction failed: {e}")))?;
     Ok(format!("{:?}", pending.tx_hash()))
+}
+
+pub async fn send_native(
+    chain: &ChainConfig,
+    private_key_bytes: &[u8],
+    to: &str,
+    value: U256,
+) -> AppResult<String> {
+    send_tx(chain, private_key_bytes, Some(to), value, None).await
 }
 
 pub async fn send_transaction(
@@ -89,6 +116,40 @@ pub async fn simulate_tx(
         .from(from_addr)
         .to(to_addr)
         .value(value);
+
+    provider.call(&tx).await
+        .map(|_| ())
+        .map_err(|e| AppError::Transaction(format!("Simulation reverted: {e}")))
+}
+
+pub async fn simulate_tx_with_data(
+    chain: &ChainConfig,
+    from: &str,
+    to: Option<&str>,
+    value: U256,
+    data: Option<Vec<u8>>,
+) -> AppResult<()> {
+    use alloy::primitives::Bytes;
+
+    let from_addr = Address::from_str(from)
+        .map_err(|e| AppError::BadRequest(format!("Invalid from address: {e}")))?;
+
+    let provider = ProviderBuilder::new()
+        .on_http(chain.rpc_url.parse().map_err(|e| AppError::Rpc(format!("Invalid RPC URL: {e}")))?);
+
+    let mut tx = TransactionRequest::default()
+        .from(from_addr)
+        .value(value);
+
+    if let Some(to_str) = to {
+        let to_addr = Address::from_str(to_str)
+            .map_err(|e| AppError::BadRequest(format!("Invalid to address: {e}")))?;
+        tx = tx.to(to_addr);
+    }
+
+    if let Some(calldata) = data {
+        tx = tx.input(Bytes::from(calldata).into());
+    }
 
     provider.call(&tx).await
         .map(|_| ())
