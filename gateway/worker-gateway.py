@@ -182,8 +182,8 @@ def pre_fetch_scout():
         }
 
 
-def pre_fetch_risk(protocol):
-    """Fetch live protocol data from DeFi Llama for Risk agent context."""
+def pre_fetch_risk(protocol, contract_address=None, chain="base"):
+    """Fetch live protocol data + contract analysis for Risk agent."""
     try:
         req = Request(f"https://api.llama.fi/protocol/{protocol}", method="GET")
         with urlopen(req, timeout=8) as resp:
@@ -191,14 +191,12 @@ def pre_fetch_risk(protocol):
         tvl_array = data.get("tvl", [])
         audits = data.get("audits") or data.get("audit_links") or data.get("auditLinks") or []
 
-        # Current TVL: last entry in tvl array
         current_tvl = 0
         latest_tvl = 0
         if tvl_array and isinstance(tvl_array[-1], dict):
             latest_tvl = tvl_array[-1].get("totalLiquidityUSD", 0) or 0
             current_tvl = latest_tvl
 
-        # TVL trend: compare latest vs 30-day-ago value
         tvl_trend = 0
         if tvl_array and len(tvl_array) >= 2 and latest_tvl > 0:
             target_ts = tvl_array[-1].get("date", 0) - (30 * 86400)
@@ -209,21 +207,46 @@ def pre_fetch_risk(protocol):
             if past_val and past_val > 0:
                 tvl_trend = round(((latest_tvl - past_val) / past_val) * 100, 2)
 
-        # Age in days: derived from first tvl array entry date
         age_days = 0
         if tvl_array and isinstance(tvl_array[0], dict):
             first_date = tvl_array[0].get("date", 0) or 0
             if first_date > 0:
                 age_days = int((time.time() - first_date) / 86400)
 
+        # TVL velocity (1hr change)
+        tvl_velocity = _get_tvl_velocity(protocol)
+
+        # Contract analysis (if address provided or extractable)
+        contract_analysis = {"honeypot_risk": "UNKNOWN", "error": "no_address"}
+        if contract_address:
+            contract_analysis = _analyze_contract(contract_address, chain)
+        else:
+            # Try to get contract address from DeFi Llama
+            addresses = data.get("address") or data.get("addresses", {})
+            if isinstance(addresses, str) and addresses.startswith("0x"):
+                contract_analysis = _analyze_contract(addresses, chain)
+            elif isinstance(addresses, dict):
+                addr = addresses.get(chain) or addresses.get("base") or addresses.get("ethereum")
+                if addr and addr.startswith("0x"):
+                    contract_analysis = _analyze_contract(addr, chain)
+
         return {
-            "tvl": current_tvl,
-            "tvl_trend": tvl_trend,
-            "audits": audits,
-            "age_days": age_days,
+            "tvl":               current_tvl,
+            "tvl_trend":         tvl_trend,
+            "tvl_velocity_1hr":  tvl_velocity,
+            "audits":            audits,
+            "age_days":          age_days,
+            "contract_analysis": contract_analysis,
+            "liquidity_locked":  bool(data.get("listedAt")),
+            "chain":             chain,
         }
     except Exception as e:
-        return {"error": str(e), "tvl": 0, "tvl_trend": 0, "audits": [], "age_days": 0}
+        return {
+            "error": str(e), "tvl": 0, "tvl_trend": 0, "tvl_velocity_1hr": 0,
+            "audits": [], "age_days": 0,
+            "contract_analysis": {"honeypot_risk": "UNKNOWN"},
+            "liquidity_locked": False, "chain": chain,
+        }
 
 
 BASE_TOKEN_ADDRESSES = {
@@ -513,6 +536,147 @@ def _send_sentinel_alert(message: str):
         log.info(f"SENTINEL ALERT sent: {message[:100]}")
     except Exception as e:
         log.error(f"Sentinel alert failed: {e}")
+
+
+# ─── Risk contract analysis helpers ──────────────────────────────
+
+# Function selectors for common honeypot/rugpull functions
+_DANGEROUS_SELECTORS = {
+    "0xb515566a": "setCanSell(address,bool)",       # transfer restriction
+    "0x1cdd3be3": "setBlacklist(address,bool)",      # blacklist
+    "0x8b4cee08": "setMaxWallet(uint256)",            # wallet limit
+    "0x40c10f19": "mint(address,uint256)",            # mint authority
+    "0x9dc29fac": "burn(address,uint256)",            # forced burn
+    "0x715018a6": "renounceOwnership()",              # renounced = safe
+    "0xf2fde38b": "transferOwnership(address)",       # ownership transfer
+    "0x8da5cb5b": "owner()",                          # owner check
+}
+
+_SAFE_SELECTORS = {"0x715018a6"}  # renounceOwnership — good sign
+
+
+def _analyze_contract(contract_address: str, chain: str = "base") -> dict:
+    """Analyze ERC-20 contract bytecode for honeypot/rugpull patterns via Alchemy.
+
+    Returns contract_analysis dict.
+    """
+    alchemy_key = os.environ.get("ALCHEMY_API_KEY", "")
+    chain_rpc = {
+        "base":     f"https://base-mainnet.g.alchemy.com/v2/{alchemy_key}",
+        "ethereum": f"https://eth-mainnet.g.alchemy.com/v2/{alchemy_key}",
+        "arbitrum": f"https://arb-mainnet.g.alchemy.com/v2/{alchemy_key}",
+    }
+    rpc_url = chain_rpc.get(chain)
+    if not rpc_url or not alchemy_key:
+        return {"error": "no_rpc", "honeypot_risk": "UNKNOWN"}
+
+    result = {
+        "ownership_renounced": False,
+        "mint_authority":      "unknown",
+        "honeypot_risk":       "LOW",
+        "verified":            False,
+        "dangerous_functions": [],
+        "safe_functions":      [],
+        "bytecode_size":       0,
+        "error":               None,
+    }
+
+    try:
+        # Fetch bytecode
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "eth_getCode",
+            "params": [contract_address, "latest"],
+        }
+        req = Request(
+            rpc_url,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        bytecode = data.get("result", "0x") or "0x"
+
+        if bytecode == "0x" or len(bytecode) < 10:
+            result["error"] = "not_a_contract"
+            result["honeypot_risk"] = "HIGH"
+            return result
+
+        result["bytecode_size"] = (len(bytecode) - 2) // 2  # bytes
+
+        # Scan for dangerous/safe function selectors in bytecode
+        bytecode_lower = bytecode.lower()
+        for selector, name in _DANGEROUS_SELECTORS.items():
+            sel_clean = selector.replace("0x", "")
+            if sel_clean in bytecode_lower:
+                if selector in _SAFE_SELECTORS:
+                    result["safe_functions"].append(name)
+                    result["ownership_renounced"] = True
+                else:
+                    result["dangerous_functions"].append(name)
+
+        # Mint authority check
+        if "mint(address,uint256)" in result["dangerous_functions"]:
+            result["mint_authority"] = "unrestricted"
+        elif any("owner" in f.lower() for f in result["dangerous_functions"]):
+            result["mint_authority"] = "owner"
+        else:
+            result["mint_authority"] = "none"
+
+        # Honeypot risk scoring
+        danger_count = len(result["dangerous_functions"])
+        if "setCanSell(address,bool)" in result["dangerous_functions"]:
+            result["honeypot_risk"] = "HIGH"  # transfer restriction = likely honeypot
+        elif "setBlacklist(address,bool)" in result["dangerous_functions"]:
+            result["honeypot_risk"] = "HIGH"
+        elif danger_count >= 3:
+            result["honeypot_risk"] = "MEDIUM"
+        elif danger_count >= 1:
+            result["honeypot_risk"] = "LOW"
+        else:
+            result["honeypot_risk"] = "LOW"
+
+        # Ownership renounced is a positive signal — downgrade risk
+        if result["ownership_renounced"] and result["honeypot_risk"] == "MEDIUM":
+            result["honeypot_risk"] = "LOW"
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+def _get_tvl_velocity(protocol: str) -> float:
+    """Compare current TVL vs cached 1hr-ago value. Returns % change.
+
+    Caches current value in Redis vespra:tvl_cache:{protocol} with 1hr TTL.
+    """
+    try:
+        r = _redis_client()
+        cache_key = f"vespra:tvl_cache:{protocol}"
+        cached = r.get(cache_key)
+
+        # Fetch current TVL
+        req = Request(f"https://api.llama.fi/protocol/{protocol}", method="GET")
+        with urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read())
+        tvl_array = data.get("tvl", [])
+        current_tvl = 0
+        if tvl_array and isinstance(tvl_array[-1], dict):
+            current_tvl = tvl_array[-1].get("totalLiquidityUSD", 0) or 0
+
+        velocity = 0.0
+        if cached:
+            prev_tvl = float(cached)
+            if prev_tvl > 0:
+                velocity = round(((current_tvl - prev_tvl) / prev_tvl) * 100, 2)
+
+        # Cache current for next comparison (1hr TTL)
+        r.set(cache_key, str(current_tvl), ex=3600)
+        return velocity
+    except Exception:
+        return 0.0
 
 
 def pre_fetch_sentinel(chain="base"):
@@ -1166,7 +1330,7 @@ Rules: No transactions, no keys. Analyze LIVE_SENTINEL_DATA only.
 Do NOT use tools, search, or read files.""",
 
     "risk": """You are Risk, safety evaluator of the Vespra DeFi agent swarm.
-You MUST respond with valid JSON only. No prose, no markdown. Use LIVE_PROTOCOL_DATA to score the protocol.
+You MUST respond with valid JSON only. No prose, no markdown. Use LIVE_PROTOCOL_DATA.
 
 Output schema:
 {
@@ -1174,17 +1338,29 @@ Output schema:
   "chain": "string",
   "score": "LOW|MEDIUM|HIGH|CRITICAL",
   "factors": [{"category": "string", "rating": "PASS|WARN|FAIL", "detail": "string"}],
+  "contract_analysis": {
+    "honeypot_risk": "LOW|MEDIUM|HIGH|UNKNOWN",
+    "ownership_renounced": bool,
+    "mint_authority": "none|owner|unrestricted|unknown",
+    "dangerous_functions": ["string"],
+    "verified": bool
+  },
+  "tvl_velocity_alert": bool,
   "recommendation": "string (max 20 words)",
-  "gate_pass": true/false
+  "gate_pass": true|false
 }
 
-gate_pass = true ONLY when score is LOW or MEDIUM. Otherwise false.
-
-Scoring hints (use LIVE_PROTOCOL_DATA values):
-- TVL: > $10M = PASS, $1M-$10M = WARN, < $1M = FAIL
-- TVL trend: > -20% = PASS, -20% to -50% = WARN, < -50% = FAIL
+Scoring rules (use LIVE_PROTOCOL_DATA):
+- TVL: >$10M = PASS, $1M-$10M = WARN, <$1M = FAIL
+- TVL trend: >-20% = PASS, -20% to -50% = WARN, <-50% = FAIL
+- TVL velocity 1hr: >-10% = PASS, -10% to -25% = WARN, <-25% = FAIL (emergency)
 - Audits: has audits = PASS, no audits = FAIL
-- Age: > 180 days = PASS, 30-180 days = WARN, < 30 days = FAIL
+- Age: >180 days = PASS, 30-180 days = WARN, <30 days = FAIL
+- Honeypot risk: LOW = PASS, MEDIUM = WARN, HIGH = FAIL
+- Mint authority: none = PASS, owner = WARN, unrestricted = FAIL
+
+gate_pass = true ONLY when score is LOW or MEDIUM AND honeypot_risk is not HIGH.
+tvl_velocity_alert = true when tvl_velocity_1hr < -10.
 
 Be conservative. When in doubt, rate higher risk.
 Rules: No transactions, no keys.
@@ -1888,7 +2064,15 @@ def call_agent(agent_key, message):
             # Fallback: first word of message
             protocol_name = message.strip().split()[0].lower() if message.strip() else ""
         if protocol_name:
-            risk_data = pre_fetch_risk(protocol_name)
+            # Also extract contract address if present in message
+            contract_addr = None
+            addr_match = re.search(r"0x[0-9a-fA-F]{40}", message)
+            if addr_match:
+                contract_addr = addr_match.group(0)
+            # Detect chain
+            msg_lower_r = message.lower()
+            r_chain = "ethereum" if "ethereum" in msg_lower_r else "arbitrum" if "arbitrum" in msg_lower_r else "base"
+            risk_data = pre_fetch_risk(protocol_name, contract_address=contract_addr, chain=r_chain)
             risk_context = f"\n\nLIVE_PROTOCOL_DATA:\n{json.dumps(risk_data)}"
 
     full_msg = f"[SYSTEM] {identity}{coordinator_context}{scout_context}{risk_context}{trader_context}{yield_context}{sentinel_context}{sniper_context}{launcher_context}\n\n[TASK] {message}" if identity else message
