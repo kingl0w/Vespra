@@ -15,6 +15,18 @@ KEYMASTER = "http://127.0.0.1:9100"
 KEYMASTER_TOKEN = os.environ.get("VESPRA_KM_AUTH_TOKEN", "")
 TIMEOUT = 120
 
+import threading
+
+# ─── Redis queue config ───────────────────────────────────────────
+REDIS_HOST     = os.environ.get("REDIS_HOST", "127.0.0.1")
+REDIS_PORT     = int(os.environ.get("REDIS_PORT", "6379"))
+REDIS_DB       = int(os.environ.get("REDIS_DB", "0"))
+QUEUE_KEY      = "vespra:job_queue"
+RETRY_KEY      = "vespra:retry_queue"
+DLQ_KEY        = "vespra:dlq"
+QUEUE_ENABLED  = os.environ.get("VESPRA_QUEUE_ENABLED", "true").lower() == "true"
+BRPOP_TIMEOUT  = 5  # seconds — allows clean shutdown checks
+
 # ─── LLM Provider config ──────────────────────────────────────────
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "deepseek").strip().lower()
 LLM_MODEL    = os.environ.get("LLM_MODEL", "").strip()
@@ -632,6 +644,114 @@ def pre_fetch_launcher(name, symbol, supply_human, decimals=18, chain="base"):
             "chain":     chain,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+
+
+# ─── Redis queue helpers ──────────────────────────────────────────
+
+def _redis_client():
+    """Return a Redis client. Raises on connection failure."""
+    import redis
+    return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB,
+                       socket_connect_timeout=2, socket_timeout=5,
+                       decode_responses=True)
+
+
+def queue_depth() -> dict:
+    """Return current depth of all three queues."""
+    try:
+        r = _redis_client()
+        return {
+            "job_queue":   r.llen(QUEUE_KEY),
+            "retry_queue": r.llen(RETRY_KEY),
+            "dlq":         r.llen(DLQ_KEY),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def enqueue_job(agent: str, message: str, dag_run_id: str = "", step: str = "") -> dict:
+    """Push a job onto vespra:job_queue. Returns the job dict."""
+    from datetime import datetime, timezone
+    job = {
+        "job_id":     f"job-{int(time.time()*1000)}",
+        "dag_run_id": dag_run_id,
+        "step":       step,
+        "agent":      agent,
+        "payload":    message,
+        "attempts":   0,
+        "max_attempts": 3,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    r = _redis_client()
+    r.lpush(QUEUE_KEY, json.dumps(job))
+    log.info(f"Enqueued job {job['job_id']} for agent={agent}")
+    return job
+
+
+def _process_job(job: dict) -> bool:
+    """Execute one job. Returns True on success, False on failure."""
+    agent   = job.get("agent", "")
+    payload = job.get("payload", "")
+    job_id  = job.get("job_id", "?")
+
+    if not agent or not payload:
+        log.error(f"Queue: malformed job {job_id} — missing agent or payload")
+        return False
+
+    log.info(f"Queue: processing job {job_id} agent={agent} attempt={job.get('attempts',0)+1}")
+    result = call_agent(agent, payload)
+    if result.get("status") == "ok":
+        log.info(f"Queue: job {job_id} completed ok")
+        return True
+    else:
+        log.warning(f"Queue: job {job_id} failed: {result.get('error','unknown')}")
+        return False
+
+
+def _queue_worker():
+    """Background thread: BRPOP from job_queue and retry_queue, process, handle failures."""
+    log.info("Queue worker started")
+    r = None
+
+    while True:
+        try:
+            if r is None:
+                r = _redis_client()
+
+            # BRPOP blocks up to BRPOP_TIMEOUT seconds — checks both queues
+            item = r.brpop([QUEUE_KEY, RETRY_KEY], timeout=BRPOP_TIMEOUT)
+            if item is None:
+                continue  # timeout, loop again
+
+            _, raw = item
+            try:
+                job = json.loads(raw)
+            except json.JSONDecodeError:
+                log.error(f"Queue: invalid JSON in queue item: {raw[:200]}")
+                continue
+
+            attempts = job.get("attempts", 0)
+            max_attempts = job.get("max_attempts", 3)
+            job["attempts"] = attempts + 1
+
+            success = _process_job(job)
+
+            if not success:
+                if job["attempts"] < max_attempts:
+                    # Exponential backoff: sleep then re-queue to retry
+                    delay = 2 ** (job["attempts"] - 1)
+                    log.warning(f"Queue: job {job.get('job_id','?')} retry {job['attempts']}/{max_attempts} in {delay}s")
+                    time.sleep(delay)
+                    r.lpush(RETRY_KEY, json.dumps(job))
+                else:
+                    # Dead letter
+                    log.error(f"Queue: job {job.get('job_id','?')} exceeded max_attempts — moving to DLQ")
+                    r.lpush(DLQ_KEY, json.dumps(job))
+
+        except Exception as e:
+            log.error(f"Queue worker error: {e} — reconnecting in 3s")
+            r = None
+            time.sleep(3)
 
 
 AGENTS = {
@@ -1606,6 +1726,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path == "/queue/status":
+            depth = queue_depth()
+            self._json(200, {
+                "enabled": QUEUE_ENABLED,
+                "redis":   f"{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}",
+                **depth,
+            })
+            return
         if self.path == "/health":
             self._json(200, {
                 "status":   "ok",
@@ -1705,6 +1833,26 @@ class Handler(BaseHTTPRequestHandler):
 
             return self._json(200, {"status": "ok", "triggered": len(triggered), "results": triggered})
 
+        elif self.path == "/queue/push":
+            agent   = body.get("agent", "")
+            message = body.get("message", "")
+            if not agent or agent not in AGENTS:
+                return self._json(400, {"error": f"invalid agent: {agent}"})
+            if not message:
+                return self._json(400, {"error": "missing message"})
+            if not QUEUE_ENABLED:
+                return self._json(503, {"error": "queue disabled"})
+            try:
+                job = enqueue_job(
+                    agent,
+                    message,
+                    dag_run_id=body.get("dag_run_id", ""),
+                    step=body.get("step", ""),
+                )
+                self._json(200, {"status": "queued", "job_id": job["job_id"]})
+            except Exception as e:
+                self._json(500, {"error": f"enqueue failed: {e}"})
+
         else:
             self._json(404, {"error": "not found"})
 
@@ -1715,6 +1863,12 @@ if __name__ == "__main__":
     log.info(f"Vespra Worker Gateway on {HOST}:{PORT}")
     log.info(f"Agents: {', '.join(AGENTS.keys())}")
     log.info(f"LLM provider: {LLM_PROVIDER} / model: {_RESOLVED_MODEL}")
+    if QUEUE_ENABLED:
+        _worker_thread = threading.Thread(target=_queue_worker, daemon=True, name="queue-worker")
+        _worker_thread.start()
+        log.info(f"Queue worker started: redis={REDIS_HOST}:{REDIS_PORT} queues={QUEUE_KEY},{RETRY_KEY},{DLQ_KEY}")
+    else:
+        log.info("Queue worker disabled (VESPRA_QUEUE_ENABLED=false)")
     if not LLM_API_KEY:
         log.warning("LLM_API_KEY not set in environment — agents will use per-workspace key from nullclaw config")
     try:
