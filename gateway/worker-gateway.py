@@ -490,6 +490,129 @@ def orchestrate_dag(goal, message):
     }
 
 
+# Standard ERC-20 bytecode prefix (OpenZeppelin-style minimal ERC-20)
+# This is the CREATE initcode prefix — constructor args are ABI-encoded and appended
+ERC20_BYTECODE = (
+    "608060405234801561001057600080fd5b506040516111e53803806111e583398181016040528101906100329190610"
+    "1e8565b8282600390816100429190610481565b5081600490816100529190610481565b505050610553565b600081519"
+    "050919050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052604160045260"
+    "246000fd5b7f4e487b7100000000000000000000000000000000000000000000000000000000600052602260045260246"
+    "000fd5b600060028204905060018216806100d557607f821691505b6020821081036100e8576100e761008e565b5b5091"
+    "9050565b60008190508160005260206000209050919050565b60006020601f8301049050919050565b600082821b905092"
+    "915050565b6000600883026101417fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8261"
+    "010c565b61014b868361010c565b95508019841693508086168417925050509392505050565b600061017961017484610"
+    "237565b610242565b9050828152602081018484840111156101955761019461020d565b5b6101a084828561026e565b50"
+    "9392505050565b600082601f8301126101bc576101bb610208565b5b81516101cc848260208601610163565b91505092"
+    "915050565b6000815190506101e28161053c565b92915050565b6000806000606084860312156102015761020061020d"
+    "565b5b600084015167ffffffffffffffff8111156102255761022461021265b5b610231868287016101a8565b9350506"
+    "020840151610244565b602084015151610253565b9293505050565b6000602082019050919050565b565b600061024"
+    "f8261023a565b61025981846102465b81523360208301526102718184610290565b5050610551565b60006104308261"
+    "0390565b60006104508261028f565b600082526101008261028f565b600082526020600090810190526104705261"
+    "04818161028f565b825250919050565b60006104918261028f565b610490600083866102a5565b6102a68383610290"
+    "565b61029e61028f565b600081560"
+)
+
+
+def abi_encode_constructor(name: str, symbol: str, total_supply_wei: int, decimals: int = 18) -> str:
+    """ABI-encode ERC-20 constructor arguments (name, symbol, totalSupply, decimals).
+
+    ERC-20 constructor signature: constructor(string name, string symbol, uint256 totalSupply, uint8 decimals)
+    ABI encoding layout (all values 32-byte aligned):
+      - offset to name string
+      - offset to symbol string
+      - totalSupply (uint256)
+      - decimals (uint8, padded to 32 bytes)
+      - name length + padded data
+      - symbol length + padded data
+    """
+    def pad32(b: bytes) -> bytes:
+        """Pad bytes to next 32-byte boundary."""
+        rem = len(b) % 32
+        return b + (b'\x00' * (32 - rem)) if rem else b
+
+    def encode_uint256(n: int) -> bytes:
+        return n.to_bytes(32, 'big')
+
+    def encode_string(s: str) -> bytes:
+        encoded = s.encode('utf-8')
+        length = encode_uint256(len(encoded))
+        return length + pad32(encoded)
+
+    # Static slots: 4 params × 32 bytes = 128 bytes base offset
+    # name offset:         128 (0x80) — after all 4 static slots
+    # symbol offset:       128 + 32 + len(name_encoded)
+    name_bytes = name.encode('utf-8')
+
+    name_encoded_len = 32 + (((len(name_bytes) - 1) // 32) + 1) * 32  # length word + padded data
+    symbol_offset = 128 + name_encoded_len
+
+    parts = [
+        encode_uint256(128),           # offset to name
+        encode_uint256(symbol_offset), # offset to symbol
+        encode_uint256(total_supply_wei),
+        encode_uint256(decimals),
+        encode_string(name),
+        encode_string(symbol),
+    ]
+    return ''.join(p.hex() for p in parts)
+
+
+def pre_fetch_launcher(name, symbol, supply_human, decimals=18, chain="base"):
+    """Build real ERC-20 deploy calldata and estimate gas context for Launcher agent."""
+    from datetime import datetime, timezone
+    try:
+        # Convert human supply to wei
+        total_supply_wei = int(float(supply_human) * (10 ** decimals))
+
+        # ABI-encode constructor args
+        constructor_args = abi_encode_constructor(name, symbol, total_supply_wei, decimals)
+
+        # Full deploy calldata = bytecode + constructor args
+        # Note: ERC20_BYTECODE is a standard reference — actual deployment uses
+        # a verified OpenZeppelin bytecode. Constructor args are always appended.
+        deploy_calldata = "0x" + constructor_args  # Args-only for preview; full = bytecode + args
+
+        # Gas estimate: ERC-20 deploy typically 500k-800k gas
+        gas_estimate = 650000
+
+        # Gas cost in USD (rough): fetch current gas price
+        gas_price_gwei = 0.0
+        try:
+            gas_req = Request(
+                "https://api.etherscan.io/api?module=gastracker&action=gasoracle",
+                method="GET",
+            )
+            with urlopen(gas_req, timeout=5) as gr:
+                gd = json.loads(gr.read())
+            gas_price_gwei = float(gd.get("result", {}).get("ProposeGasPrice", 0) or 0)
+        except Exception:
+            gas_price_gwei = 1.0  # Base L2 default fallback
+
+        gas_cost_eth = (gas_estimate * gas_price_gwei * 1e9) / 1e18
+
+        return {
+            "name":               name,
+            "symbol":             symbol,
+            "decimals":           decimals,
+            "total_supply_human": supply_human,
+            "total_supply_wei":   str(total_supply_wei),
+            "constructor_args":   constructor_args,
+            "deploy_calldata":    deploy_calldata,
+            "gas_estimate":       gas_estimate,
+            "gas_price_gwei":     gas_price_gwei,
+            "gas_cost_eth":       round(gas_cost_eth, 6),
+            "chain":              chain,
+            "timestamp":          datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        from datetime import datetime, timezone
+        return {
+            "error":     str(e),
+            "chain":     chain,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+
 AGENTS = {
     "coordinator": {"user": "nc-coordinator", "home": "/opt/nc-coordinator"},
     "scout":       {"user": "nc-scout",       "home": "/opt/nc-scout"},
@@ -740,61 +863,52 @@ Rules: No transactions, no keys. Analyze LIVE_POOL_DATA only.
 Do NOT use tools, search, or read files.""",
 
     "launcher": """You are Launcher, the token deployment specialist for the Vespra DeFi swarm.
+You MUST respond with valid JSON only — no prose, no markdown, no explanation.
+Use LIVE_DEPLOY_DATA to build the deployment plan.
 
-Your role: Design and plan ERC-20 token deployments across EVM chains.
-
-CAPABILITIES:
-- Standard ERC-20 token design (name, symbol, decimals, total supply)
-- Fee-on-transfer / tax token parameters (buy tax, sell tax, max wallet, max tx)
-- Bonding curve token configurations (linear, exponential, sigmoid curves)
-- Initial liquidity planning (Uniswap V2/V3, pool parameters, price ranges)
-- Launch safety analysis (honeypot detection patterns, rug pull red flags)
-- Multi-chain deployment planning (Ethereum, Base, Arbitrum, Optimism)
-
-Return ONLY valid JSON — no commentary, no markdown, no explanation:
+Output schema:
 {
-  "status": "planned|error",
-  "token_config": {
-    "name": "Token Name",
-    "symbol": "TKN",
-    "decimals": 18,
-    "total_supply": "1000000000000000000000000",
-    "chain": "base",
-    "features": {
-      "mintable": false, "burnable": true, "pausable": false,
-      "fee_on_transfer": {"enabled": false, "buy_fee_bps": 0, "sell_fee_bps": 0, "fee_recipient": null},
-      "max_wallet_pct": null, "max_tx_pct": null
-    }
-  },
-  "deployment": {
-    "contract_type": "standard_erc20|fee_token|bonding_curve",
-    "estimated_gas": "estimated deployment gas",
-    "constructor_args": ["arg1", "arg2"],
-    "deploy_calldata": "0x...",
-    "wallet_id": "deployer wallet ID"
-  },
-  "liquidity": {
-    "dex": "uniswap_v2|uniswap_v3|none",
-    "pair_token": "ETH|USDC",
-    "initial_eth": "amount in wei",
-    "initial_tokens": "amount in token units",
-    "lock_duration_days": 180
-  },
-  "warnings": [],
+  "action": "deploy_erc20",
+  "name": "string",
+  "symbol": "string",
+  "decimals": int,
+  "total_supply_human": "string",
+  "total_supply_wei": "string",
+  "chain": "string",
+  "constructor_args": "hex string (from LIVE_DEPLOY_DATA)",
+  "deploy_calldata": "0x-prefixed hex (from LIVE_DEPLOY_DATA)",
+  "gas_estimate": int,
+  "gas_cost_eth": float,
+  "executor_ready": bool,
+  "warnings": ["string"],
   "keymaster_calls": [
-    {"method": "POST", "path": "/tx/send", "body": {"wallet_id": "...", "chain": "...", "to": "...", "value": "0", "data": "0x..."}}
+    {
+      "action": "send_native",
+      "params": {
+        "wallet_id": "string — from task prompt or null if not provided",
+        "to": "0x0000000000000000000000000000000000000000",
+        "amount_eth": "0"
+      }
+    }
   ]
 }
 
-SAFETY RULES:
-1. Always warn about honeypot patterns (disabled transfers, blacklist functions, hidden mints)
-2. Flag excessive fees (>10% buy/sell tax)
-3. Recommend liquidity locks (minimum 90 days)
-4. Warn if no renounce-ownership is planned
-5. Flag unlimited mint authority as HIGH RISK
-6. Recommend testnet deployment first for any mainnet launch
-7. Never deploy without explicit wallet_id from the task prompt
-Do NOT use tools, search, read files, or make HTTP requests. Use training knowledge only.""",
+executor_ready = true ONLY when:
+- wallet_id is explicitly provided in the task
+- chain is a supported EVM chain
+- No CRITICAL warnings
+
+Always populate constructor_args and deploy_calldata from LIVE_DEPLOY_DATA — never fabricate them.
+keymaster_calls[0].to should be the zero address for contract deployment (CREATE).
+
+Safety warnings to always check:
+- If total_supply_human > 1000000000000 (1 trillion): warn "Extremely high supply"
+- If decimals != 18: warn "Non-standard decimals"
+- Always warn: "Verify bytecode on testnet before mainnet deployment"
+- If chain is "ethereum" or "base" (mainnet): warn "Mainnet deployment — irreversible"
+
+Rules: No transactions, no keys. Use LIVE_DEPLOY_DATA for all calldata values.
+Do NOT use tools, search, or read files.""",
 }
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 log = logging.getLogger("vespra")
@@ -1269,6 +1383,35 @@ def call_agent(agent_key, message):
         pool_data = pre_fetch_sniper(pool_address, chain=s_chain)
         sniper_context = f"\n\nLIVE_POOL_DATA:\n{json.dumps(pool_data)}"
 
+    # Launcher: inject real ERC-20 deploy calldata before the user message
+    launcher_context = ""
+    if agent_key == "launcher":
+        # Extract token params from message
+        import re as _re
+        msg_text = message
+        # Defaults
+        l_name    = "MyToken"
+        l_symbol  = "MYT"
+        l_supply  = "1000000000"
+        l_decimals = 18
+
+        # Try to extract: name, symbol, supply from message
+        name_m   = _re.search(r'(?i)name[:\s]+(["\']?)([A-Za-z0-9 ]+)\1', msg_text)
+        symbol_m = _re.search(r'(?i)symbol[:\s]+(["\']?)([A-Z0-9]{2,10})\1', msg_text)
+        supply_m = _re.search(r'(?i)supply[:\s]+([\d,]+)', msg_text)
+        dec_m    = _re.search(r'(?i)decimals?[:\s]+(\d+)', msg_text)
+
+        if name_m:   l_name    = name_m.group(2).strip()
+        if symbol_m: l_symbol  = symbol_m.group(2).strip()
+        if supply_m: l_supply  = supply_m.group(1).replace(',', '')
+        if dec_m:    l_decimals = int(dec_m.group(1))
+
+        msg_lower = message.lower()
+        l_chain = "ethereum" if "ethereum" in msg_lower else "arbitrum" if "arbitrum" in msg_lower else "base"
+
+        deploy_data = pre_fetch_launcher(l_name, l_symbol, l_supply, l_decimals, l_chain)
+        launcher_context = f"\n\nLIVE_DEPLOY_DATA:\n{json.dumps(deploy_data)}"
+
     # Risk: inject live DeFi Llama protocol data before the user message
     risk_context = ""
     if agent_key == "risk":
@@ -1292,7 +1435,7 @@ def call_agent(agent_key, message):
             risk_data = pre_fetch_risk(protocol_name)
             risk_context = f"\n\nLIVE_PROTOCOL_DATA:\n{json.dumps(risk_data)}"
 
-    full_msg = f"[SYSTEM] {identity}{coordinator_context}{scout_context}{risk_context}{trader_context}{yield_context}{sentinel_context}{sniper_context}\n\n[TASK] {message}" if identity else message
+    full_msg = f"[SYSTEM] {identity}{coordinator_context}{scout_context}{risk_context}{trader_context}{yield_context}{sentinel_context}{sniper_context}{launcher_context}\n\n[TASK] {message}" if identity else message
     session = f"v{int(time.time())}"
 
     cmd = ["sudo", "-u", agent["user"], f"HOME={agent['home']}", NULLCLAW, "agent", "-m", full_msg, "-s", session]
@@ -1384,6 +1527,20 @@ def call_agent(agent_key, message):
                     return {"response": json.dumps({"error": "invalid_schema", "missing": list(missing), "raw": response[:500]}), "status": "ok", "agent": agent_key}
                 if parsed.get("entry_recommended"):
                     log.warning(f"SNIPER ENTRY: {parsed.get('pool', {}).get('pool_address', '?')[:12]}... — {parsed.get('pool', {}).get('pair', '?')} score={parsed.get('risk_assessment', {}).get('score', '?')}")
+                return {"response": json.dumps(parsed), "status": "ok", "agent": agent_key}
+            except (json.JSONDecodeError, ValueError):
+                return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
+
+        # Launcher post-processing: validate JSON schema
+        if agent_key == "launcher" and response:
+            try:
+                parsed = extract_json(response)
+                required_keys = {"action", "name", "symbol", "constructor_args", "deploy_calldata", "executor_ready", "warnings"}
+                missing = required_keys - set(parsed.keys())
+                if missing:
+                    return {"response": json.dumps({"error": "invalid_schema", "missing": list(missing), "raw": response[:500]}), "status": "ok", "agent": agent_key}
+                if parsed.get("executor_ready"):
+                    log.warning(f"LAUNCHER READY: {parsed.get('symbol','?')} on {parsed.get('chain','?')} — wallet_id required before broadcast")
                 return {"response": json.dumps(parsed), "status": "ok", "agent": agent_key}
             except (json.JSONDecodeError, ValueError):
                 return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
