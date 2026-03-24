@@ -190,6 +190,114 @@ def pre_fetch_yield(chain_id=1):
         return {"markets": [], "gas_price_gwei": 0, "error": str(e), "timestamp": ""}
 
 
+AAVE_V3_SUBGRAPHS = {
+    "base":      "https://api.goldsky.com/api/public/project_clk74pd7lueg738tw9t0cepc5/subgraphs/aave-v3-base/1.0.0/gn",
+    "ethereum":  "https://api.thegraph.com/subgraphs/name/aave/protocol-v3",
+    "arbitrum":  "https://api.thegraph.com/subgraphs/name/aave/protocol-v3-arbitrum",
+}
+AAVE_RAY = 1e27
+
+
+def _fetch_aave_health_factors(addresses, chain="base"):
+    subgraph_url = AAVE_V3_SUBGRAPHS.get(chain)
+    if not subgraph_url:
+        return {}
+    addr_list = json.dumps([a.lower() for a in addresses])
+    query = (
+        "{ users(where: {id_in: " + addr_list + "}) {"
+        " id healthFactor"
+        " reserves { reserve { symbol } currentATokenBalance"
+        "   currentVariableDebt currentStableDebt } } }"
+    )
+    try:
+        req = Request(
+            subgraph_url,
+            data=json.dumps({"query": query}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        result = {}
+        for user in data.get("data", {}).get("users", []):
+            hf_raw = user.get("healthFactor", "0") or "0"
+            try:
+                hf = float(hf_raw) / AAVE_RAY
+            except (ValueError, TypeError):
+                hf = 0.0
+            positions = []
+            for r in user.get("reserves", []):
+                a_bal  = float(r.get("currentATokenBalance", "0") or 0)
+                v_debt = float(r.get("currentVariableDebt",  "0") or 0)
+                s_debt = float(r.get("currentStableDebt",    "0") or 0)
+                if a_bal > 0 or v_debt > 0 or s_debt > 0:
+                    positions.append({
+                        "symbol":   r.get("reserve", {}).get("symbol", ""),
+                        "supplied": round(a_bal, 4),
+                        "borrowed": round(v_debt + s_debt, 4),
+                    })
+            if positions or hf > 0:
+                result[user["id"].lower()] = {
+                    "health_factor": round(hf, 4),
+                    "positions":     positions,
+                }
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def pre_fetch_sentinel(chain="base"):
+    from datetime import datetime, timezone
+    try:
+        url = f"{KEYMASTER}/wallets?chain={chain}"
+        headers = {}
+        if KEYMASTER_TOKEN:
+            headers["Authorization"] = f"Bearer {KEYMASTER_TOKEN}"
+        req = Request(url, headers=headers, method="GET")
+        with urlopen(req, timeout=10) as resp:
+            wallets = json.loads(resp.read())
+        if not isinstance(wallets, list):
+            wallets = []
+        wallet_data = []
+        for w in wallets:
+            wallet_chain   = w.get("chain", chain)
+            wallet_address = w.get("address", "")
+            balance_eth    = 0.0
+            try:
+                bal_req = Request(
+                    f"{KEYMASTER}/balance/{wallet_chain}/{wallet_address}",
+                    method="GET",
+                )
+                with urlopen(bal_req, timeout=8) as bal_resp:
+                    bal_data = json.loads(bal_resp.read())
+                balance_eth = float(bal_data.get("balance_eth", 0) or 0)
+            except Exception:
+                pass
+            wallet_data.append({
+                "wallet_id":   w.get("id", ""),
+                "address":     wallet_address,
+                "chain":       wallet_chain,
+                "label":       w.get("label", ""),
+                "balance_eth": round(balance_eth, 6),
+                "active":      w.get("active", True),
+            })
+        addresses = [w["address"] for w in wallet_data if w.get("address")]
+        aave_positions = _fetch_aave_health_factors(addresses, chain) if addresses else {}
+        return {
+            "wallets":        wallet_data,
+            "aave_positions": aave_positions,
+            "thresholds":     {"warning": 1.5, "critical": 1.2},
+            "timestamp":      datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        from datetime import datetime, timezone
+        return {
+            "wallets": [], "aave_positions": {}, "error": str(e),
+            "thresholds": {"warning": 1.5, "critical": 1.2},
+            "timestamp":  datetime.now(timezone.utc).isoformat(),
+        }
+
+
 AGENTS = {
     "coordinator": {"user": "nc-coordinator", "home": "/opt/nc-coordinator"},
     "scout":       {"user": "nc-scout",       "home": "/opt/nc-scout"},
@@ -236,10 +344,33 @@ Rules: No transactions, no keys. Analyze LIVE_POOL_DATA only.
 Do NOT use tools, search, or read files.""",
 
     "sentinel": """You are Sentinel, position monitor of the Vespra DeFi agent swarm.
-Return ONLY valid JSON — no commentary, no markdown, no explanation.
-Output: JSON array of max 5 objects: {protocol, position, alert_type, severity, details, recommended_action}.
-Severity: LOW/MEDIUM/HIGH/CRITICAL. Focus on health factors, depegs, TVL drops, upgrades.
-Rules: No transactions, no keys. Use training knowledge only.
+You MUST respond with valid JSON only — no prose, no markdown, no explanation.
+Use LIVE_SENTINEL_DATA to assess every wallet returned.
+
+Output: a JSON array — one object per wallet (include all wallets, even those with no positions):
+[
+  {
+    "wallet": "0x...",
+    "chain": "string",
+    "balance_eth": float,
+    "positions": [
+      {"protocol": "aave-v3", "health_factor": float, "status": "healthy|warning|critical"}
+    ],
+    "alerts": ["string"],
+    "trigger_dag": "health-monitor-exit" | null
+  }
+]
+
+Status rules (use thresholds from LIVE_SENTINEL_DATA.thresholds):
+- healthy:  health_factor >= 1.5
+- warning:  1.2 <= health_factor < 1.5  → add alert string
+- critical: health_factor < 1.2         → add alert string AND set trigger_dag to "health-monitor-exit"
+
+Set trigger_dag to null unless a position is critical.
+Cross-reference LIVE_SENTINEL_DATA.wallets with LIVE_SENTINEL_DATA.aave_positions (keyed by lowercase address).
+If a wallet has no Aave positions, set positions to [] and trigger_dag to null.
+
+Rules: No transactions, no keys. Analyze LIVE_SENTINEL_DATA only.
 Do NOT use tools, search, or read files.""",
 
     "risk": """You are Risk, safety evaluator of the Vespra DeFi agent swarm.
@@ -872,6 +1003,19 @@ def call_agent(agent_key, message):
         market_data = pre_fetch_yield(chain_id)
         yield_context = f"\n\nLIVE_MARKET_DATA:\n{json.dumps(market_data)}"
 
+    # Sentinel: inject live wallet + Aave health data before the user message
+    sentinel_context = ""
+    if agent_key == "sentinel":
+        msg_lower = message.lower()
+        if "ethereum" in msg_lower:
+            s_chain = "ethereum"
+        elif "arbitrum" in msg_lower:
+            s_chain = "arbitrum"
+        else:
+            s_chain = "base"
+        sentinel_data = pre_fetch_sentinel(chain=s_chain)
+        sentinel_context = f"\n\nLIVE_SENTINEL_DATA:\n{json.dumps(sentinel_data)}"
+
     # Risk: inject live DeFi Llama protocol data before the user message
     risk_context = ""
     if agent_key == "risk":
@@ -895,7 +1039,7 @@ def call_agent(agent_key, message):
             risk_data = pre_fetch_risk(protocol_name)
             risk_context = f"\n\nLIVE_PROTOCOL_DATA:\n{json.dumps(risk_data)}"
 
-    full_msg = f"[SYSTEM] {identity}{scout_context}{risk_context}{trader_context}{yield_context}\n\n[TASK] {message}" if identity else message
+    full_msg = f"[SYSTEM] {identity}{scout_context}{risk_context}{trader_context}{yield_context}{sentinel_context}\n\n[TASK] {message}" if identity else message
     session = f"v{int(time.time())}"
 
     cmd = ["sudo", "-u", agent["user"], f"HOME={agent['home']}", NULLCLAW, "agent", "-m", full_msg, "-s", session]
@@ -956,6 +1100,23 @@ def call_agent(agent_key, message):
                 parsed = extract_json(response)
                 if "recommended_action" not in parsed or "executor_ready" not in parsed:
                     return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
+                return {"response": json.dumps(parsed), "status": "ok", "agent": agent_key}
+            except (json.JSONDecodeError, ValueError):
+                return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
+
+        # Sentinel post-processing: validate JSON schema
+        if agent_key == "sentinel" and response:
+            try:
+                parsed = extract_json(response)
+                items = parsed if isinstance(parsed, list) else [parsed]
+                required_keys = {"wallet", "chain", "balance_eth", "positions", "alerts", "trigger_dag"}
+                for item in items:
+                    missing = required_keys - set(item.keys())
+                    if missing:
+                        return {"response": json.dumps({"error": "invalid_schema", "missing": list(missing), "raw": response[:500]}), "status": "ok", "agent": agent_key}
+                for item in items:
+                    if item.get("trigger_dag") == "health-monitor-exit":
+                        log.warning(f"SENTINEL DAG TRIGGER: health-monitor-exit for wallet {item.get('wallet', '?')[:12]}...")
                 return {"response": json.dumps(parsed), "status": "ok", "agent": agent_key}
             except (json.JSONDecodeError, ValueError):
                 return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
