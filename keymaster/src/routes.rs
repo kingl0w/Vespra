@@ -192,7 +192,7 @@ pub async fn send_native(
         return Err(AppError::BadRequest("Wallet is deactivated".into()));
     }
 
-    // ── Address validation (#5) ──────────────────────────────────
+    // ── Address validation ───────────────────────────────────────
     let to_normalized = req.to.trim().to_lowercase();
     let zero_address = "0x0000000000000000000000000000000000000000";
     if to_normalized == zero_address {
@@ -207,7 +207,7 @@ pub async fn send_native(
 
     let value = eth_to_u256(&req.amount_eth)?;
 
-    // ── Wallet cap enforcement (#2) ──────────────────────────────
+    // ── Wallet cap enforcement ───────────────────────────────────
     let cap_wei_str = &wallet.cap_wei;
     if cap_wei_str != "0" && !cap_wei_str.is_empty() {
         let cap = cap_wei_str.parse::<u128>()
@@ -223,23 +223,93 @@ pub async fn send_native(
         }
     }
 
+    // ── TX simulation (eth_call before broadcast) ────────────────
+    let sim_result = rpc::simulate_tx(chain, &wallet.address, &req.to, value).await;
+    let (simulated, simulation_result, revert_reason) = match sim_result {
+        Ok(()) => (true, "success".to_string(), None::<String>),
+        Err(e) => {
+            let reason = e.to_string();
+            tracing::warn!(
+                wallet_id = %req.wallet_id,
+                to = %req.to,
+                reason = %reason,
+                "TX simulation reverted — aborting broadcast"
+            );
+            state.keystore.log_tx(
+                &req.wallet_id, &wallet.chain, None,
+                "send_native", &req.to, &req.amount_eth,
+                "simulation_failed", Some(&reason),
+            )?;
+            return Ok(Json(json!({
+                "status": "simulation_failed",
+                "simulated": true,
+                "simulation_result": "revert",
+                "revert_reason": reason,
+                "attempts": 0,
+            })));
+        }
+    };
+
+    // ── Broadcast with exponential backoff retry (3 attempts) ────
     let mut pk_bytes = crypto::decrypt_key(&wallet.encrypted_key, &state.master_password)?;
-    let result = rpc::send_native(chain, &pk_bytes, &req.to, value).await;
+    let max_attempts = 3u32;
+    let mut last_error = String::new();
+    let mut attempts = 0u32;
+
+    let mut result = Ok(String::new());
+    for attempt in 1..=max_attempts {
+        attempts = attempt;
+        result = rpc::send_native(chain, &pk_bytes, &req.to, value).await;
+        match &result {
+            Ok(_) => break,
+            Err(e) => {
+                last_error = e.to_string();
+                let is_transient = last_error.contains("timeout")
+                    || last_error.contains("503")
+                    || last_error.contains("rate limit")
+                    || last_error.contains("connection");
+                tracing::warn!(
+                    wallet_id = %req.wallet_id,
+                    attempt = attempt,
+                    error = %last_error,
+                    "send_native attempt failed"
+                );
+                if !is_transient || attempt == max_attempts {
+                    break;
+                }
+                // Exponential backoff: 1s, 2s (attempt 1→2, 2→3)
+                let delay_ms = 1000u64 * 2u64.pow(attempt - 1);
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
     crypto::zeroize_bytes(&mut pk_bytes);
 
     match result {
         Ok(tx_hash) => {
-            state.keystore.log_tx(&req.wallet_id, &wallet.chain, Some(&tx_hash),
-                "send_native", &req.to, &req.amount_eth, "confirmed", None)?;
-            tracing::info!(wallet_id = %req.wallet_id, tx_hash = %tx_hash, "Sent native token");
+            state.keystore.log_tx(
+                &req.wallet_id, &wallet.chain, Some(&tx_hash),
+                "send_native", &req.to, &req.amount_eth, "confirmed", None,
+            )?;
+            tracing::info!(wallet_id = %req.wallet_id, tx_hash = %tx_hash, attempts = %attempts, "Sent native token");
             Ok(Json(json!({
-                "status": "ok", "tx_hash": tx_hash, "from": wallet.address,
-                "to": req.to, "amount_eth": req.amount_eth, "chain": wallet.chain,
+                "status": "ok",
+                "tx_hash": tx_hash,
+                "from": wallet.address,
+                "to": req.to,
+                "amount_eth": req.amount_eth,
+                "chain": wallet.chain,
+                "simulated": simulated,
+                "simulation_result": simulation_result,
+                "revert_reason": revert_reason,
+                "attempts": attempts,
             })))
         }
         Err(e) => {
-            state.keystore.log_tx(&req.wallet_id, &wallet.chain, None,
-                "send_native", &req.to, &req.amount_eth, "failed", Some(&e.to_string()))?;
+            state.keystore.log_tx(
+                &req.wallet_id, &wallet.chain, None,
+                "send_native", &req.to, &req.amount_eth, "failed", Some(&e.to_string()),
+            )?;
             Err(e)
         }
     }

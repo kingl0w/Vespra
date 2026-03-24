@@ -70,3 +70,27 @@ pub async fn get_block_number(chain: &ChainConfig) -> AppResult<u64> {
     provider.get_block_number().await
         .map_err(|e| AppError::Rpc(format!("Block number query failed: {e}")))
 }
+
+pub async fn simulate_tx(
+    chain: &ChainConfig,
+    from: &str,
+    to: &str,
+    value: U256,
+) -> AppResult<()> {
+    let from_addr = Address::from_str(from)
+        .map_err(|e| AppError::BadRequest(format!("Invalid from address: {e}")))?;
+    let to_addr = Address::from_str(to)
+        .map_err(|e| AppError::BadRequest(format!("Invalid to address: {e}")))?;
+
+    let provider = ProviderBuilder::new()
+        .on_http(chain.rpc_url.parse().map_err(|e| AppError::Rpc(format!("Invalid RPC URL: {e}")))?);
+
+    let tx = TransactionRequest::default()
+        .from(from_addr)
+        .to(to_addr)
+        .value(value);
+
+    provider.call(&tx).await
+        .map(|_| ())
+        .map_err(|e| AppError::Transaction(format!("Simulation reverted: {e}")))
+}
