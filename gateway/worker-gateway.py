@@ -341,6 +341,11 @@ AAVE_V3_SUBGRAPHS = {
 }
 AAVE_RAY = 1e27
 
+# ─── Sentinel watchdog config ─────────────────────────────────────
+SENTINEL_POLL_INTERVAL = int(os.environ.get("SENTINEL_POLL_INTERVAL", "300"))  # seconds
+SENTINEL_STOP_LOSS_PCT = float(os.environ.get("SENTINEL_STOP_LOSS_PCT", "20.0"))  # exit on 20% drop
+SENTINEL_ALERT_CHANNEL = os.environ.get("SENTINEL_ALERT_CHANNEL", "")  # NullClaw channel name
+
 
 def _fetch_aave_health_factors(addresses, chain="base"):
     subgraph_url = AAVE_V3_SUBGRAPHS.get(chain)
@@ -390,9 +395,131 @@ def _fetch_aave_health_factors(addresses, chain="base"):
         return {"error": str(e)}
 
 
+def _fetch_token_balances(address: str, chain: str = "base") -> list:
+    """Fetch ERC-20 token balances for a wallet via Alchemy.
+
+    Returns list of {token, balance, value_usd, price_usd}.
+    """
+    alchemy_key = os.environ.get("ALCHEMY_API_KEY", "")
+    if not alchemy_key:
+        return []
+
+    chain_rpc = {
+        "base":     f"https://base-mainnet.g.alchemy.com/v2/{alchemy_key}",
+        "ethereum": f"https://eth-mainnet.g.alchemy.com/v2/{alchemy_key}",
+        "arbitrum": f"https://arb-mainnet.g.alchemy.com/v2/{alchemy_key}",
+    }
+    rpc_url = chain_rpc.get(chain)
+    if not rpc_url:
+        return []
+
+    try:
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "alchemy_getTokenBalances",
+            "params": [address, "erc20"],
+        }
+        req = Request(
+            rpc_url,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+
+        balances = data.get("result", {}).get("tokenBalances", [])
+        results = []
+        for b in balances:
+            hex_bal = b.get("tokenBalance", "0x0") or "0x0"
+            try:
+                raw_balance = int(hex_bal, 16)
+            except ValueError:
+                continue
+            if raw_balance == 0:
+                continue
+            # Normalize to 18 decimals (approximate — metadata fetch is expensive)
+            balance_normalized = raw_balance / 1e18
+            if balance_normalized < 0.0001:
+                continue
+            results.append({
+                "token":       b.get("contractAddress", ""),
+                "balance":     round(balance_normalized, 6),
+                "value_usd":   0.0,  # populated below
+                "price_usd":   0.0,
+            })
+
+        # Batch price lookup via DeFi Llama
+        if results:
+            chain_prefix = {"base": "base", "ethereum": "ethereum", "arbitrum": "arbitrum"}.get(chain, "base")
+            coin_ids = ",".join(f"{chain_prefix}:{r['token']}" for r in results[:20])
+            try:
+                price_req = Request(
+                    f"https://coins.llama.fi/prices/current/{coin_ids}",
+                    method="GET",
+                )
+                with urlopen(price_req, timeout=6) as pr:
+                    price_data = json.loads(pr.read())
+                for r in results:
+                    key = f"{chain_prefix}:{r['token']}"
+                    coin = price_data.get("coins", {}).get(key, {})
+                    price = coin.get("price", 0.0) or 0.0
+                    r["price_usd"]  = price
+                    r["value_usd"]  = round(price * r["balance"], 4)
+                    r["symbol"]     = coin.get("symbol", r["token"][:8])
+            except Exception:
+                pass
+
+        return results
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+def _fetch_trade_positions() -> list:
+    """Read open trade positions from Redis vespra:trade_positions.
+
+    Returns list of position dicts written by Trader/Sniper agents.
+    """
+    try:
+        r = _redis_client()
+        items = r.lrange("vespra:trade_positions", 0, 99)
+        positions = []
+        for item in items:
+            try:
+                positions.append(json.loads(item))
+            except Exception:
+                pass
+        return positions
+    except Exception:
+        return []
+
+
+def _send_sentinel_alert(message: str):
+    """Send alert via NullClaw channel if configured."""
+    if not SENTINEL_ALERT_CHANNEL:
+        return
+    try:
+        nc_agent = AGENTS.get("sentinel")
+        if not nc_agent:
+            return
+        alert_cmd = [
+            "sudo", "-u", nc_agent["user"],
+            f"HOME={nc_agent['home']}",
+            NULLCLAW, "channel", "send",
+            "--channel", SENTINEL_ALERT_CHANNEL,
+            "--message", message[:500],
+        ]
+        subprocess.run(alert_cmd, capture_output=True, text=True, timeout=10)
+        log.info(f"SENTINEL ALERT sent: {message[:100]}")
+    except Exception as e:
+        log.error(f"Sentinel alert failed: {e}")
+
+
 def pre_fetch_sentinel(chain="base"):
+    """Fetch live wallet balances, Aave health factors, token positions, and P&L for Sentinel."""
     from datetime import datetime, timezone
     try:
+        # Step 1 — pull all wallets from Keymaster
         url = f"{KEYMASTER}/wallets?chain={chain}"
         headers = {}
         if KEYMASTER_TOKEN:
@@ -402,6 +529,8 @@ def pre_fetch_sentinel(chain="base"):
             wallets = json.loads(resp.read())
         if not isinstance(wallets, list):
             wallets = []
+
+        # Step 2 — fetch native ETH balance + ERC-20 token balances per wallet
         wallet_data = []
         for w in wallets:
             wallet_chain   = w.get("chain", chain)
@@ -417,28 +546,86 @@ def pre_fetch_sentinel(chain="base"):
                 balance_eth = float(bal_data.get("balance_eth", 0) or 0)
             except Exception:
                 pass
+
+            # Fetch ERC-20 token balances
+            token_balances = _fetch_token_balances(wallet_address, wallet_chain)
+            token_value_usd = sum(t.get("value_usd", 0) for t in token_balances if isinstance(t, dict) and "error" not in t)
+
             wallet_data.append({
-                "wallet_id":   w.get("id", ""),
-                "address":     wallet_address,
-                "chain":       wallet_chain,
-                "label":       w.get("label", ""),
-                "balance_eth": round(balance_eth, 6),
-                "active":      w.get("active", True),
+                "wallet_id":      w.get("id", ""),
+                "address":        wallet_address,
+                "chain":          wallet_chain,
+                "label":          w.get("label", ""),
+                "balance_eth":    round(balance_eth, 6),
+                "active":         w.get("active", True),
+                "token_balances": token_balances,
+                "token_value_usd": round(token_value_usd, 2),
             })
+
+        # Step 3 — Aave V3 health factors
         addresses = [w["address"] for w in wallet_data if w.get("address")]
         aave_positions = _fetch_aave_health_factors(addresses, chain) if addresses else {}
+
+        # Step 4 — open trade positions from Redis
+        trade_positions = _fetch_trade_positions()
+
+        # Step 5 — load previous snapshot from Redis for P&L delta detection
+        prev_snapshot = {}
+        try:
+            r = _redis_client()
+            raw = r.get("vespra:sentinel_snapshot")
+            if raw:
+                prev_snapshot = json.loads(raw)
+        except Exception:
+            pass
+
+        # Compute P&L per wallet vs previous snapshot
+        alerts = []
+        for w in wallet_data:
+            addr = w["address"].lower()
+            prev = prev_snapshot.get(addr, {})
+            prev_eth = prev.get("balance_eth", 0)
+            curr_eth = w["balance_eth"]
+            if prev_eth > 0 and curr_eth > 0:
+                drop_pct = ((prev_eth - curr_eth) / prev_eth) * 100
+                if drop_pct >= SENTINEL_STOP_LOSS_PCT:
+                    alert_msg = f"STOP LOSS: {w.get('label', addr[:8])} dropped {drop_pct:.1f}% ({prev_eth:.4f}→{curr_eth:.4f} ETH)"
+                    alerts.append(alert_msg)
+                    _send_sentinel_alert(alert_msg)
+                    log.warning(f"SENTINEL: {alert_msg}")
+
+        # Save current snapshot to Redis
+        try:
+            r = _redis_client()
+            snapshot = {w["address"].lower(): {"balance_eth": w["balance_eth"]} for w in wallet_data}
+            r.set("vespra:sentinel_snapshot", json.dumps(snapshot), ex=3600)
+        except Exception:
+            pass
+
+        # Total portfolio value
+        total_eth = sum(w["balance_eth"] for w in wallet_data)
+        total_token_usd = sum(w["token_value_usd"] for w in wallet_data)
+
         return {
-            "wallets":        wallet_data,
-            "aave_positions": aave_positions,
-            "thresholds":     {"warning": 1.5, "critical": 1.2},
-            "timestamp":      datetime.now(timezone.utc).isoformat(),
+            "wallets":         wallet_data,
+            "aave_positions":  aave_positions,
+            "trade_positions": trade_positions,
+            "thresholds":      {"warning": 1.5, "critical": 1.2},
+            "stop_loss_pct":   SENTINEL_STOP_LOSS_PCT,
+            "alerts":          alerts,
+            "total_eth":       round(total_eth, 6),
+            "total_token_usd": round(total_token_usd, 2),
+            "timestamp":       datetime.now(timezone.utc).isoformat(),
         }
     except Exception as e:
         from datetime import datetime, timezone
         return {
-            "wallets": [], "aave_positions": {}, "error": str(e),
+            "wallets": [], "aave_positions": {}, "trade_positions": [],
+            "alerts": [], "error": str(e),
             "thresholds": {"warning": 1.5, "critical": 1.2},
-            "timestamp":  datetime.now(timezone.utc).isoformat(),
+            "stop_loss_pct": SENTINEL_STOP_LOSS_PCT,
+            "total_eth": 0.0, "total_token_usd": 0.0,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
 
@@ -935,32 +1122,45 @@ Return max 5 opportunities sorted by momentum_score descending.
 Rules: No transactions, no keys. Analyze LIVE_POOL_DATA only.
 Do NOT use tools, search, or read files.""",
 
-    "sentinel": """You are Sentinel, position monitor of the Vespra DeFi agent swarm.
+    "sentinel": """You are Sentinel, portfolio watchdog of the Vespra DeFi agent swarm.
 You MUST respond with valid JSON only — no prose, no markdown, no explanation.
-Use LIVE_SENTINEL_DATA to assess every wallet returned.
+Use LIVE_SENTINEL_DATA to assess every wallet and position.
 
-Output: a JSON array — one object per wallet (include all wallets, even those with no positions):
-[
-  {
-    "wallet": "0x...",
-    "chain": "string",
-    "balance_eth": float,
-    "positions": [
-      {"protocol": "aave-v3", "health_factor": float, "status": "healthy|warning|critical"}
-    ],
-    "alerts": ["string"],
-    "trigger_dag": "health-monitor-exit" | null
-  }
-]
+Output: a JSON object with this structure:
+{
+  "wallets": [
+    {
+      "wallet": "0x...",
+      "label": "string",
+      "chain": "string",
+      "balance_eth": float,
+      "token_value_usd": float,
+      "positions": [
+        {"protocol": "aave-v3", "health_factor": float, "status": "healthy|warning|critical"}
+      ],
+      "token_positions": [
+        {"symbol": "string", "balance": float, "value_usd": float, "pnl_pct": float, "status": "holding|exit_triggered"}
+      ],
+      "alerts": ["string"],
+      "trigger_dag": "health-monitor-exit" | null
+    }
+  ],
+  "trade_positions": [
+    {"token": "string", "entry_price": float, "current_price": float, "pnl_pct": float, "status": "holding|exit_triggered"}
+  ],
+  "total_portfolio_usd": float,
+  "worst_position": "string|null",
+  "alert_sent": bool,
+  "overall_status": "healthy|warning|critical"
+}
 
-Status rules (use thresholds from LIVE_SENTINEL_DATA.thresholds):
-- healthy:  health_factor >= 1.5
-- warning:  1.2 <= health_factor < 1.5  → add alert string
-- critical: health_factor < 1.2         → add alert string AND set trigger_dag to "health-monitor-exit"
-
-Set trigger_dag to null unless a position is critical.
-Cross-reference LIVE_SENTINEL_DATA.wallets with LIVE_SENTINEL_DATA.aave_positions (keyed by lowercase address).
-If a wallet has no Aave positions, set positions to [] and trigger_dag to null.
+Rules:
+- Set health factor status: healthy ≥1.5, warning 1.2-1.5, critical <1.2
+- Set trigger_dag to "health-monitor-exit" for any critical position
+- Set overall_status to "critical" if ANY wallet has a critical position or alert
+- worst_position = label of wallet with lowest health_factor or highest loss
+- total_portfolio_usd = sum of all ETH value + token_value_usd (use $3000/ETH as rough estimate if no price data)
+- alert_sent = true if LIVE_SENTINEL_DATA.alerts is non-empty
 
 Rules: No transactions, no keys. Analyze LIVE_SENTINEL_DATA only.
 Do NOT use tools, search, or read files.""",
@@ -1992,6 +2192,21 @@ if __name__ == "__main__":
     log.info(f"Vespra Worker Gateway on {HOST}:{PORT}")
     log.info(f"Agents: {', '.join(AGENTS.keys())}")
     log.info(f"LLM provider: {LLM_PROVIDER} / model: {_RESOLVED_MODEL}")
+    # Sentinel background polling thread
+    def _sentinel_poll_loop():
+        log.info(f"Sentinel poll loop started (interval={SENTINEL_POLL_INTERVAL}s)")
+        while True:
+            try:
+                time.sleep(SENTINEL_POLL_INTERVAL)
+                log.info("Sentinel poll: auto-enqueueing watchdog job")
+                enqueue_job("sentinel", "monitor all wallets", dag_run_id="auto-poll", step="watchdog")
+            except Exception as e:
+                log.error(f"Sentinel poll loop error: {e}")
+
+    _sentinel_thread = threading.Thread(target=_sentinel_poll_loop, daemon=True, name="sentinel-poll")
+    _sentinel_thread.start()
+    log.info(f"Sentinel poll thread started (every {SENTINEL_POLL_INTERVAL}s)")
+
     if QUEUE_ENABLED:
         _worker_thread = threading.Thread(target=_queue_worker, daemon=True, name="queue-worker")
         _worker_thread.start()
