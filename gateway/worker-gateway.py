@@ -15,6 +15,27 @@ KEYMASTER = "http://127.0.0.1:9100"
 KEYMASTER_TOKEN = os.environ.get("VESPRA_KM_AUTH_TOKEN", "")
 TIMEOUT = 120
 
+# ─── LLM Provider config ──────────────────────────────────────────
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "deepseek").strip().lower()
+LLM_MODEL    = os.environ.get("LLM_MODEL", "").strip()
+LLM_API_KEY  = os.environ.get("LLM_API_KEY", "").strip()
+
+# Provider → default model mapping
+_PROVIDER_DEFAULTS = {
+    "deepseek":  "deepseek-chat",
+    "openai":    "gpt-4o-mini",
+    "anthropic": "claude-haiku-4-5-20251001",
+}
+_SUPPORTED_PROVIDERS = set(_PROVIDER_DEFAULTS.keys())
+
+if LLM_PROVIDER not in _SUPPORTED_PROVIDERS:
+    import sys
+    print(f"[FATAL] LLM_PROVIDER='{LLM_PROVIDER}' is not supported. Choose from: {sorted(_SUPPORTED_PROVIDERS)}", flush=True)
+    sys.exit(1)
+
+# Resolve model: env override > provider default
+_RESOLVED_MODEL = LLM_MODEL or _PROVIDER_DEFAULTS[LLM_PROVIDER]
+
 def pre_fetch_scout():
     """Fetch live pool data from DeFi Llama for Scout agent context."""
     try:
@@ -1438,8 +1459,15 @@ def call_agent(agent_key, message):
     full_msg = f"[SYSTEM] {identity}{coordinator_context}{scout_context}{risk_context}{trader_context}{yield_context}{sentinel_context}{sniper_context}{launcher_context}\n\n[TASK] {message}" if identity else message
     session = f"v{int(time.time())}"
 
-    cmd = ["sudo", "-u", agent["user"], f"HOME={agent['home']}", NULLCLAW, "agent", "-m", full_msg, "-s", session]
-    log.info(f"-> {agent_key} [{session}]: {message[:120]}")
+    cmd = [
+        "sudo", "-u", agent["user"], f"HOME={agent['home']}",
+        NULLCLAW, "agent",
+        "-m", full_msg,
+        "-s", session,
+        "--provider", LLM_PROVIDER,
+        "--model",    _RESOLVED_MODEL,
+    ]
+    log.info(f"-> {agent_key} [{session}] [{LLM_PROVIDER}/{_RESOLVED_MODEL}]: {message[:120]}")
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT, cwd=agent["home"])
@@ -1579,7 +1607,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self._json(200, {"status": "ok", "service": "vespra-gateway", "agents": list(AGENTS.keys())})
+            self._json(200, {
+                "status":   "ok",
+                "service":  "vespra-gateway",
+                "agents":   list(AGENTS.keys()),
+                "provider": LLM_PROVIDER,
+                "model":    _RESOLVED_MODEL,
+            })
+        elif self.path == "/providers":
+            self._json(200, {
+                "active_provider": LLM_PROVIDER,
+                "active_model":    _RESOLVED_MODEL,
+                "supported":       sorted(_SUPPORTED_PROVIDERS),
+                "defaults":        _PROVIDER_DEFAULTS,
+            })
         else:
             self._json(404, {"error": "not found"})
 
@@ -1673,6 +1714,9 @@ if __name__ == "__main__":
     server = HTTPServer((HOST, PORT), Handler)
     log.info(f"Vespra Worker Gateway on {HOST}:{PORT}")
     log.info(f"Agents: {', '.join(AGENTS.keys())}")
+    log.info(f"LLM provider: {LLM_PROVIDER} / model: {_RESOLVED_MODEL}")
+    if not LLM_API_KEY:
+        log.warning("LLM_API_KEY not set in environment — agents will use per-workspace key from nullclaw config")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
