@@ -395,6 +395,101 @@ def pre_fetch_sniper(pool_address, chain="base"):
         }
 
 
+# DAG definitions: map goal keywords to ordered agent pipelines
+COORDINATOR_DAGS = {
+    "yield_rotate": ["scout", "risk", "yield"],
+    "new_pool":     ["sniper", "risk", "trader"],
+    "monitor":      ["sentinel", "yield"],
+    "full_scan":    ["scout", "risk", "sentinel", "yield"],
+    "health_exit":  ["sentinel", "executor"],
+}
+
+def orchestrate_dag(goal, message):
+    """Run a named DAG: call agents in order, feed each result into the next context.
+
+    Returns dict with dag_name, steps (list of {agent, status, summary}),
+    trigger_dag, and final_context string for the Coordinator LLM.
+    """
+    from datetime import datetime, timezone
+
+    # Detect which DAG to run from goal keywords
+    dag_name = None
+    goal_lower = goal.lower()
+    for key in COORDINATOR_DAGS:
+        if key.replace("_", " ") in goal_lower or key in goal_lower:
+            dag_name = key
+            break
+    # Fallback: infer from keywords
+    if not dag_name:
+        if any(w in goal_lower for w in ["yield", "rotate", "apy", "lend"]):
+            dag_name = "yield_rotate"
+        elif any(w in goal_lower for w in ["new pool", "snipe", "entry"]):
+            dag_name = "new_pool"
+        elif any(w in goal_lower for w in ["monitor", "health", "sentinel"]):
+            dag_name = "monitor"
+        else:
+            dag_name = "full_scan"
+
+    agent_sequence = COORDINATOR_DAGS[dag_name]
+    log.info(f"Coordinator DAG '{dag_name}': {' -> '.join(agent_sequence)}")
+
+    steps = []
+    context_chain = message  # Each agent receives accumulated context
+    trigger_dag = None
+
+    for agent_key in agent_sequence:
+        log.info(f"  DAG step: {agent_key}")
+        result = call_agent(agent_key, context_chain)
+        status = result.get("status", "failed")
+        raw_response = result.get("response", "")
+
+        # Try to parse response for summary extraction
+        summary = raw_response
+        try:
+            parsed = json.loads(raw_response) if isinstance(raw_response, str) else raw_response
+            # Extract the most useful summary field per agent type
+            if agent_key == "scout" and isinstance(parsed, dict):
+                opps = parsed.get("opportunities", [])
+                summary = f"{len(opps)} opportunities found; top: {opps[0].get('protocol','?')} {opps[0].get('apy',0)}% APY" if opps else "no opportunities"
+            elif agent_key == "risk" and isinstance(parsed, dict):
+                summary = f"score={parsed.get('score','?')} gate_pass={parsed.get('gate_pass','?')}"
+            elif agent_key == "sentinel" and isinstance(parsed, list):
+                criticals = [w for w in parsed if any(p.get("status") == "critical" for p in w.get("positions", []))]
+                if criticals:
+                    trigger_dag = "health-monitor-exit"
+                summary = f"{len(parsed)} wallets checked; {len(criticals)} critical"
+            elif agent_key == "yield" and isinstance(parsed, dict):
+                summary = f"action={parsed.get('recommended_action','?')} asset={parsed.get('target_asset','?')} executor_ready={parsed.get('executor_ready','?')}"
+            elif agent_key == "sniper" and isinstance(parsed, dict):
+                summary = f"status={parsed.get('status','?')} entry_recommended={parsed.get('entry_recommended','?')}"
+            elif agent_key == "trader" and isinstance(parsed, dict):
+                summary = f"executor_ready={parsed.get('executor_ready','?')} price_impact={parsed.get('price_impact','?')}"
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            pass
+
+        steps.append({
+            "agent":    agent_key,
+            "status":   status,
+            "summary":  summary[:300],
+        })
+
+        # Abort DAG on agent failure
+        if status != "ok":
+            log.warning(f"  DAG step {agent_key} failed — aborting")
+            break
+
+        # Feed this result into the next agent's context
+        context_chain = f"{message}\n\nPREVIOUS AGENT OUTPUT ({agent_key}):\n{raw_response[:1000]}"
+
+    return {
+        "dag_name":      dag_name,
+        "steps":         steps,
+        "trigger_dag":   trigger_dag,
+        "final_context": context_chain,
+        "timestamp":     datetime.now(timezone.utc).isoformat(),
+    }
+
+
 AGENTS = {
     "coordinator": {"user": "nc-coordinator", "home": "/opt/nc-coordinator"},
     "scout":       {"user": "nc-scout",       "home": "/opt/nc-scout"},
@@ -409,9 +504,27 @@ AGENTS = {
 
 IDENTITIES = {
     "coordinator": """You are Argos, Coordinator of the Vespra DeFi agent swarm.
-Synthesize data from other agents into a concise Telegram report for @dr_bonkers.
-Output: Plain text, <1500 chars. Lead with top finding. Include next steps.
-Rules: No transactions, no keys, no fabrication. Summarize only what you receive.
+You receive a DAG execution report and produce a concise summary for @dr_bonkers.
+
+You MUST respond with valid JSON only — no prose, no markdown, no explanation.
+
+Output schema:
+{
+  "report": "string (max 500 chars — lead with top finding, include next action)",
+  "dag_name": "string",
+  "steps_completed": int,
+  "trigger_dag": "string|null",
+  "alerts": ["string"],
+  "next_action": "string (one clear instruction for the operator)",
+  "status": "ok|warning|critical"
+}
+
+status rules:
+- critical: any trigger_dag is set OR any step shows a critical health factor
+- warning: any agent returned executor_ready=false or gate_pass=false
+- ok: all steps completed cleanly
+
+Rules: No transactions, no keys. Summarize DAG_REPORT only.
 Do NOT use tools, search, or read files.""",
 
     "scout": """You are Scout, yield discovery agent of the Vespra DeFi swarm.
@@ -1076,6 +1189,12 @@ def call_agent(agent_key, message):
 
     identity = IDENTITIES.get(agent_key, "")
 
+    # Coordinator: orchestrate DAG before calling LLM summarizer
+    coordinator_context = ""
+    if agent_key == "coordinator":
+        dag_result = orchestrate_dag(message, message)
+        coordinator_context = f"\n\nDAG_REPORT:\n{json.dumps(dag_result)}"
+
     # Scout: inject live DeFi Llama pool data before the user message
     scout_context = ""
     if agent_key == "scout":
@@ -1173,7 +1292,7 @@ def call_agent(agent_key, message):
             risk_data = pre_fetch_risk(protocol_name)
             risk_context = f"\n\nLIVE_PROTOCOL_DATA:\n{json.dumps(risk_data)}"
 
-    full_msg = f"[SYSTEM] {identity}{scout_context}{risk_context}{trader_context}{yield_context}{sentinel_context}{sniper_context}\n\n[TASK] {message}" if identity else message
+    full_msg = f"[SYSTEM] {identity}{coordinator_context}{scout_context}{risk_context}{trader_context}{yield_context}{sentinel_context}{sniper_context}\n\n[TASK] {message}" if identity else message
     session = f"v{int(time.time())}"
 
     cmd = ["sudo", "-u", agent["user"], f"HOME={agent['home']}", NULLCLAW, "agent", "-m", full_msg, "-s", session]
@@ -1265,6 +1384,20 @@ def call_agent(agent_key, message):
                     return {"response": json.dumps({"error": "invalid_schema", "missing": list(missing), "raw": response[:500]}), "status": "ok", "agent": agent_key}
                 if parsed.get("entry_recommended"):
                     log.warning(f"SNIPER ENTRY: {parsed.get('pool', {}).get('pool_address', '?')[:12]}... — {parsed.get('pool', {}).get('pair', '?')} score={parsed.get('risk_assessment', {}).get('score', '?')}")
+                return {"response": json.dumps(parsed), "status": "ok", "agent": agent_key}
+            except (json.JSONDecodeError, ValueError):
+                return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
+
+        # Coordinator post-processing: validate JSON schema
+        if agent_key == "coordinator" and response:
+            try:
+                parsed = extract_json(response)
+                required_keys = {"report", "dag_name", "steps_completed", "trigger_dag", "alerts", "next_action", "status"}
+                missing = required_keys - set(parsed.keys())
+                if missing:
+                    return {"response": json.dumps({"error": "invalid_schema", "missing": list(missing), "raw": response[:500]}), "status": "ok", "agent": agent_key}
+                if parsed.get("status") == "critical" or parsed.get("trigger_dag"):
+                    log.warning(f"COORDINATOR CRITICAL: trigger_dag={parsed.get('trigger_dag')} alerts={parsed.get('alerts')}")
                 return {"response": json.dumps(parsed), "status": "ok", "agent": agent_key}
             except (json.JSONDecodeError, ValueError):
                 return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
