@@ -298,6 +298,103 @@ def pre_fetch_sentinel(chain="base"):
         }
 
 
+ALCHEMY_WEBHOOK_SECRET = os.environ.get("ALCHEMY_WEBHOOK_SECRET", "")
+
+# Uniswap V3 factory addresses by chain_id
+UNISWAP_V3_FACTORIES = {
+    8453:  "0x33128a8fc17869897dce68ed026d694621f6fdfd",  # Base
+    1:     "0x1F98431c8aD98523631AE4a59f267346ea31F984",  # Ethereum
+    42161: "0x1F98431c8aD98523631AE4a59f267346ea31F984",  # Arbitrum
+}
+
+CHAIN_ID_MAP = {
+    "base":     8453,
+    "ethereum": 1,
+    "arbitrum": 42161,
+}
+
+
+def _verify_alchemy_signature(raw_body: bytes, signature: str) -> bool:
+    """Verify Alchemy webhook HMAC-SHA256 signature."""
+    import hmac, hashlib
+    if not ALCHEMY_WEBHOOK_SECRET:
+        log.warning("ALCHEMY_WEBHOOK_SECRET not set — skipping signature verification")
+        return True  # Allow through but warn; tighten once secret is configured
+    expected = hmac.new(
+        ALCHEMY_WEBHOOK_SECRET.encode(),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature.lower().replace("sha256=", ""))
+
+
+def pre_fetch_sniper(pool_address, chain="base"):
+    """Fetch live pool data from DeFi Llama for a specific pool address."""
+    from datetime import datetime, timezone
+    try:
+        # Search DeFi Llama yields for this pool address
+        req = Request("https://yields.llama.fi/pools", method="GET")
+        with urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        pools = data.get("data", [])
+
+        chain_name = {"base": "Base", "ethereum": "Ethereum", "arbitrum": "Arbitrum"}.get(chain, "Base")
+        pool_addr_lower = pool_address.lower()
+
+        # Try to match by pool address
+        matched = next(
+            (p for p in pools if (p.get("pool", "") or "").lower() == pool_addr_lower),
+            None,
+        )
+
+        # Fallback: find newest pools on this chain from known DEXes
+        if not matched:
+            candidates = [
+                p for p in pools
+                if p.get("chain") == chain_name
+                and p.get("project") in ("uniswap-v3", "aerodrome", "camelot")
+            ]
+            candidates.sort(key=lambda p: p.get("tvlUsd") or 0)
+            matched = candidates[0] if candidates else None
+
+        if matched:
+            return {
+                "pool_address":    pool_address,
+                "token0":          matched.get("symbol", "").split("-")[0] if "-" in matched.get("symbol", "") else matched.get("symbol", ""),
+                "token1":          matched.get("symbol", "").split("-")[1] if "-" in matched.get("symbol", "") else "WETH",
+                "chain":           chain,
+                "tvl_usd":         int(matched.get("tvlUsd") or 0),
+                "apy":             round(matched.get("apy") or 0.0, 4),
+                "volume_24h":      int(matched.get("volumeUsd1d") or 0),
+                "il_risk":         matched.get("ilRisk", "unknown"),
+                "protocol":        matched.get("project", "uniswap-v3"),
+                "liquidity_lock":  False,  # Cannot determine from DeFi Llama — Sniper LLM scores this
+                "timestamp":       datetime.now(timezone.utc).isoformat(),
+            }
+
+        # No match found — return minimal context so LLM can still reason
+        return {
+            "pool_address": pool_address,
+            "chain":        chain,
+            "tvl_usd":      0,
+            "apy":          0.0,
+            "volume_24h":   0,
+            "protocol":     "unknown",
+            "liquidity_lock": False,
+            "note":         "Pool not yet indexed by DeFi Llama",
+            "timestamp":    datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        from datetime import datetime, timezone
+        return {
+            "pool_address": pool_address,
+            "chain":        chain,
+            "tvl_usd":      0,
+            "error":        str(e),
+            "timestamp":    datetime.now(timezone.utc).isoformat(),
+        }
+
+
 AGENTS = {
     "coordinator": {"user": "nc-coordinator", "home": "/opt/nc-coordinator"},
     "scout":       {"user": "nc-scout",       "home": "/opt/nc-scout"},
@@ -486,27 +583,48 @@ Rules: No transactions, no keys. Analyze LIVE_MARKET_DATA only.
 Do NOT use tools, search, read files, or make HTTP requests.""",
 
     "sniper": """You are Sniper, the new pool detector of the Vespra DeFi agent swarm.
-You evaluate new liquidity pools for early entry opportunities using your knowledge.
+You MUST respond with valid JSON only — no prose, no markdown, no explanation.
+Use LIVE_POOL_DATA to evaluate the pool.
 
-Return ONLY valid JSON:
+Output schema:
 {
   "status": "opportunity|pass|risky",
   "pool": {
-    "dex": "uniswap_v3|aerodrome|camelot",
-    "chain": "...", "pair": "TOKEN/WETH", "pool_address": "0x...",
-    "created_at": "...", "tvl_usd": "...", "volume_24h": "...",
-    "token_verified": true
+    "dex": "uniswap_v3|aerodrome|camelot|unknown",
+    "chain": "string",
+    "pair": "TOKEN0/TOKEN1",
+    "pool_address": "0x...",
+    "tvl_usd": int,
+    "volume_24h": int,
+    "apy": float,
+    "liquidity_lock": bool
   },
-  "risk_assessment": {"score": "LOW|MEDIUM|HIGH", "factors": []},
+  "risk_assessment": {
+    "score": "LOW|MEDIUM|HIGH|CRITICAL",
+    "factors": ["string"]
+  },
   "entry": {
-    "action": "swap", "amount_eth": "...",
-    "max_slippage_bps": 100,
-    "executor_instruction": "..."
-  }
+    "action": "swap|pass",
+    "amount_eth": "string",
+    "max_slippage_bps": int,
+    "executor_instruction": "string"
+  },
+  "entry_recommended": bool,
+  "executor_ready": bool
 }
 
-Minimum criteria: TVL >$50k, token verified, liquidity locked, risk <=MEDIUM.
-Do NOT use tools, search, read files, or make HTTP requests. Use training knowledge only.""",
+Entry criteria — ALL must pass for entry_recommended=true:
+- tvl_usd > 50000
+- risk_assessment.score is LOW or MEDIUM
+- apy > 5.0
+- status is "opportunity"
+
+executor_ready = true ONLY when entry_recommended = true AND action = "swap".
+Default amount_eth to "0.05" for new pool entries unless context specifies otherwise.
+When in doubt, set status="risky" and entry_recommended=false. Be conservative.
+
+Rules: No transactions, no keys. Analyze LIVE_POOL_DATA only.
+Do NOT use tools, search, or read files.""",
 
     "launcher": """You are Launcher, the token deployment specialist for the Vespra DeFi swarm.
 
@@ -1016,6 +1134,22 @@ def call_agent(agent_key, message):
         sentinel_data = pre_fetch_sentinel(chain=s_chain)
         sentinel_context = f"\n\nLIVE_SENTINEL_DATA:\n{json.dumps(sentinel_data)}"
 
+    # Sniper: inject live pool data before the user message
+    sniper_context = ""
+    if agent_key == "sniper":
+        # Extract pool address from message if present
+        pool_match = re.search(r"0x[0-9a-fA-F]{40}", message)
+        pool_address = pool_match.group(0) if pool_match else "0x0000000000000000000000000000000000000000"
+        msg_lower = message.lower()
+        if "ethereum" in msg_lower:
+            s_chain = "ethereum"
+        elif "arbitrum" in msg_lower:
+            s_chain = "arbitrum"
+        else:
+            s_chain = "base"
+        pool_data = pre_fetch_sniper(pool_address, chain=s_chain)
+        sniper_context = f"\n\nLIVE_POOL_DATA:\n{json.dumps(pool_data)}"
+
     # Risk: inject live DeFi Llama protocol data before the user message
     risk_context = ""
     if agent_key == "risk":
@@ -1039,7 +1173,7 @@ def call_agent(agent_key, message):
             risk_data = pre_fetch_risk(protocol_name)
             risk_context = f"\n\nLIVE_PROTOCOL_DATA:\n{json.dumps(risk_data)}"
 
-    full_msg = f"[SYSTEM] {identity}{scout_context}{risk_context}{trader_context}{yield_context}{sentinel_context}\n\n[TASK] {message}" if identity else message
+    full_msg = f"[SYSTEM] {identity}{scout_context}{risk_context}{trader_context}{yield_context}{sentinel_context}{sniper_context}\n\n[TASK] {message}" if identity else message
     session = f"v{int(time.time())}"
 
     cmd = ["sudo", "-u", agent["user"], f"HOME={agent['home']}", NULLCLAW, "agent", "-m", full_msg, "-s", session]
@@ -1121,6 +1255,20 @@ def call_agent(agent_key, message):
             except (json.JSONDecodeError, ValueError):
                 return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
 
+        # Sniper post-processing: validate JSON schema
+        if agent_key == "sniper" and response:
+            try:
+                parsed = extract_json(response)
+                required_keys = {"status", "pool", "risk_assessment", "entry", "entry_recommended", "executor_ready"}
+                missing = required_keys - set(parsed.keys())
+                if missing:
+                    return {"response": json.dumps({"error": "invalid_schema", "missing": list(missing), "raw": response[:500]}), "status": "ok", "agent": agent_key}
+                if parsed.get("entry_recommended"):
+                    log.warning(f"SNIPER ENTRY: {parsed.get('pool', {}).get('pool_address', '?')[:12]}... — {parsed.get('pool', {}).get('pair', '?')} score={parsed.get('risk_assessment', {}).get('score', '?')}")
+                return {"response": json.dumps(parsed), "status": "ok", "agent": agent_key}
+            except (json.JSONDecodeError, ValueError):
+                return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
+
         return {"response": response, "status": "ok", "agent": agent_key}
     except subprocess.TimeoutExpired:
         return {"error": f"timeout after {TIMEOUT}s", "status": "failed"}
@@ -1149,8 +1297,9 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         if not length:
             return self._json(400, {"error": "empty body"})
+        raw_body = self.rfile.read(length)
         try:
-            body = json.loads(self.rfile.read(length))
+            body = json.loads(raw_body)
         except json.JSONDecodeError:
             return self._json(400, {"error": "invalid json"})
 
@@ -1183,6 +1332,47 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"error": "missing message"})
             results = {k: call_agent(k, message) for k in targets if k in AGENTS}
             self._json(200, {"results": results})
+
+        elif self.path == "/webhooks/alchemy":
+            # Use raw_body already read above for HMAC verification
+            sig_header = self.headers.get("x-alchemy-signature", "")
+            if not _verify_alchemy_signature(raw_body, sig_header):
+                log.warning("Alchemy webhook: invalid signature — rejected")
+                return self._json(401, {"error": "invalid signature"})
+
+            # Extract pool creation events from Alchemy GRAPHQL webhook payload
+            events = body.get("event", {}).get("data", {}).get("block", {}).get("logs", [])
+            if not events:
+                # Also handle activity webhook format
+                events = body.get("event", {}).get("activity", [])
+
+            log.info(f"Alchemy webhook: {len(events)} event(s) received")
+            triggered = []
+
+            for event in events:
+                # Try to extract pool address from topics or data
+                topics = event.get("topics", [])
+                # Uniswap V3 PoolCreated: topic[0] = event sig, topic[3] = pool address (padded)
+                pool_address = None
+                if len(topics) >= 4:
+                    raw_addr = topics[3]
+                    if raw_addr and len(raw_addr) >= 42:
+                        pool_address = "0x" + raw_addr[-40:]
+                # Fallback: check "address" field (the factory address fired the event)
+                if not pool_address:
+                    pool_address = event.get("address", "")
+
+                if not pool_address or not re.match(r"^0x[0-9a-fA-F]{40}$", pool_address):
+                    continue
+
+                chain_str = body.get("event", {}).get("network", "BASE_MAINNET")
+                chain = "base" if "BASE" in chain_str else "ethereum" if "ETH" in chain_str else "arbitrum" if "ARB" in chain_str else "base"
+
+                log.info(f"Alchemy webhook: new pool detected {pool_address[:12]}... on {chain}")
+                result = call_agent("sniper", f"Score new pool {pool_address} on {chain}")
+                triggered.append({"pool_address": pool_address, "chain": chain, "result": result})
+
+            return self._json(200, {"status": "ok", "triggered": len(triggered), "results": triggered})
 
         else:
             self._json(404, {"error": "not found"})
