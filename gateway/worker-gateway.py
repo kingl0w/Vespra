@@ -131,6 +131,65 @@ def pre_fetch_trader(token_in, token_out, amount_wei, chain_id=8453):
         return {"error": str(e), "amount_out": 0, "price_impact": 0, "gas_estimate": 0}
 
 
+CHAIN_MAP = {1: "Ethereum", 8453: "Base", 42161: "Arbitrum"}
+
+def pre_fetch_yield(chain_id=1):
+    """Fetch live Aave V3 market rates and gas price for Yield agent context."""
+    try:
+        from datetime import datetime, timezone
+        chain_name = CHAIN_MAP.get(chain_id, "Ethereum")
+
+        # Fetch Aave V3 pools from DeFi Llama yields API
+        req = Request("https://yields.llama.fi/pools", method="GET")
+        with urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        pools = data.get("data", [])
+        aave_pools = [
+            p for p in pools
+            if p.get("project") == "aave-v3" and p.get("chain") == chain_name
+        ]
+
+        # Fetch ETH gas price
+        gas_price_gwei = 0.0
+        try:
+            gas_req = Request("https://api.etherscan.io/api?module=gastracker&action=gasoracle", method="GET")
+            with urlopen(gas_req, timeout=5) as gas_resp:
+                gas_data = json.loads(gas_resp.read())
+            gas_price_gwei = float(gas_data.get("result", {}).get("ProposeGasPrice", 0))
+        except Exception:
+            pass
+
+        # Build market list with net APY
+        markets = []
+        for p in aave_pools:
+            supply_apy = p.get("apy") or 0.0
+            borrow_apy = p.get("apyBorrow") or 0.0
+            tvl_usd = int(p.get("tvlUsd") or 0)
+            # Net APY: supply APY minus $50 gas cost amortized over 30 days
+            # Assume minimum $1000 deposit to calculate gas drag as percentage
+            gas_cost_annualized = (50.0 / 30) * 365  # ~$608/yr
+            deposit_size = max(tvl_usd / 1000, 1000)  # rough per-user estimate, floor $1000
+            gas_drag_pct = (gas_cost_annualized / deposit_size) * 100
+            net_apy = round(supply_apy - gas_drag_pct, 4)
+            markets.append({
+                "asset": p.get("symbol", ""),
+                "chain": chain_name,
+                "supply_apy": round(supply_apy, 4),
+                "borrow_apy": round(borrow_apy, 4),
+                "net_apy": net_apy,
+                "tvl_usd": tvl_usd,
+            })
+        markets.sort(key=lambda m: m["net_apy"], reverse=True)
+
+        return {
+            "markets": markets[:20],
+            "gas_price_gwei": gas_price_gwei,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        return {"markets": [], "gas_price_gwei": 0, "error": str(e), "timestamp": ""}
+
+
 AGENTS = {
     "coordinator": {"user": "nc-coordinator", "home": "/opt/nc-coordinator"},
     "scout":       {"user": "nc-scout",       "home": "/opt/nc-scout"},
@@ -275,25 +334,25 @@ Rules: Never execute TXs directly — always output instructions for Executor.
 Do NOT use tools, search, read files, or make HTTP requests.""",
 
     "yield": """You are Yield, the lending protocol manager of the Vespra DeFi agent swarm.
-You manage positions in Aave, Compound, and similar protocols using your training knowledge.
+You MUST respond with valid JSON only. No prose, no markdown. Use LIVE_MARKET_DATA to recommend the best yield action.
 
-Return ONLY valid JSON — no commentary, no markdown, no explanation:
+Output schema:
 {
-  "status": "ok|warning|critical",
-  "action": "deposit|withdraw|monitor|exit",
-  "protocol": "aave_v3|compound_v3",
-  "chain": "...",
-  "position": {
-    "asset": "...", "amount": "...", "health_factor": null,
-    "supply_apy": "...", "borrow_apy": null
-  },
-  "executor_instruction": "...",
-  "warnings": []
+  "positions": [{"protocol": "string", "asset": "string", "supplied": "string", "borrowed": "string", "health_factor": "string", "net_apy": float}],
+  "recommended_action": "deposit|withdraw|rebalance|hold",
+  "target_protocol": "string",
+  "target_asset": "string",
+  "amount": "string",
+  "executor_ready": bool,
+  "reasoning": "string"
 }
+
+executor_ready = true ONLY when recommended_action is "deposit" or "withdraw". Otherwise false.
 
 Health factor thresholds: >2.0 healthy, 1.5-2.0 LOW, 1.2-1.5 MEDIUM, <1.2 CRITICAL (exit).
 Conservative by default. When in doubt, recommend withdrawal.
-Do NOT use tools, search, read files, or make HTTP requests. Use training knowledge only.""",
+Rules: No transactions, no keys. Analyze LIVE_MARKET_DATA only.
+Do NOT use tools, search, read files, or make HTTP requests.""",
 
     "sniper": """You are Sniper, the new pool detector of the Vespra DeFi agent swarm.
 You evaluate new liquidity pools for early entry opportunities using your knowledge.
@@ -798,6 +857,21 @@ def call_agent(agent_key, message):
             quote_data = pre_fetch_trader(t_in, t_out, amount_wei)
             trader_context = f"\n\nLIVE_QUOTE_DATA:\n{json.dumps(quote_data)}"
 
+    # Yield: inject live Aave market data before the user message
+    yield_context = ""
+    if agent_key == "yield":
+        from datetime import datetime, timezone
+        # Detect chain from message
+        msg_lower = message.lower()
+        if "base" in msg_lower:
+            chain_id = 8453
+        elif "arbitrum" in msg_lower:
+            chain_id = 42161
+        else:
+            chain_id = 1  # default to Ethereum
+        market_data = pre_fetch_yield(chain_id)
+        yield_context = f"\n\nLIVE_MARKET_DATA:\n{json.dumps(market_data)}"
+
     # Risk: inject live DeFi Llama protocol data before the user message
     risk_context = ""
     if agent_key == "risk":
@@ -821,7 +895,7 @@ def call_agent(agent_key, message):
             risk_data = pre_fetch_risk(protocol_name)
             risk_context = f"\n\nLIVE_PROTOCOL_DATA:\n{json.dumps(risk_data)}"
 
-    full_msg = f"[SYSTEM] {identity}{scout_context}{risk_context}{trader_context}\n\n[TASK] {message}" if identity else message
+    full_msg = f"[SYSTEM] {identity}{scout_context}{risk_context}{trader_context}{yield_context}\n\n[TASK] {message}" if identity else message
     session = f"v{int(time.time())}"
 
     cmd = ["sudo", "-u", agent["user"], f"HOME={agent['home']}", NULLCLAW, "agent", "-m", full_msg, "-s", session]
@@ -871,6 +945,16 @@ def call_agent(agent_key, message):
             try:
                 parsed = extract_json(response)
                 if "action" not in parsed or "executor_ready" not in parsed:
+                    return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
+                return {"response": json.dumps(parsed), "status": "ok", "agent": agent_key}
+            except (json.JSONDecodeError, ValueError):
+                return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
+
+        # Yield post-processing: validate JSON schema
+        if agent_key == "yield" and response:
+            try:
+                parsed = extract_json(response)
+                if "recommended_action" not in parsed or "executor_ready" not in parsed:
                     return {"response": json.dumps({"error": "invalid_schema", "raw": response[:500]}), "status": "ok", "agent": agent_key}
                 return {"response": json.dumps(parsed), "status": "ok", "agent": agent_key}
             except (json.JSONDecodeError, ValueError):
