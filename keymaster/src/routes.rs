@@ -16,6 +16,24 @@ use crate::keystore::{WalletInfo, WalletRecord};
 use crate::rpc;
 use crate::state::AppState;
 
+// ─── Treasury Fee Constants ──────────────────────────────────────
+
+/// Hardcoded treasury — swap for prod wallet before mainnet launch, then recompile.
+const TREASURY_ADDRESS: &str = "0x10d2db399137b01a814162d49b1f1ca693747c0a";
+const PERF_FEE_BPS: u64 = 500;       // 500 basis points = 5%
+const MIN_FEE_WEI: u128 = 100_000_000_000_000; // 0.0001 ETH dust threshold
+
+/// Calculate fee in wei using basis points. Returns (fee_wei, net_wei).
+/// Returns (0, amount_wei) if fee is below dust threshold.
+fn calculate_fee(amount_wei: U256) -> (U256, U256) {
+    let fee_wei = amount_wei * U256::from(PERF_FEE_BPS) / U256::from(10_000u64);
+    if fee_wei < U256::from(MIN_FEE_WEI) {
+        return (U256::ZERO, amount_wei);
+    }
+    let net_wei = amount_wei.saturating_sub(fee_wei);
+    (fee_wei, net_wei)
+}
+
 // ─── Health ──────────────────────────────────────────────────────
 
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
@@ -250,8 +268,46 @@ pub async fn send_native(
         }
     };
 
-    // ── Broadcast with exponential backoff retry (3 attempts) ────
+    // ── Treasury fee calculation ─────────────────────────────────
+    let (fee_wei, net_wei) = calculate_fee(value);
+    let fee_wei_str = fee_wei.to_string();
+    let mut fee_tx_hash_str: String = String::new();
+    let mut fee_sent = false;
+
+    // ── Broadcast fee TX (never blocks main TX) ──────────────────
     let mut pk_bytes = crypto::decrypt_key(&wallet.encrypted_key, &state.master_password)?;
+
+    if !fee_wei.is_zero() {
+        tracing::info!(
+            wallet_id = %req.wallet_id,
+            fee_wei = %fee_wei_str,
+            treasury = TREASURY_ADDRESS,
+            "Sending treasury fee"
+        );
+        match rpc::send_native(chain, &pk_bytes, TREASURY_ADDRESS, fee_wei).await {
+            Ok(hash) => {
+                tracing::info!(fee_tx_hash = %hash, fee_wei = %fee_wei_str, "Treasury fee sent");
+                let _ = state.keystore.log_tx(
+                    &req.wallet_id, &wallet.chain, Some(&hash),
+                    "treasury_fee", TREASURY_ADDRESS, &fee_wei_str,
+                    "confirmed", None,
+                );
+                fee_tx_hash_str = hash;
+                fee_sent = true;
+            }
+            Err(e) => {
+                // Fee failure must NEVER block the main TX
+                tracing::warn!(
+                    wallet_id = %req.wallet_id,
+                    error = %e,
+                    "Treasury fee TX failed — continuing with main TX"
+                );
+            }
+        }
+    }
+
+    // ── Broadcast main TX with net amount (after fee) ────────────
+    let send_value = if fee_sent { net_wei } else { value };
     let max_attempts = 3u32;
     let mut last_error = String::new();
     let mut attempts = 0u32;
@@ -259,7 +315,7 @@ pub async fn send_native(
     let mut result = Ok(String::new());
     for attempt in 1..=max_attempts {
         attempts = attempt;
-        result = rpc::send_native(chain, &pk_bytes, &req.to, value).await;
+        result = rpc::send_native(chain, &pk_bytes, &req.to, send_value).await;
         match &result {
             Ok(_) => break,
             Err(e) => {
@@ -285,6 +341,13 @@ pub async fn send_native(
     }
     crypto::zeroize_bytes(&mut pk_bytes);
 
+    // Build fee_tx_hash as null or string for JSON response
+    let fee_tx_json: Value = if fee_sent {
+        Value::String(fee_tx_hash_str)
+    } else {
+        Value::Null
+    };
+
     match result {
         Ok(tx_hash) => {
             state.keystore.log_tx(
@@ -303,6 +366,8 @@ pub async fn send_native(
                 "simulation_result": simulation_result,
                 "revert_reason": revert_reason,
                 "attempts": attempts,
+                "fee_tx_hash": fee_tx_json,
+                "fee_wei": fee_wei_str,
             })))
         }
         Err(e) => {
