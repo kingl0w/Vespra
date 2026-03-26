@@ -381,6 +381,15 @@ SNIPER_MAX_ENTRY_ETH      = float(os.environ.get("SNIPER_MAX_ENTRY_ETH", "0.05")
 SNIPER_MIN_TVL            = int(os.environ.get("SNIPER_MIN_TVL", "50000"))
 SNIPER_EXIT_TVL_DROP_PCT  = float(os.environ.get("SNIPER_EXIT_TVL_DROP_PCT", "30.0"))
 
+# ─── Trade Up Loop config ─────────────────────────────────────────
+TRADE_UP_ENABLED             = os.environ.get("TRADE_UP_ENABLED", "false").lower() == "true"
+TRADE_UP_MAX_ETH             = float(os.environ.get("TRADE_UP_MAX_ETH", "0.02"))
+TRADE_UP_MIN_GAIN_PCT        = float(os.environ.get("TRADE_UP_MIN_GAIN_PCT", "0.5"))
+TRADE_UP_CYCLE_INTERVAL_SEC  = int(os.environ.get("TRADE_UP_CYCLE_INTERVAL_SEC", "300"))
+TRADE_UP_MAX_CYCLES          = int(os.environ.get("TRADE_UP_MAX_CYCLES", "0"))
+TRADE_UP_COMPOUND            = os.environ.get("TRADE_UP_COMPOUND", "true").lower() == "true"
+TRADE_UP_STOP_LOSS_PCT       = float(os.environ.get("TRADE_UP_STOP_LOSS_PCT", "5.0"))
+
 
 def _fetch_aave_health_factors(addresses, chain="base"):
     subgraph_url = AAVE_V3_SUBGRAPHS.get(chain)
@@ -1355,6 +1364,200 @@ def execute_sniper_entry(
 
     _log_sniper_entry(entry)
     return entry
+
+
+# ─── Trade Up Loop helpers ────────────────────────────────────────
+
+def execute_trade_up_cycle(wallet_id: str, cycle_num: int, capital_eth: float) -> dict:
+    """Single Trade Up cycle: Scout→Risk→Sentinel→Trader→Executor→compound.
+
+    All agent calls are synchronous (call_agent returns dict).
+    Returns dict with status, new_capital_eth, and optional gain/tx info.
+    """
+    # 1. Scout — momentum opportunities
+    scout_result = call_agent("scout", f"Find momentum opportunities for wallet {wallet_id} mode=momentum")
+    try:
+        scout_parsed = json.loads(scout_result.get("response", "{}")) if isinstance(scout_result.get("response"), str) else scout_result.get("response", {})
+    except (json.JSONDecodeError, TypeError):
+        scout_parsed = {}
+
+    opportunities = scout_parsed.get("opportunities", [])
+    if not opportunities:
+        return {"status": "hold", "reason": "no_momentum_opportunities", "new_capital_eth": capital_eth}
+
+    best = max(opportunities, key=lambda x: x.get("momentum_score", 0))
+    if best.get("momentum_score", 0) < 0.6:
+        return {"status": "hold", "reason": "momentum_below_threshold", "new_capital_eth": capital_eth}
+
+    # 2. Risk gate
+    token_address = best.get("token_address", best.get("pool", ""))
+    risk_result = call_agent("risk", f"Analyze risk for token {token_address} on {best.get('chain', 'base')}")
+    try:
+        risk_parsed = json.loads(risk_result.get("response", "{}")) if isinstance(risk_result.get("response"), str) else risk_result.get("response", {})
+    except (json.JSONDecodeError, TypeError):
+        risk_parsed = {}
+
+    risk_score = risk_parsed.get("risk_assessment", {}).get("score", "HIGH")
+    if risk_score == "HIGH":
+        return {"status": "hold", "reason": "risk_gate_blocked", "new_capital_eth": capital_eth}
+
+    # 3. Sentinel stop-loss check
+    sentinel_result = call_agent("sentinel", f"Check positions for wallet {wallet_id}")
+    try:
+        sentinel_parsed = json.loads(sentinel_result.get("response", "{}")) if isinstance(sentinel_result.get("response"), str) else sentinel_result.get("response", {})
+    except (json.JSONDecodeError, TypeError):
+        sentinel_parsed = {}
+
+    if sentinel_parsed.get("stop_loss_triggered", False):
+        return {"status": "exit", "reason": "stop_loss_triggered", "new_capital_eth": capital_eth}
+
+    # 4. Trader — TRADE_UP_MODE quote
+    amount_wei = str(int(capital_eth * 1e18))
+    trader_msg = json.dumps({
+        "mode": "trade_up",
+        "token_in": "0x4200000000000000000000000000000000000006",
+        "token_out": token_address,
+        "amount_wei": amount_wei,
+        "momentum_score": best.get("momentum_score"),
+        "risk_score": risk_score,
+        "sentinel_data": sentinel_parsed,
+        "capital_eth": capital_eth,
+        "TRADE_UP_MIN_GAIN_PCT": TRADE_UP_MIN_GAIN_PCT,
+        "TRADE_UP_MAX_ETH": TRADE_UP_MAX_ETH,
+    })
+    trader_result = call_agent("trader", trader_msg)
+    try:
+        trader_parsed = json.loads(trader_result.get("response", "{}")) if isinstance(trader_result.get("response"), str) else trader_result.get("response", {})
+    except (json.JSONDecodeError, TypeError):
+        trader_parsed = {}
+
+    action = trader_parsed.get("action", "hold")
+    if action != "swap":
+        return {"status": action, "reason": trader_parsed.get("reasoning", "trader declined"), "new_capital_eth": capital_eth}
+
+    expected_gain = float(trader_parsed.get("expected_gain_pct", 0))
+    if expected_gain < TRADE_UP_MIN_GAIN_PCT:
+        return {"status": "hold", "reason": f"gain {expected_gain}% below min {TRADE_UP_MIN_GAIN_PCT}%", "new_capital_eth": capital_eth}
+
+    # 5. Queue for approval (no auto-execute without explicit approval flow)
+    r = _redis_client()
+    approval_entry = {
+        "type": "trade_up", "wallet_id": wallet_id, "cycle": cycle_num,
+        "action": trader_parsed, "timestamp": time.time(),
+    }
+
+    if not TRADE_UP_ENABLED:
+        r.lpush("vespra:pending_approvals", json.dumps(approval_entry))
+        return {"status": "queued_for_approval", "new_capital_eth": capital_eth}
+
+    # Execute via Executor agent
+    exec_result = call_agent("executor", json.dumps({
+        "wallet_id": wallet_id,
+        "calldata": trader_parsed.get("calldata"),
+        "amount_wei": trader_parsed.get("amount_in_wei", trader_parsed.get("amount_in")),
+        "chain": best.get("chain", "base"),
+    }))
+    try:
+        exec_parsed = json.loads(exec_result.get("response", "{}")) if isinstance(exec_result.get("response"), str) else exec_result.get("response", {})
+    except (json.JSONDecodeError, TypeError):
+        exec_parsed = {}
+
+    if exec_parsed.get("status") != "success" and exec_result.get("status") != "ok":
+        return {"status": "error", "reason": exec_parsed.get("error", "executor failed"), "new_capital_eth": capital_eth}
+
+    # 6. Compound capital
+    new_capital_eth = capital_eth * (1 + expected_gain / 100) if TRADE_UP_COMPOUND else capital_eth
+    gain_pct = ((new_capital_eth - capital_eth) / capital_eth) * 100 if capital_eth > 0 else 0
+
+    # 7. Register position with Sentinel
+    try:
+        r.hset(f"vespra:trade_up_positions:{wallet_id}", mapping={
+            "token": token_address,
+            "entry_eth": str(capital_eth),
+            "current_eth": str(new_capital_eth),
+            "cycle": str(cycle_num),
+            "timestamp": str(time.time()),
+        })
+    except Exception as e:
+        log.error(f"[trade_up] Failed to register position: {e}")
+
+    # 8. Log to history
+    tx_hash = exec_parsed.get("tx_hash", "")
+    try:
+        r.lpush("vespra:trade_up_history", json.dumps({
+            "wallet_id": wallet_id, "cycle": cycle_num,
+            "capital_in_eth": capital_eth, "capital_out_eth": new_capital_eth,
+            "gain_pct": gain_pct, "token": best.get("symbol", ""),
+            "tx_hash": tx_hash, "timestamp": time.time(),
+        }))
+        r.ltrim("vespra:trade_up_history", 0, 99)
+    except Exception as e:
+        log.error(f"[trade_up] Failed to log history: {e}")
+
+    return {"status": "executed", "new_capital_eth": new_capital_eth, "gain_pct": gain_pct, "tx_hash": tx_hash}
+
+
+def run_trade_up_loop(wallet_id: str, initial_capital_eth: float):
+    """Background thread: run Trade Up cycles until stopped, max cycles, or stop-loss."""
+    capital = initial_capital_eth
+    cycle = 0
+    entry_value = initial_capital_eth
+
+    r = _redis_client()
+    r.set(f"vespra:trade_up_state:{wallet_id}", json.dumps({
+        "active": True, "cycle": 0,
+        "entry_value_eth": entry_value, "current_value_eth": capital,
+        "started_at": time.time(),
+    }))
+
+    while True:
+        # Check if stopped externally
+        try:
+            state_raw = r.get(f"vespra:trade_up_state:{wallet_id}")
+            state = json.loads(state_raw) if state_raw else {}
+            if not state.get("active", True):
+                log.info(f"[trade_up] wallet={wallet_id} stop requested externally")
+                break
+        except Exception:
+            pass
+
+        cycle += 1
+        if TRADE_UP_MAX_CYCLES > 0 and cycle > TRADE_UP_MAX_CYCLES:
+            log.info(f"[trade_up] wallet={wallet_id} max cycles reached ({TRADE_UP_MAX_CYCLES}), stopping")
+            break
+
+        drawdown_pct = ((entry_value - capital) / entry_value) * 100 if entry_value > 0 else 0
+        if drawdown_pct >= TRADE_UP_STOP_LOSS_PCT:
+            log.warning(f"[trade_up] wallet={wallet_id} stop-loss: {drawdown_pct:.1f}% drawdown")
+            break
+
+        result = execute_trade_up_cycle(wallet_id, cycle, capital)
+        log.info(f"[trade_up] cycle={cycle} status={result['status']} capital={result.get('new_capital_eth', capital):.6f} ETH")
+
+        if result["status"] == "exit":
+            break
+        if result["status"] == "executed":
+            capital = result["new_capital_eth"]
+
+        r.set(f"vespra:trade_up_state:{wallet_id}", json.dumps({
+            "active": True, "cycle": cycle,
+            "entry_value_eth": entry_value, "current_value_eth": capital,
+            "last_status": result["status"], "started_at": time.time(),
+        }))
+
+        time.sleep(TRADE_UP_CYCLE_INTERVAL_SEC)
+
+    # Mark loop as inactive
+    try:
+        state_raw = r.get(f"vespra:trade_up_state:{wallet_id}")
+        state = json.loads(state_raw) if state_raw else {}
+    except Exception:
+        state = {}
+    state["active"] = False
+    state["final_cycle"] = cycle
+    state["final_capital_eth"] = capital
+    r.set(f"vespra:trade_up_state:{wallet_id}", json.dumps(state))
+    log.info(f"[trade_up] wallet={wallet_id} loop ended after {cycle} cycles, capital={capital:.6f} ETH")
 
 
 # DAG definitions: map goal keywords to ordered agent pipelines
@@ -2483,6 +2686,23 @@ def call_agent(agent_key, message):
             quote_data = pre_fetch_trader(t_in, t_out, amount_wei)
             trader_context = f"\n\nLIVE_QUOTE_DATA:\n{json.dumps(quote_data)}"
 
+        # Trade Up mode: inject compounding micro-trade system prompt
+        if "trade_up" in message.lower() or '"mode": "trade_up"' in message:
+            trade_up_prompt = (
+                "\n\nYou are in TRADE_UP_LOOP mode. Recommend a single compounding micro-trade.\n"
+                "Rules:\n"
+                "- Only swap if momentum_score >= 0.6\n"
+                f"- Max trade size: {TRADE_UP_MAX_ETH} ETH\n"
+                f"- Minimum expected gain: {TRADE_UP_MIN_GAIN_PCT}%\n"
+                "- If risk_score is HIGH: output action=\"hold\"\n"
+                "- If sentinel_data.stop_loss_triggered is true: output action=\"exit\"\n"
+                "Output strict JSON only:\n"
+                "{\"action\": \"swap\"|\"hold\"|\"exit\", \"token_in\": \"<address>\", "
+                "\"token_out\": \"<address>\", \"amount_in_wei\": \"<wei>\", "
+                "\"expected_gain_pct\": <float>, \"reasoning\": \"<one line>\"}"
+            )
+            trader_context += trade_up_prompt
+
     # Yield: inject live Aave market data before the user message
     yield_context = ""
     if agent_key == "yield":
@@ -2778,6 +2998,31 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"count": len(entries), "entries": entries})
             return
 
+        if self.path == "/trade-up/history":
+            try:
+                r = _redis_client()
+                raw = r.lrange("vespra:trade_up_history", 0, 99)
+                cycles = []
+                for item in raw:
+                    try:
+                        cycles.append(json.loads(item))
+                    except Exception:
+                        pass
+                self._json(200, {"count": len(cycles), "cycles": cycles})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if self.path.startswith("/trade-up/status/"):
+            wallet_id = self.path.split("/trade-up/status/", 1)[1].strip("/")
+            try:
+                r = _redis_client()
+                state = r.get(f"vespra:trade_up_state:{wallet_id}")
+                self._json(200, json.loads(state) if state else {"active": False})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
         if self.path == "/queue/status":
             depth = queue_depth()
             self._json(200, {
@@ -2906,6 +3151,31 @@ class Handler(BaseHTTPRequestHandler):
                 })
 
             return self._json(200, {"status": "ok", "triggered": len(triggered), "results": triggered})
+
+        elif self.path == "/trade-up/start":
+            wallet_id = body.get("wallet_id", "")
+            capital_eth = float(body.get("capital_eth", TRADE_UP_MAX_ETH))
+            if not wallet_id:
+                return self._json(400, {"error": "wallet_id required"})
+            if not TRADE_UP_ENABLED:
+                return self._json(403, {"error": "TRADE_UP_ENABLED=false — set in .env and restart"})
+            if capital_eth > TRADE_UP_MAX_ETH:
+                return self._json(400, {"error": f"capital_eth {capital_eth} exceeds TRADE_UP_MAX_ETH {TRADE_UP_MAX_ETH}"})
+            t = threading.Thread(target=run_trade_up_loop, args=(wallet_id, capital_eth), daemon=True)
+            t.start()
+            self._json(200, {"status": "started", "wallet_id": wallet_id, "capital_eth": capital_eth})
+
+        elif self.path.startswith("/trade-up/stop/"):
+            wallet_id = self.path.split("/trade-up/stop/", 1)[1].strip("/")
+            try:
+                r = _redis_client()
+                state_raw = r.get(f"vespra:trade_up_state:{wallet_id}")
+                state = json.loads(state_raw) if state_raw else {}
+                state["active"] = False
+                r.set(f"vespra:trade_up_state:{wallet_id}", json.dumps(state))
+                self._json(200, {"status": "stop_requested", "wallet_id": wallet_id})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
 
         elif self.path == "/queue/push":
             agent   = body.get("agent", "")
