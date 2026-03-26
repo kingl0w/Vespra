@@ -39,3 +39,5 @@ nullboiler/docker-compose.yml
 nullboiler/deps/sqlite/sqlite3.c
 nullboiler/deps/sqlite/sqlite3.h
 nullboiler/deps/sqlite/sqlite3ext.h
+__pycache__/
+*.pyc
