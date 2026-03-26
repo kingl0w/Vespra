@@ -406,6 +406,16 @@ LAUNCHER_INITIAL_LIQUIDITY_ETH = float(os.environ.get("LAUNCHER_INITIAL_LIQUIDIT
 LAUNCHER_MAX_DEPLOY_ETH      = float(os.environ.get("LAUNCHER_MAX_DEPLOY_ETH", "0.1"))
 LAUNCHER_AUTO_LIQUIDITY      = os.environ.get("LAUNCHER_AUTO_LIQUIDITY", "true").lower() == "true"
 
+# ─── Performance Fee config ───────────────────────────────────────
+TREASURY_WALLET_ADDRESS      = os.environ.get("TREASURY_WALLET_ADDRESS", "")
+PERF_FEE_ENABLED             = os.environ.get("PERF_FEE_ENABLED", "false").lower() == "true"
+PERF_FEE_PCT                 = float(os.environ.get("PERF_FEE_PCT", "5.0"))
+PERF_FEE_MIN_SWEEP_ETH       = float(os.environ.get("PERF_FEE_MIN_SWEEP_ETH", "0.001"))
+
+if PERF_FEE_ENABLED and not TREASURY_WALLET_ADDRESS:
+    logging.getLogger("vespra").error("[perf_fee] PERF_FEE_ENABLED=true but TREASURY_WALLET_ADDRESS is not set — disabling performance fee")
+    PERF_FEE_ENABLED = False
+
 
 def _fetch_aave_health_factors(addresses, chain="base"):
     subgraph_url = AAVE_V3_SUBGRAPHS.get(chain)
@@ -1199,6 +1209,10 @@ def execute_yield_rotation(
     })
 
     log.warning(f"YIELD_ROTATE: completed — deposit tx={rotation['deposit_tx']}")
+
+    # Performance fee on yield rotation — HWM logic handles safely even without exact gain
+    sweep_performance_fee(wallet_id, amount_eth, strategy="yield_rotate")
+
     _log_yield_rotation(rotation)
     return rotation
 
@@ -1483,6 +1497,11 @@ def execute_trade_up_cycle(wallet_id: str, cycle_num: int, capital_eth: float) -
 
     # 6. Compound capital
     new_capital_eth = capital_eth * (1 + expected_gain / 100) if TRADE_UP_COMPOUND else capital_eth
+
+    # Performance fee — deduct before compounding
+    fee_result = sweep_performance_fee(wallet_id, new_capital_eth, strategy="trade_up", cycle=cycle_num)
+    new_capital_eth = new_capital_eth - fee_result["fee_eth"]
+
     gain_pct = ((new_capital_eth - capital_eth) / capital_eth) * 100 if capital_eth > 0 else 0
 
     # 7. Register position with Sentinel
@@ -1574,6 +1593,85 @@ def run_trade_up_loop(wallet_id: str, initial_capital_eth: float):
     state["final_capital_eth"] = capital
     r.set(f"vespra:trade_up_state:{wallet_id}", json.dumps(state))
     log.info(f"[trade_up] wallet={wallet_id} loop ended after {cycle} cycles, capital={capital:.6f} ETH")
+
+
+# ─── Performance Fee helpers ──────────────────────────────────────
+
+def sweep_performance_fee(wallet_id: str, new_capital_eth: float, strategy: str, cycle: int = 0) -> dict:
+    """High watermark performance fee: charge PERF_FEE_PCT of gains above HWM only.
+
+    Fee is only charged when new_capital_eth exceeds the wallet's all-time high.
+    Returns {"fee_eth": float, "swept": bool, "tx_hash": str|None, "new_hwm": float}
+    """
+    if not PERF_FEE_ENABLED:
+        return {"fee_eth": 0.0, "swept": False, "tx_hash": None, "new_hwm": new_capital_eth}
+
+    r = _redis_client()
+    hwm_key = f"vespra:perf_fee_hwm:{wallet_id}"
+
+    # Read current HWM — initialize to new_capital_eth on first call
+    hwm_raw = r.get(hwm_key)
+    hwm_eth = float(hwm_raw) if hwm_raw else new_capital_eth
+
+    # No fee if we haven't exceeded the HWM
+    if new_capital_eth <= hwm_eth:
+        log.info(f"[perf_fee] wallet={wallet_id} capital={new_capital_eth:.6f} <= hwm={hwm_eth:.6f} — no fee")
+        return {"fee_eth": 0.0, "swept": False, "tx_hash": None, "new_hwm": hwm_eth}
+
+    # Calculate fee on gain above HWM only
+    taxable_gain = new_capital_eth - hwm_eth
+    fee_eth = taxable_gain * (PERF_FEE_PCT / 100)
+
+    log.info(f"[perf_fee] wallet={wallet_id} new_hwm={new_capital_eth:.6f} taxable_gain={taxable_gain:.6f} fee={fee_eth:.6f} ETH ({PERF_FEE_PCT}%)")
+
+    tx_hash = None
+    swept = False
+
+    if fee_eth >= PERF_FEE_MIN_SWEEP_ETH:
+        # Sweep to treasury via Keymaster
+        sweep_result = keymaster_call("send_native", {
+            "wallet_id": wallet_id,
+            "to": TREASURY_WALLET_ADDRESS,
+            "amount_eth": str(fee_eth),
+            "chain": "base",
+        })
+        km_resp = sweep_result.get("response", {})
+        if isinstance(km_resp, str):
+            try:
+                km_resp = json.loads(km_resp)
+            except Exception:
+                km_resp = {}
+        tx_hash_val = km_resp.get("tx_hash") if isinstance(km_resp, dict) else None
+        if tx_hash_val:
+            tx_hash = tx_hash_val
+            swept = True
+            log.info(f"[perf_fee] swept {fee_eth:.6f} ETH to treasury — tx={tx_hash}")
+        else:
+            log.warning(f"[perf_fee] sweep failed: {sweep_result}")
+    else:
+        log.info(f"[perf_fee] fee {fee_eth:.6f} ETH below dust threshold {PERF_FEE_MIN_SWEEP_ETH} — not sweeping")
+
+    # Update HWM to capital after fee deduction
+    new_hwm = new_capital_eth - fee_eth
+    r.set(hwm_key, str(new_hwm))
+
+    # Log to fee history
+    r.lpush("vespra:fee_sweeps", json.dumps({
+        "wallet_id": wallet_id,
+        "strategy": strategy,
+        "cycle": cycle,
+        "gain_eth": taxable_gain,
+        "fee_eth": fee_eth,
+        "fee_pct": PERF_FEE_PCT,
+        "swept": swept,
+        "tx_hash": tx_hash,
+        "old_hwm": hwm_eth,
+        "new_hwm": new_hwm,
+        "timestamp": time.time(),
+    }))
+    r.ltrim("vespra:fee_sweeps", 0, 199)
+
+    return {"fee_eth": fee_eth, "swept": swept, "tx_hash": tx_hash, "new_hwm": new_hwm}
 
 
 # ─── Portfolio Manager helpers ────────────────────────────────────
@@ -3673,6 +3771,40 @@ class Handler(BaseHTTPRequestHandler):
                     "LAUNCHER_INITIAL_LIQUIDITY_ETH": LAUNCHER_INITIAL_LIQUIDITY_ETH,
                     "LAUNCHER_MAX_DEPLOY_ETH": LAUNCHER_MAX_DEPLOY_ETH,
                     "deployed_contract_count": count,
+                })
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if self.path == "/fees/performance":
+            try:
+                r = _redis_client()
+                raw = r.lrange("vespra:fee_sweeps", 0, 199)
+                sweeps = []
+                for item in raw:
+                    try:
+                        sweeps.append(json.loads(item))
+                    except Exception:
+                        pass
+                total_fee_eth = sum(s.get("fee_eth", 0) for s in sweeps if s.get("swept"))
+
+                # Per-wallet HWM
+                wallet_map = r.hgetall("vespra:portfolio_wallets") or {}
+                hwms = {}
+                for strat, wid in wallet_map.items():
+                    strat = strat.decode() if isinstance(strat, bytes) else strat
+                    wid = wid.decode() if isinstance(wid, bytes) else wid
+                    hwm_raw = r.get(f"vespra:perf_fee_hwm:{wid}")
+                    hwms[strat] = {"wallet_id": wid, "hwm_eth": float(hwm_raw) if hwm_raw else None}
+
+                self._json(200, {
+                    "count": len(sweeps),
+                    "total_fee_eth": round(total_fee_eth, 8),
+                    "fee_pct": PERF_FEE_PCT,
+                    "enabled": PERF_FEE_ENABLED,
+                    "treasury": TREASURY_WALLET_ADDRESS or "not set",
+                    "wallet_hwms": hwms,
+                    "sweeps": sweeps,
                 })
             except Exception as e:
                 self._json(500, {"error": str(e)})
