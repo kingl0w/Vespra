@@ -395,6 +395,11 @@ PORTFOLIO_MANAGER_ENABLED    = os.environ.get("PORTFOLIO_MANAGER_ENABLED", "fals
 PORTFOLIO_MAX_ETH            = float(os.environ.get("PORTFOLIO_MAX_ETH", "0.1"))
 PORTFOLIO_MIN_STRATEGY_PCT   = float(os.environ.get("PORTFOLIO_MIN_STRATEGY_PCT", "10.0"))
 
+# ─── Command Mode config ──────────────────────────────────────────
+COMMAND_MODE_ENABLED         = os.environ.get("COMMAND_MODE_ENABLED", "false").lower() == "true"
+COMMAND_MODE_MAX_ETH         = float(os.environ.get("COMMAND_MODE_MAX_ETH", "0.1"))
+COMMAND_KILL_SWITCH          = os.environ.get("COMMAND_KILL_SWITCH", "false").lower() == "true"
+
 
 def _fetch_aave_health_factors(addresses, chain="base"):
     subgraph_url = AAVE_V3_SUBGRAPHS.get(chain)
@@ -1708,6 +1713,194 @@ def execute_portfolio_launch(split: dict, dry_run: bool = False) -> dict:
         log.error(f"[portfolio] Failed to persist launch record: {e}")
 
     return {"status": "ok", "portfolio": portfolio_record}
+
+
+# ─── Command Mode helpers ─────────────────────────────────────────
+
+def parse_swarm_command(command: str) -> dict:
+    """Parse NL command into a structured intent via Coordinator agent.
+
+    Returns {"intent": ..., "params": ..., "raw_command": ...}
+    or {"error": "...", "raw_command": "..."} on failure.
+    """
+    coordinator_msg = json.dumps({
+        "task": "parse_swarm_command",
+        "command": command,
+        "instruction": (
+            "Parse this DeFi swarm command into a structured JSON intent. "
+            "Return strict JSON only — no preamble, no markdown. Schema: "
+            '{"intent": "yield_rotate"|"sniper_watch"|"trade_up"|"portfolio_split"|'
+            '"stop_strategy"|"stop_all"|"status"|"unknown", '
+            '"params": {"max_eth": <float|null>, "chain": <str|null>, '
+            '"wallet_id": <str|null>, "strategy": <str|null>, '
+            '"risk_max": "LOW"|"MEDIUM"|"HIGH"|null, "gas_reserve_eth": <float|null>, '
+            '"yield_pct": <float|null>, "sniper_pct": <float|null>, "trade_up_pct": <float|null>}} '
+            'If truly unparseable, return {"intent": "unknown", "params": {}}. '
+            "Never return an error key — always return a valid intent."
+        ),
+    })
+    coordinator_result = call_agent("coordinator", coordinator_msg)
+
+    try:
+        raw_resp = coordinator_result.get("response", "{}")
+        parsed = json.loads(raw_resp) if isinstance(raw_resp, str) else raw_resp
+    except (json.JSONDecodeError, TypeError):
+        parsed = {}
+
+    intent = parsed.get("intent", "unknown") if isinstance(parsed, dict) else "unknown"
+    params = parsed.get("params", {}) if isinstance(parsed, dict) else {}
+
+    # Safety: cap max_eth at COMMAND_MODE_MAX_ETH
+    if params.get("max_eth") and float(params["max_eth"]) > COMMAND_MODE_MAX_ETH:
+        params["max_eth"] = COMMAND_MODE_MAX_ETH
+
+    return {"intent": intent, "params": params, "raw_command": command}
+
+
+def execute_swarm_command(parsed: dict) -> dict:
+    """Route a parsed intent to the appropriate handler.
+
+    All strategy calls respect their own ENABLED flags — Command Mode
+    does not bypass per-strategy gates.
+    """
+    intent = parsed.get("intent", "unknown")
+    params = parsed.get("params", {})
+    r = _redis_client()
+
+    # Kill switch check
+    if COMMAND_KILL_SWITCH:
+        return {"status": "blocked", "reason": "COMMAND_KILL_SWITCH=true — all commands halted"}
+
+    if intent == "yield_rotate":
+        if not YIELD_AUTO_ROTATE_ENABLED:
+            return {"status": "blocked", "reason": "YIELD_AUTO_ROTATE_ENABLED=false"}
+        wallet_id = params.get("wallet_id") or r.hget("vespra:portfolio_wallets", "yield")
+        if not wallet_id:
+            return {"status": "error", "reason": "No yield wallet found — create one via /portfolio/launch first"}
+        wallet_id = wallet_id.decode() if isinstance(wallet_id, bytes) else wallet_id
+        chain = params.get("chain") or "base"
+        max_eth = float(params.get("max_eth") or YIELD_MAX_ROTATE_ETH)
+        result = execute_yield_rotation(
+            wallet_id=wallet_id,
+            current_protocol="aave-v3",
+            current_asset="USDC",
+            target_protocol="aave-v3",
+            target_asset="WETH",
+            amount_eth=min(max_eth, YIELD_MAX_ROTATE_ETH),
+            chain=chain,
+        )
+        return {"status": "dispatched", "intent": intent, "result": result}
+
+    elif intent == "sniper_watch":
+        if not SNIPER_AUTO_ENTRY_ENABLED:
+            return {
+                "status": "blocked",
+                "reason": "SNIPER_AUTO_ENTRY_ENABLED=false — Sniper will score pools but not auto-enter",
+                "note": "Alchemy webhook is active and scoring new pools continuously",
+            }
+        return {
+            "status": "active",
+            "intent": intent,
+            "note": "Sniper is watching via Alchemy webhook — entries fire automatically on LOW/MEDIUM risk pools",
+        }
+
+    elif intent == "trade_up":
+        if not TRADE_UP_ENABLED:
+            return {"status": "blocked", "reason": "TRADE_UP_ENABLED=false"}
+        wallet_id = params.get("wallet_id") or r.hget("vespra:portfolio_wallets", "trade_up")
+        if not wallet_id:
+            return {"status": "error", "reason": "No trade_up wallet found — create one via /portfolio/launch first"}
+        wallet_id = wallet_id.decode() if isinstance(wallet_id, bytes) else wallet_id
+        capital_eth = float(params.get("max_eth") or TRADE_UP_MAX_ETH)
+        t = threading.Thread(target=run_trade_up_loop, args=(wallet_id, capital_eth), daemon=True)
+        t.start()
+        return {"status": "started", "intent": intent, "wallet_id": wallet_id, "capital_eth": capital_eth}
+
+    elif intent == "portfolio_split":
+        if not PORTFOLIO_MANAGER_ENABLED:
+            return {"status": "blocked", "reason": "PORTFOLIO_MANAGER_ENABLED=false"}
+        total_eth = float(params.get("max_eth") or PORTFOLIO_MAX_ETH)
+        yield_pct = float(params.get("yield_pct") or 33.4)
+        sniper_pct = float(params.get("sniper_pct") or 33.3)
+        trade_up_pct = float(params.get("trade_up_pct") or 33.3)
+        split = {
+            "yield": yield_pct / 100,
+            "sniper": sniper_pct / 100,
+            "trade_up": trade_up_pct / 100,
+            "total_eth": total_eth,
+        }
+        result = execute_portfolio_launch(split, dry_run=False)
+        return {"status": "dispatched", "intent": intent, "result": result}
+
+    elif intent == "stop_strategy":
+        strategy = params.get("strategy")
+        if not strategy:
+            return {"status": "error", "reason": "strategy param required for stop_strategy intent"}
+        wallet_id = r.hget("vespra:portfolio_wallets", strategy)
+        if wallet_id:
+            wallet_id = wallet_id.decode() if isinstance(wallet_id, bytes) else wallet_id
+            if strategy == "trade_up":
+                state_raw = r.get(f"vespra:trade_up_state:{wallet_id}")
+                state = json.loads(state_raw) if state_raw else {}
+                state["active"] = False
+                r.set(f"vespra:trade_up_state:{wallet_id}", json.dumps(state))
+        return {"status": "stop_requested", "strategy": strategy, "wallet_id": wallet_id}
+
+    elif intent == "stop_all":
+        stopped = []
+        wallet_map = r.hgetall("vespra:portfolio_wallets") or {}
+        for strat, wid in wallet_map.items():
+            strat = strat.decode() if isinstance(strat, bytes) else strat
+            wid = wid.decode() if isinstance(wid, bytes) else wid
+            if strat == "trade_up":
+                state_raw = r.get(f"vespra:trade_up_state:{wid}")
+                state = json.loads(state_raw) if state_raw else {}
+                state["active"] = False
+                r.set(f"vespra:trade_up_state:{wid}", json.dumps(state))
+            stopped.append(strat)
+        return {
+            "status": "stop_all_requested",
+            "strategies_signalled": stopped,
+            "note": "Hard stop via COMMAND_KILL_SWITCH=true in .env + restart",
+        }
+
+    elif intent == "status":
+        wallet_map = r.hgetall("vespra:portfolio_wallets") or {}
+        wallet_map = {
+            (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
+            for k, v in wallet_map.items()
+        }
+        strategy_status = {}
+        for strat, wid in wallet_map.items():
+            if strat == "trade_up":
+                raw = r.get(f"vespra:trade_up_state:{wid}")
+                strategy_status[strat] = json.loads(raw) if raw else {"active": False}
+            else:
+                strategy_status[strat] = {
+                    "wallet_id": wid,
+                    "active": SNIPER_AUTO_ENTRY_ENABLED if strat == "sniper" else YIELD_AUTO_ROTATE_ENABLED,
+                }
+        return {
+            "status": "ok",
+            "intent": "status",
+            "kill_switch": COMMAND_KILL_SWITCH,
+            "flags": {
+                "YIELD_AUTO_ROTATE_ENABLED": YIELD_AUTO_ROTATE_ENABLED,
+                "SNIPER_AUTO_ENTRY_ENABLED": SNIPER_AUTO_ENTRY_ENABLED,
+                "TRADE_UP_ENABLED": TRADE_UP_ENABLED,
+                "PORTFOLIO_MANAGER_ENABLED": PORTFOLIO_MANAGER_ENABLED,
+                "COMMAND_MODE_ENABLED": COMMAND_MODE_ENABLED,
+            },
+            "strategy_status": strategy_status,
+        }
+
+    else:
+        return {
+            "status": "unknown_intent",
+            "raw_command": parsed.get("raw_command"),
+            "hint": "Try: 'rotate yield', 'watch for new pools', 'start trade-up loop', "
+                    "'split 0.1 ETH 40/30/30', 'stop all', 'status'",
+        }
 
 
 # DAG definitions: map goal keywords to ordered agent pipelines
@@ -3235,6 +3428,26 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
+        # /swarm/kill takes no body — handle before JSON parsing
+        if self.path == "/swarm/kill":
+            stopped = []
+            r = _redis_client()
+            wallet_map = r.hgetall("vespra:portfolio_wallets") or {}
+            for strategy, wid in wallet_map.items():
+                strategy = strategy.decode() if isinstance(strategy, bytes) else strategy
+                wid = wid.decode() if isinstance(wid, bytes) else wid
+                if strategy == "trade_up":
+                    state_raw = r.get(f"vespra:trade_up_state:{wid}")
+                    state = json.loads(state_raw) if state_raw else {}
+                    state["active"] = False
+                    r.set(f"vespra:trade_up_state:{wid}", json.dumps(state))
+                stopped.append(strategy)
+            return self._json(200, {
+                "status": "kill_signal_sent",
+                "strategies_signalled": stopped,
+                "note": "Active loops will stop at next cycle check. For immediate hard stop: set COMMAND_KILL_SWITCH=true in .env and restart gateway.",
+            })
+
         length = int(self.headers.get("Content-Length", 0))
         if not length:
             return self._json(400, {"error": "empty body"})
@@ -3399,6 +3612,25 @@ class Handler(BaseHTTPRequestHandler):
 
             result = execute_portfolio_launch(split, dry_run=dry_run)
             self._json(200, result)
+
+        elif self.path == "/swarm/command":
+            command = body.get("command", "").strip()
+            if not command:
+                return self._json(400, {"error": "command required"})
+            if not COMMAND_MODE_ENABLED:
+                return self._json(403, {"error": "COMMAND_MODE_ENABLED=false — set in .env and restart"})
+
+            parsed = parse_swarm_command(command)
+            if "error" in parsed:
+                return self._json(400, {"error": parsed["error"], "raw_command": command})
+
+            result = execute_swarm_command(parsed)
+            self._json(200, {
+                "command": command,
+                "parsed_intent": parsed.get("intent"),
+                "params": parsed.get("params"),
+                "result": result,
+            })
 
         elif self.path == "/queue/push":
             agent   = body.get("agent", "")
