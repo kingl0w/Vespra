@@ -3428,6 +3428,26 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
+        # /swarm/kill takes no body — handle before JSON parsing
+        if self.path == "/swarm/kill":
+            stopped = []
+            r = _redis_client()
+            wallet_map = r.hgetall("vespra:portfolio_wallets") or {}
+            for strategy, wid in wallet_map.items():
+                strategy = strategy.decode() if isinstance(strategy, bytes) else strategy
+                wid = wid.decode() if isinstance(wid, bytes) else wid
+                if strategy == "trade_up":
+                    state_raw = r.get(f"vespra:trade_up_state:{wid}")
+                    state = json.loads(state_raw) if state_raw else {}
+                    state["active"] = False
+                    r.set(f"vespra:trade_up_state:{wid}", json.dumps(state))
+                stopped.append(strategy)
+            return self._json(200, {
+                "status": "kill_signal_sent",
+                "strategies_signalled": stopped,
+                "note": "Active loops will stop at next cycle check. For immediate hard stop: set COMMAND_KILL_SWITCH=true in .env and restart gateway.",
+            })
+
         length = int(self.headers.get("Content-Length", 0))
         if not length:
             return self._json(400, {"error": "empty body"})
@@ -3610,25 +3630,6 @@ class Handler(BaseHTTPRequestHandler):
                 "parsed_intent": parsed.get("intent"),
                 "params": parsed.get("params"),
                 "result": result,
-            })
-
-        elif self.path == "/swarm/kill":
-            stopped = []
-            r = _redis_client()
-            wallet_map = r.hgetall("vespra:portfolio_wallets") or {}
-            for strategy, wid in wallet_map.items():
-                strategy = strategy.decode() if isinstance(strategy, bytes) else strategy
-                wid = wid.decode() if isinstance(wid, bytes) else wid
-                if strategy == "trade_up":
-                    state_raw = r.get(f"vespra:trade_up_state:{wid}")
-                    state = json.loads(state_raw) if state_raw else {}
-                    state["active"] = False
-                    r.set(f"vespra:trade_up_state:{wid}", json.dumps(state))
-                stopped.append(strategy)
-            self._json(200, {
-                "status": "kill_signal_sent",
-                "strategies_signalled": stopped,
-                "note": "Active loops will stop at next cycle check. For immediate hard stop: set COMMAND_KILL_SWITCH=true in .env and restart gateway.",
             })
 
         elif self.path == "/queue/push":
