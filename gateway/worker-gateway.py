@@ -3364,6 +3364,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": str(e)})
 
         elif self.path == "/portfolio/launch":
+            # Defensive: re-parse raw_body if body is somehow not a dict
+            # (guards against stale deploys where shared parser was different)
+            if not isinstance(body, dict):
+                log.error(f"[portfolio/launch] body is not dict: type={type(body)} raw_body={raw_body!r}")
+                try:
+                    body = json.loads(raw_body.decode("utf-8") if isinstance(raw_body, bytes) else raw_body)
+                except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+                    log.error(f"[portfolio/launch] JSON re-parse failed: {e}")
+                    return self._json(400, {"error": "invalid json"})
+
             dry_run = body.get("dry_run", False)
 
             if not PORTFOLIO_MANAGER_ENABLED:
