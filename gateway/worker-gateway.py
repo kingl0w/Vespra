@@ -3240,8 +3240,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "empty body"})
         raw_body = self.rfile.read(length)
         try:
-            body = json.loads(raw_body)
-        except json.JSONDecodeError:
+            body = json.loads(raw_body.decode("utf-8") if isinstance(raw_body, bytes) else raw_body)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+            log.error(f"[do_POST] JSON parse error on {self.path}: {e}\nbody={raw_body!r}")
             return self._json(400, {"error": "invalid json"})
 
         if self.path == "/dispatch":
