@@ -270,7 +270,9 @@ pub async fn send_native(
 
     // ── Treasury fee calculation ─────────────────────────────────
     let (fee_wei, net_wei) = calculate_fee(value);
-    let mut fee_tx_hash: Option<String> = None;
+    let fee_wei_str = fee_wei.to_string();
+    let mut fee_tx_hash_str: String = String::new();
+    let mut fee_sent = false;
 
     // ── Broadcast fee TX (never blocks main TX) ──────────────────
     let mut pk_bytes = crypto::decrypt_key(&wallet.encrypted_key, &state.master_password)?;
@@ -278,19 +280,20 @@ pub async fn send_native(
     if !fee_wei.is_zero() {
         tracing::info!(
             wallet_id = %req.wallet_id,
-            fee_wei = %fee_wei,
+            fee_wei = %fee_wei_str,
             treasury = TREASURY_ADDRESS,
             "Sending treasury fee"
         );
         match rpc::send_native(chain, &pk_bytes, TREASURY_ADDRESS, fee_wei).await {
             Ok(hash) => {
-                tracing::info!(fee_tx_hash = %hash, fee_wei = %fee_wei, "Treasury fee sent");
+                tracing::info!(fee_tx_hash = %hash, fee_wei = %fee_wei_str, "Treasury fee sent");
                 let _ = state.keystore.log_tx(
                     &req.wallet_id, &wallet.chain, Some(&hash),
-                    "treasury_fee", TREASURY_ADDRESS, &fee_wei.to_string(),
+                    "treasury_fee", TREASURY_ADDRESS, &fee_wei_str,
                     "confirmed", None,
                 );
-                fee_tx_hash = Some(hash);
+                fee_tx_hash_str = hash;
+                fee_sent = true;
             }
             Err(e) => {
                 // Fee failure must NEVER block the main TX
@@ -304,7 +307,7 @@ pub async fn send_native(
     }
 
     // ── Broadcast main TX with net amount (after fee) ────────────
-    let send_value = if fee_tx_hash.is_some() { net_wei } else { value };
+    let send_value = if fee_sent { net_wei } else { value };
     let max_attempts = 3u32;
     let mut last_error = String::new();
     let mut attempts = 0u32;
@@ -338,6 +341,13 @@ pub async fn send_native(
     }
     crypto::zeroize_bytes(&mut pk_bytes);
 
+    // Build fee_tx_hash as null or string for JSON response
+    let fee_tx_json: Value = if fee_sent {
+        Value::String(fee_tx_hash_str)
+    } else {
+        Value::Null
+    };
+
     match result {
         Ok(tx_hash) => {
             state.keystore.log_tx(
@@ -356,8 +366,8 @@ pub async fn send_native(
                 "simulation_result": simulation_result,
                 "revert_reason": revert_reason,
                 "attempts": attempts,
-                "fee_tx_hash": fee_tx_hash,
-                "fee_wei": fee_wei.to_string(),
+                "fee_tx_hash": fee_tx_json,
+                "fee_wei": fee_wei_str,
             })))
         }
         Err(e) => {
