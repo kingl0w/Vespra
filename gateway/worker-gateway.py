@@ -390,6 +390,11 @@ TRADE_UP_MAX_CYCLES          = int(os.environ.get("TRADE_UP_MAX_CYCLES", "0"))
 TRADE_UP_COMPOUND            = os.environ.get("TRADE_UP_COMPOUND", "true").lower() == "true"
 TRADE_UP_STOP_LOSS_PCT       = float(os.environ.get("TRADE_UP_STOP_LOSS_PCT", "5.0"))
 
+# ─── Portfolio Manager config ─────────────────────────────────────
+PORTFOLIO_MANAGER_ENABLED    = os.environ.get("PORTFOLIO_MANAGER_ENABLED", "false").lower() == "true"
+PORTFOLIO_MAX_ETH            = float(os.environ.get("PORTFOLIO_MAX_ETH", "0.1"))
+PORTFOLIO_MIN_STRATEGY_PCT   = float(os.environ.get("PORTFOLIO_MIN_STRATEGY_PCT", "10.0"))
+
 
 def _fetch_aave_health_factors(addresses, chain="base"):
     subgraph_url = AAVE_V3_SUBGRAPHS.get(chain)
@@ -1558,6 +1563,151 @@ def run_trade_up_loop(wallet_id: str, initial_capital_eth: float):
     state["final_capital_eth"] = capital
     r.set(f"vespra:trade_up_state:{wallet_id}", json.dumps(state))
     log.info(f"[trade_up] wallet={wallet_id} loop ended after {cycle} cycles, capital={capital:.6f} ETH")
+
+
+# ─── Portfolio Manager helpers ────────────────────────────────────
+
+def parse_portfolio_command(command: str, total_eth: float) -> dict:
+    """Parse NL command like '1 ETH, 40% yield / 30% sniper / 30% trade-up'.
+
+    Uses the Coordinator agent to extract structured allocation.
+    Returns: {"yield": 0.4, "sniper": 0.3, "trade_up": 0.3, "total_eth": 1.0}
+    or {"error": "..."} on failure.
+    """
+    instruction = (
+        "Parse the capital allocation command and return strict JSON only: "
+        '{"yield_pct": <float>, "sniper_pct": <float>, "trade_up_pct": <float>} '
+        "All three values must sum to 100. If the command is ambiguous or invalid, "
+        'return {"error": "<reason>"}. Do not include any other text.'
+    )
+    coordinator_msg = json.dumps({
+        "task": "parse_portfolio_allocation",
+        "command": command,
+        "total_eth": total_eth,
+        "available_strategies": ["yield", "sniper", "trade_up"],
+        "instruction": instruction,
+    })
+    coordinator_result = call_agent("coordinator", coordinator_msg)
+
+    try:
+        raw_resp = coordinator_result.get("response", "{}")
+        parsed = json.loads(raw_resp) if isinstance(raw_resp, str) else raw_resp
+    except (json.JSONDecodeError, TypeError):
+        parsed = {}
+
+    # The coordinator may nest the allocation under a key or return it flat
+    if "allocation" in parsed:
+        parsed = parsed["allocation"]
+
+    if "error" in parsed:
+        return {"error": parsed["error"]}
+
+    yield_pct = float(parsed.get("yield_pct", 0))
+    sniper_pct = float(parsed.get("sniper_pct", 0))
+    trade_up_pct = float(parsed.get("trade_up_pct", 0))
+
+    total_pct = yield_pct + sniper_pct + trade_up_pct
+    if abs(total_pct - 100.0) > 1.0:
+        return {"error": f"Percentages sum to {total_pct}, must equal 100"}
+
+    for name, pct in [("yield", yield_pct), ("sniper", sniper_pct), ("trade_up", trade_up_pct)]:
+        if 0 < pct < PORTFOLIO_MIN_STRATEGY_PCT:
+            return {"error": f"{name} allocation {pct}% is below minimum {PORTFOLIO_MIN_STRATEGY_PCT}%"}
+
+    return {
+        "yield": yield_pct / 100,
+        "sniper": sniper_pct / 100,
+        "trade_up": trade_up_pct / 100,
+        "total_eth": total_eth,
+    }
+
+
+def execute_portfolio_launch(split: dict, dry_run: bool = False) -> dict:
+    """Given a parsed split dict, create wallets via Keymaster, register them,
+    and start enabled strategies.
+
+    Returns a status dict with wallet_ids and per-strategy results.
+    """
+    total_eth = split["total_eth"]
+    results = {}
+    wallet_map = {}
+    r = _redis_client()
+
+    for strategy in ["yield", "sniper", "trade_up"]:
+        pct = split.get(strategy, 0)
+        if pct <= 0:
+            results[strategy] = {"status": "skipped", "reason": "0% allocation"}
+            continue
+
+        capital_eth = round(total_eth * pct, 6)
+
+        # Create wallet via Keymaster
+        km_result = keymaster_call("create_wallet", {"label": f"portfolio_{strategy}_{int(time.time())}"})
+        km_resp = km_result.get("response", {})
+        if isinstance(km_resp, str):
+            try:
+                km_resp = json.loads(km_resp)
+            except Exception:
+                km_resp = {}
+
+        wallet_id = km_resp.get("wallet_id", "") if isinstance(km_resp, dict) else ""
+        if not wallet_id:
+            results[strategy] = {"status": "error", "reason": "keymaster wallet creation failed"}
+            continue
+
+        wallet_map[strategy] = wallet_id
+
+        if dry_run:
+            results[strategy] = {
+                "status": "dry_run",
+                "wallet_id": wallet_id,
+                "capital_eth": capital_eth,
+                "pct": pct * 100,
+            }
+            continue
+
+        # Start strategy
+        if strategy == "yield" and YIELD_AUTO_ROTATE_ENABLED:
+            r.hset("vespra:portfolio_wallets", strategy, wallet_id)
+            results[strategy] = {"status": "registered", "wallet_id": wallet_id, "capital_eth": capital_eth}
+
+        elif strategy == "sniper" and SNIPER_AUTO_ENTRY_ENABLED:
+            r.hset("vespra:portfolio_wallets", strategy, wallet_id)
+            results[strategy] = {"status": "registered", "wallet_id": wallet_id, "capital_eth": capital_eth}
+
+        elif strategy == "trade_up" and TRADE_UP_ENABLED:
+            t = threading.Thread(
+                target=run_trade_up_loop,
+                args=(wallet_id, capital_eth),
+                daemon=True,
+            )
+            t.start()
+            results[strategy] = {"status": "started", "wallet_id": wallet_id, "capital_eth": capital_eth}
+
+        else:
+            results[strategy] = {
+                "status": "registered_disabled",
+                "wallet_id": wallet_id,
+                "capital_eth": capital_eth,
+                "note": f"{strategy.upper()}_ENABLED=false — wallet created but strategy not started",
+            }
+
+    # Persist portfolio state
+    portfolio_record = {
+        "total_eth": total_eth,
+        "split": {k: split[k] for k in ["yield", "sniper", "trade_up"] if k in split},
+        "wallet_map": wallet_map,
+        "results": results,
+        "dry_run": dry_run,
+        "created_at": time.time(),
+    }
+    try:
+        r.lpush("vespra:portfolio_launches", json.dumps(portfolio_record))
+        r.ltrim("vespra:portfolio_launches", 0, 49)
+    except Exception as e:
+        log.error(f"[portfolio] Failed to persist launch record: {e}")
+
+    return {"status": "ok", "portfolio": portfolio_record}
 
 
 # DAG definitions: map goal keywords to ordered agent pipelines
@@ -3023,6 +3173,41 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": str(e)})
             return
 
+        if self.path == "/portfolio/status":
+            try:
+                r = _redis_client()
+                raw_map = r.hgetall("vespra:portfolio_wallets") or {}
+                wallet_map = {
+                    (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
+                    for k, v in raw_map.items()
+                }
+                status = {}
+                for strategy, wid in wallet_map.items():
+                    if strategy == "trade_up":
+                        state_raw = r.get(f"vespra:trade_up_state:{wid}")
+                        status[strategy] = json.loads(state_raw) if state_raw else {"active": False}
+                    else:
+                        status[strategy] = {"wallet_id": wid, "strategy": strategy}
+                self._json(200, {"wallet_map": wallet_map, "strategy_status": status})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if self.path == "/portfolio/history":
+            try:
+                r = _redis_client()
+                raw = r.lrange("vespra:portfolio_launches", 0, 49)
+                launches = []
+                for item in raw:
+                    try:
+                        launches.append(json.loads(item))
+                    except Exception:
+                        pass
+                self._json(200, {"count": len(launches), "launches": launches})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
         if self.path == "/queue/status":
             depth = queue_depth()
             self._json(200, {
@@ -3176,6 +3361,44 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"status": "stop_requested", "wallet_id": wallet_id})
             except Exception as e:
                 self._json(500, {"error": str(e)})
+
+        elif self.path == "/portfolio/launch":
+            dry_run = body.get("dry_run", False)
+
+            if not PORTFOLIO_MANAGER_ENABLED:
+                return self._json(403, {"error": "PORTFOLIO_MANAGER_ENABLED=false — set in .env and restart"})
+
+            # NL command path
+            if "command" in body:
+                total_eth = float(body.get("total_eth", PORTFOLIO_MAX_ETH))
+                if total_eth > PORTFOLIO_MAX_ETH:
+                    return self._json(400, {"error": f"total_eth {total_eth} exceeds PORTFOLIO_MAX_ETH {PORTFOLIO_MAX_ETH}"})
+                split = parse_portfolio_command(body["command"], total_eth)
+                if "error" in split:
+                    return self._json(400, {"error": split["error"]})
+
+            # Explicit pct path
+            elif all(k in body for k in ["total_eth", "yield_pct", "sniper_pct", "trade_up_pct"]):
+                total_eth = float(body["total_eth"])
+                if total_eth > PORTFOLIO_MAX_ETH:
+                    return self._json(400, {"error": f"total_eth {total_eth} exceeds PORTFOLIO_MAX_ETH {PORTFOLIO_MAX_ETH}"})
+                yield_pct = float(body["yield_pct"])
+                sniper_pct = float(body["sniper_pct"])
+                trade_up_pct = float(body["trade_up_pct"])
+                total_pct = yield_pct + sniper_pct + trade_up_pct
+                if abs(total_pct - 100.0) > 1.0:
+                    return self._json(400, {"error": f"Percentages sum to {total_pct}, must equal 100"})
+                split = {
+                    "yield": yield_pct / 100,
+                    "sniper": sniper_pct / 100,
+                    "trade_up": trade_up_pct / 100,
+                    "total_eth": total_eth,
+                }
+            else:
+                return self._json(400, {"error": "Provide either 'command' or 'total_eth + yield_pct + sniper_pct + trade_up_pct'"})
+
+            result = execute_portfolio_launch(split, dry_run=dry_run)
+            self._json(200, result)
 
         elif self.path == "/queue/push":
             agent   = body.get("agent", "")
