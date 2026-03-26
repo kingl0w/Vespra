@@ -8,6 +8,17 @@ use std::sync::Mutex;
 use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeeSweep {
+    pub id: i64,
+    pub sweep_type: String,
+    pub aum_eth: Option<f64>,
+    pub accrual_eth: f64,
+    pub tx_hash: Option<String>,
+    pub swept: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletRecord {
     pub id: String,
     pub address: String,
@@ -94,6 +105,15 @@ impl Keystore {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS fee_sweeps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sweep_type TEXT NOT NULL,
+                aum_eth REAL,
+                accrual_eth REAL NOT NULL,
+                tx_hash TEXT,
+                swept INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );",
         )?;
         Ok(Self { conn: Mutex::new(conn) })
@@ -278,6 +298,58 @@ impl Keystore {
                     "error": row.get::<_, Option<String>>(6)?,
                     "created_at": row.get::<_, String>(7)?,
                 }))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    // ─── Fee Sweep Helpers ───────────────────────────────────────
+
+    pub fn insert_fee_sweep(
+        &self, sweep_type: &str, aum_eth: Option<f64>, accrual_eth: f64,
+        tx_hash: Option<&str>, swept: bool,
+    ) -> AppResult<()> {
+        let conn = self.conn.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO fee_sweeps (sweep_type, aum_eth, accrual_eth, tx_hash, swept)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![sweep_type, aum_eth, accrual_eth, tx_hash, swept as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_last_aum_sweep_time(&self) -> AppResult<Option<i64>> {
+        let conn = self.conn.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+        match conn.query_row(
+            "SELECT strftime('%s', created_at) FROM fee_sweeps
+             WHERE sweep_type = 'aum' ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(ts_str) => Ok(ts_str.parse::<i64>().ok()),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn get_fee_sweeps(&self, limit: i64) -> AppResult<Vec<FeeSweep>> {
+        let conn = self.conn.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, sweep_type, aum_eth, accrual_eth, tx_hash, swept, created_at
+             FROM fee_sweeps ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                Ok(FeeSweep {
+                    id: row.get(0)?,
+                    sweep_type: row.get(1)?,
+                    aum_eth: row.get(2)?,
+                    accrual_eth: row.get(3)?,
+                    tx_hash: row.get(4)?,
+                    swept: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
             })?
             .filter_map(|r| r.ok())
             .collect();

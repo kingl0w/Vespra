@@ -23,6 +23,11 @@ const TREASURY_ADDRESS: &str = "0x10d2db399137b01a814162d49b1f1ca693747c0a";
 const PERF_FEE_BPS: u64 = 500;       // 500 basis points = 5%
 const MIN_FEE_WEI: u128 = 100_000_000_000_000; // 0.0001 ETH dust threshold
 
+// ─── AUM Fee Constants ───────────────────────────────────────────
+const AUM_FEE_BPS_ANNUAL: u128 = 50;           // 50 BPS = 0.5% annual
+const AUM_SWEEP_INTERVAL_SECS: u64 = 604_800;  // 7 days in seconds
+const MIN_AUM_SWEEP_WEI: u128 = 100_000_000_000_000; // 0.0001 ETH dust threshold
+
 /// Calculate fee in wei using basis points. Returns (fee_wei, net_wei).
 /// Returns (0, amount_wei) if fee is below dust threshold.
 fn calculate_fee(amount_wei: U256) -> (U256, U256) {
@@ -837,4 +842,214 @@ fn wei_to_eth_string(wei: U256) -> String {
         let trimmed = rem_str.trim_end_matches('0');
         format!("{whole}.{trimmed}")
     }
+}
+
+// ─── AUM Fee Sweep Background Task ──────────────────────────────
+
+pub async fn aum_sweep_loop(state: Arc<AppState>) {
+    tracing::info!(
+        interval_days = AUM_SWEEP_INTERVAL_SECS / 86400,
+        "[aum_fee] background sweep thread started"
+    );
+
+    // Always sleep one full interval before first sweep
+    tokio::time::sleep(tokio::time::Duration::from_secs(AUM_SWEEP_INTERVAL_SECS)).await;
+
+    loop {
+        if let Err(e) = run_aum_sweep(&state).await {
+            tracing::error!("[aum_fee] sweep error: {e}");
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(AUM_SWEEP_INTERVAL_SECS)).await;
+    }
+}
+
+async fn run_aum_sweep(state: &Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // 1. Get all active wallets
+    let wallets = state.keystore.list_wallets(None, None)?;
+    if wallets.is_empty() {
+        tracing::info!("[aum_fee] no wallets — skipping");
+        return Ok(());
+    }
+
+    // 2. Sum AUM across all wallets by fetching balances via RPC
+    let mut total_aum_wei: u128 = 0;
+    let mut highest_balance_wei: u128 = 0;
+    let mut sweep_wallet_info: Option<(&str, &str)> = None; // (wallet_id, chain)
+
+    for wallet in &wallets {
+        if !wallet.active { continue; }
+        let chain = match state.config.get_chain(&wallet.chain) {
+            Some(c) => c,
+            None => continue,
+        };
+        match rpc::get_balance(chain, &wallet.address).await {
+            Ok(balance) => {
+                // U256 -> u128: safe for realistic balances (< 2^128 wei)
+                let bal: u128 = balance.to_string().parse().unwrap_or(0);
+                total_aum_wei += bal;
+                if bal > highest_balance_wei {
+                    highest_balance_wei = bal;
+                    sweep_wallet_info = Some((&wallet.id, &wallet.chain));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("[aum_fee] balance fetch failed for {}: {e}", wallet.id);
+            }
+        }
+    }
+
+    if total_aum_wei == 0 {
+        tracing::info!("[aum_fee] total AUM is 0 — skipping");
+        return Ok(());
+    }
+
+    // 3. Calculate days since last sweep
+    let last_sweep_ts = state.keystore.get_last_aum_sweep_time()?;
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let days_elapsed = match last_sweep_ts {
+        Some(ts) => (now_ts - ts) as f64 / 86400.0,
+        None => AUM_SWEEP_INTERVAL_SECS as f64 / 86400.0,
+    };
+
+    // 4. Calculate accrual
+    let accrual_wei = (total_aum_wei as f64
+        * (AUM_FEE_BPS_ANNUAL as f64 / 10_000.0)
+        / 365.0
+        * days_elapsed) as u128;
+
+    let total_aum_eth = total_aum_wei as f64 / 1e18;
+    let accrual_eth = accrual_wei as f64 / 1e18;
+
+    tracing::info!(
+        aum_eth = total_aum_eth,
+        days = days_elapsed,
+        accrual_eth = accrual_eth,
+        "[aum_fee] calculated accrual"
+    );
+
+    // 5. Sweep if above dust threshold
+    let mut tx_hash: Option<String> = None;
+    let mut swept = false;
+
+    if accrual_wei >= MIN_AUM_SWEEP_WEI {
+        if let Some((wallet_id, chain_name)) = sweep_wallet_info {
+            if let Some(chain) = state.config.get_chain(chain_name) {
+                // Decrypt PK for the sweep wallet
+                match state.keystore.get_wallet(wallet_id) {
+                    Ok(wallet_record) => {
+                        match crypto::decrypt_key(&wallet_record.encrypted_key, &state.master_password) {
+                            Ok(mut pk_bytes) => {
+                                match rpc::send_native(
+                                    chain,
+                                    &pk_bytes,
+                                    TREASURY_ADDRESS,
+                                    U256::from(accrual_wei),
+                                ).await {
+                                    Ok(hash) => {
+                                        tx_hash = Some(hash.clone());
+                                        swept = true;
+                                        tracing::info!(
+                                            tx_hash = %hash,
+                                            accrual_eth = accrual_eth,
+                                            "[aum_fee] swept to treasury"
+                                        );
+                                        let _ = state.keystore.log_tx(
+                                            wallet_id, chain_name, Some(&hash),
+                                            "aum_fee_sweep", TREASURY_ADDRESS,
+                                            &accrual_wei.to_string(), "confirmed", None,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("[aum_fee] sweep TX failed: {e}");
+                                    }
+                                }
+                                crypto::zeroize_bytes(&mut pk_bytes);
+                            }
+                            Err(e) => tracing::error!("[aum_fee] PK decrypt failed: {e}"),
+                        }
+                    }
+                    Err(e) => tracing::error!("[aum_fee] wallet lookup failed: {e}"),
+                }
+            }
+        }
+    } else {
+        tracing::info!(
+            accrual_eth = accrual_eth,
+            threshold = MIN_AUM_SWEEP_WEI as f64 / 1e18,
+            "[aum_fee] accrual below dust threshold — not sweeping"
+        );
+    }
+
+    // 6. Always log the sweep attempt to DB
+    state.keystore.insert_fee_sweep(
+        "aum",
+        Some(total_aum_eth),
+        accrual_eth,
+        tx_hash.as_deref(),
+        swept,
+    )?;
+
+    Ok(())
+}
+
+// ─── Fee Endpoints ───────────────────────────────────────────────
+
+use axum::response::IntoResponse;
+
+pub async fn fees_aum(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.keystore.get_fee_sweeps(100) {
+        Ok(sweeps) => {
+            let total_eth: f64 = sweeps.iter()
+                .filter(|s| s.swept == 1)
+                .map(|s| s.accrual_eth)
+                .sum();
+
+            let last_ts = state.keystore.get_last_aum_sweep_time().unwrap_or(None);
+            let next_sweep_in_days = match last_ts {
+                Some(ts) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    let remaining = AUM_SWEEP_INTERVAL_SECS as i64 - (now - ts);
+                    (remaining.max(0) as f64) / 86400.0
+                }
+                None => 7.0,
+            };
+
+            Json(json!({
+                "count": sweeps.len(),
+                "total_aum_fee_eth": total_eth,
+                "fee_annual_pct": 0.5,
+                "next_sweep_in_days": next_sweep_in_days,
+                "sweep_interval_days": 7,
+                "sweeps": sweeps,
+            })).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        ).into_response(),
+    }
+}
+
+pub async fn fees_summary(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let sweeps = state.keystore.get_fee_sweeps(1000).unwrap_or_default();
+    let aum_total: f64 = sweeps.iter()
+        .filter(|s| s.sweep_type == "aum" && s.swept == 1)
+        .map(|s| s.accrual_eth)
+        .sum();
+    let perf_total: f64 = sweeps.iter()
+        .filter(|s| s.sweep_type == "perf" && s.swept == 1)
+        .map(|s| s.accrual_eth)
+        .sum();
+
+    Json(json!({
+        "aum_fee_total_eth": aum_total,
+        "perf_fee_total_eth": perf_total,
+        "grand_total_eth": aum_total + perf_total,
+        "treasury": TREASURY_ADDRESS,
+    })).into_response()
 }
