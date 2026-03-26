@@ -357,159 +357,6 @@ def pre_fetch_yield(chain_id=1):
         return {"markets": [], "gas_price_gwei": 0, "error": str(e), "timestamp": ""}
 
 
-def pre_fetch_yield_multiprotocol(chain: str = "base") -> dict:
-    """Fetch live APY data for all YIELD_PROTOCOLS from DeFi Llama yields API.
-
-    Uses concurrent fetches per protocol and returns a unified comparison dict.
-    """
-    import concurrent.futures
-
-    PROTOCOL_SLUGS = {
-        "aave":      ["aave-v3"],
-        "morpho":    ["morpho-blue", "morpho"],
-        "spark":     ["spark"],
-        "compound":  ["compound-v3"],
-        "aerodrome": ["aerodrome-finance", "aerodrome"],
-    }
-
-    LLAMA_CHAIN_MAP = {
-        "base":      "Base",
-        "arbitrum":  "Arbitrum",
-        "ethereum":  "Ethereum",
-    }
-    llama_chain = LLAMA_CHAIN_MAP.get(chain.lower(), "Base")
-
-    # Fetch all pools once, then filter per protocol
-    all_llama_pools = []
-    try:
-        req = Request("https://yields.llama.fi/pools", method="GET")
-        with urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-        all_llama_pools = data.get("data", [])
-    except Exception as e:
-        log.warning(f"[yield_multiprotocol] DeFi Llama fetch failed: {e}")
-
-    def filter_protocol(protocol: str) -> tuple:
-        try:
-            slugs = PROTOCOL_SLUGS.get(protocol, [protocol])
-            matches = [
-                p for p in all_llama_pools
-                if p.get("chain", "").lower() == llama_chain.lower()
-                and any(s in p.get("project", "").lower() for s in slugs)
-                and (p.get("apy") or 0) >= YIELD_MIN_APY
-            ]
-            matches = sorted(matches, key=lambda x: x.get("apy", 0), reverse=True)[:3]
-            return protocol, [
-                {
-                    "protocol": protocol,
-                    "pool": p.get("symbol", ""),
-                    "apy": round(p.get("apy", 0), 2),
-                    "tvl_usd": p.get("tvlUsd", 0),
-                    "pool_id": p.get("pool", ""),
-                    "il_risk": p.get("ilRisk", "no"),
-                    "stablecoin": p.get("stablecoin", False),
-                }
-                for p in matches
-            ]
-        except Exception as e:
-            log.warning(f"[yield_multiprotocol] filter_protocol {protocol} error: {e}")
-            return protocol, []
-
-    active_protocols = [p.strip() for p in YIELD_PROTOCOLS if p.strip()]
-    results = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(filter_protocol, p): p for p in active_protocols}
-        for future in concurrent.futures.as_completed(futures):
-            protocol, pools = future.result()
-            results[protocol] = pools
-
-    # Flatten and rank all pools across protocols
-    all_pools = []
-    for protocol, pools in results.items():
-        if protocol == "aerodrome":
-            for pool in pools:
-                pool["note"] = f"LP position — IL risk present. Max allocation: {YIELD_AERODROME_MAX_PCT}% of capital"
-        all_pools.extend(pools)
-
-    all_pools_ranked = sorted(all_pools, key=lambda x: x.get("apy", 0), reverse=True)
-
-    return {
-        "chain": chain,
-        "protocols_fetched": list(results.keys()),
-        "top_opportunities": all_pools_ranked[:10],
-        "per_protocol": results,
-        "fetch_timestamp": time.time(),
-    }
-
-
-# ─── Yield multi-protocol prompt ──────────────────────────────────
-YIELD_MULTIPROTOCOL_PROMPT = """
-You are the Yield agent in multi-protocol mode. You have live APY data from multiple
-DeFi protocols on {chain}. Your job is to recommend the single best deposit action.
-
-LIVE_YIELD_DATA:
-{yield_data}
-
-Rules:
-- Recommend the highest net APY opportunity that passes risk constraints
-- Aave and Compound are lowest risk (battle-tested, no IL)
-- Morpho gives slightly better rates by optimizing Aave/Compound positions
-- Spark is stable-focused (DAI/USDC) — recommend for stablecoin capital only
-- Aerodrome LP has IL risk — only recommend if apy > 15% and stablecoin=true,
-  and cap at {aerodrome_max_pct}% of total capital
-- Output strict JSON only:
-{{
-  "recommended_protocol": "aave"|"morpho"|"spark"|"compound"|"aerodrome",
-  "pool_id": "<DeFi Llama pool ID>",
-  "pool_symbol": "<symbol>",
-  "apy": <float>,
-  "action": "deposit"|"hold",
-  "amount_eth": "<amount or 'all'>",
-  "reasoning": "<one line>",
-  "executor_ready": true|false
-}}
-"""
-
-
-def build_yield_deposit_calldata(protocol: str, pool_id: str, amount_wei: str, chain: str) -> dict:
-    """Returns deposit calldata for the given protocol.
-
-    Aave V3 is fully implemented. Others return a structured intent
-    for Executor to handle — extendable as ABIs are added.
-    """
-    AAVE_V3_POOL_BASE = "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5"
-
-    if protocol == "aave":
-        asset = "0x4200000000000000000000000000000000000006"  # WETH on Base
-        calldata = (
-            "0x617ba037"
-            + asset[2:].zfill(64)
-            + hex(int(amount_wei))[2:].zfill(64)
-            + "0000000000000000000000000000000000000000000000000000000000000000"
-            + "0000000000000000000000000000000000000000000000000000000000000000"
-        )
-        return {
-            "protocol": "aave",
-            "to": AAVE_V3_POOL_BASE,
-            "calldata": calldata,
-            "amount_wei": amount_wei,
-            "chain": chain,
-        }
-
-    elif protocol in ("morpho", "spark", "compound", "aerodrome"):
-        return {
-            "protocol": protocol,
-            "pool_id": pool_id,
-            "amount_wei": amount_wei,
-            "chain": chain,
-            "calldata": None,
-            "note": f"{protocol} deposit intent — ABI calldata generation pending VES-42 expansion",
-            "executor_ready": False,
-        }
-
-    return {"error": f"unknown protocol: {protocol}"}
-
-
 AAVE_V3_SUBGRAPHS = {
     "base":      "https://api.goldsky.com/api/public/project_clk74pd7lueg738tw9t0cepc5/subgraphs/aave-v3-base/1.0.0/gn",
     "ethereum":  "https://api.thegraph.com/subgraphs/name/aave/protocol-v3",
@@ -553,10 +400,11 @@ COMMAND_MODE_ENABLED         = os.environ.get("COMMAND_MODE_ENABLED", "false").l
 COMMAND_MODE_MAX_ETH         = float(os.environ.get("COMMAND_MODE_MAX_ETH", "0.1"))
 COMMAND_KILL_SWITCH          = os.environ.get("COMMAND_KILL_SWITCH", "false").lower() == "true"
 
-# ─── Yield Multi-Protocol config ──────────────────────────────────
-YIELD_PROTOCOLS              = os.environ.get("YIELD_PROTOCOLS", "aave,morpho,spark,compound,aerodrome").split(",")
-YIELD_MIN_APY                = float(os.environ.get("YIELD_MIN_APY", "2.0"))
-YIELD_AERODROME_MAX_PCT      = float(os.environ.get("YIELD_AERODROME_MAX_PCT", "30.0"))
+# ─── Launcher Autonomous Deploy config ────────────────────────────
+LAUNCHER_ENABLED             = os.environ.get("LAUNCHER_ENABLED", "false").lower() == "true"
+LAUNCHER_INITIAL_LIQUIDITY_ETH = float(os.environ.get("LAUNCHER_INITIAL_LIQUIDITY_ETH", "0.05"))
+LAUNCHER_MAX_DEPLOY_ETH      = float(os.environ.get("LAUNCHER_MAX_DEPLOY_ETH", "0.1"))
+LAUNCHER_AUTO_LIQUIDITY      = os.environ.get("LAUNCHER_AUTO_LIQUIDITY", "true").lower() == "true"
 
 
 def _fetch_aave_health_factors(addresses, chain="base"):
@@ -1871,6 +1719,262 @@ def execute_portfolio_launch(split: dict, dry_run: bool = False) -> dict:
         log.error(f"[portfolio] Failed to persist launch record: {e}")
 
     return {"status": "ok", "portfolio": portfolio_record}
+
+
+# ─── Launcher Autonomous Deploy helpers ───────────────────────────
+
+def confirm_contract_address(tx_hash: str, chain: str = "base", max_attempts: int = 12, interval_sec: int = 5) -> dict:
+    """Poll Alchemy eth_getTransactionReceipt until confirmed or timeout.
+
+    Returns {"contract_address": "0x...", "tx_hash": ..., "block": int, "status": "confirmed"}
+    or {"error": "timeout"|"deploy_reverted"} after max_attempts.
+    """
+    alchemy_key = os.environ.get("ALCHEMY_API_KEY", "")
+    ALCHEMY_URLS = {
+        "base":         f"https://base-mainnet.g.alchemy.com/v2/{alchemy_key}",
+        "base_sepolia": f"https://base-sepolia.g.alchemy.com/v2/{alchemy_key}",
+        "arbitrum":     f"https://arb-mainnet.g.alchemy.com/v2/{alchemy_key}",
+    }
+    url = ALCHEMY_URLS.get(chain, ALCHEMY_URLS["base"])
+
+    for attempt in range(max_attempts):
+        try:
+            payload = json.dumps({
+                "jsonrpc": "2.0", "id": 1,
+                "method": "eth_getTransactionReceipt",
+                "params": [tx_hash],
+            }).encode()
+            req = Request(url, data=payload,
+                          headers={"Content-Type": "application/json"}, method="POST")
+            with urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+            receipt = data.get("result")
+            if receipt and receipt.get("contractAddress"):
+                return {
+                    "contract_address": receipt["contractAddress"],
+                    "tx_hash": tx_hash,
+                    "block": int(receipt.get("blockNumber", "0x0"), 16),
+                    "status": "confirmed",
+                }
+            if receipt and receipt.get("status") == "0x0":
+                return {"error": "deploy_reverted", "tx_hash": tx_hash}
+        except Exception as e:
+            log.warning(f"[confirm_contract] attempt {attempt + 1} error: {e}")
+        time.sleep(interval_sec)
+
+    return {"error": "timeout", "tx_hash": tx_hash, "attempts": max_attempts}
+
+
+def build_liquidity_calldata(token_address: str, token_amount_wei: str,
+                              eth_amount_wei: str, wallet_address: str,
+                              chain: str = "base") -> dict:
+    """Returns two calldata steps for Uniswap V2 liquidity provisioning.
+
+    Step 1: ERC-20 approve(router, token_amount)
+    Step 2: addLiquidityETH(token, amountTokenDesired, amountTokenMin,
+            amountETHMin, to, deadline)
+    """
+    UNISWAP_V2_ROUTER_BASE = "0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24"
+
+    # Step 1: approve(spender, amount) — selector 0x095ea7b3
+    approve_calldata = (
+        "0x095ea7b3"
+        + UNISWAP_V2_ROUTER_BASE[2:].zfill(64)
+        + hex(int(token_amount_wei))[2:].zfill(64)
+    )
+
+    # Step 2: addLiquidityETH — selector 0xf305d719
+    deadline = int(time.time()) + 1200  # 20 min
+    add_liq_calldata = (
+        "0xf305d719"
+        + token_address[2:].zfill(64)
+        + hex(int(token_amount_wei))[2:].zfill(64)
+        + "0" * 64  # amountTokenMin = 0
+        + "0" * 64  # amountETHMin = 0
+        + (wallet_address[2:] if wallet_address else "0" * 40).zfill(64)
+        + hex(deadline)[2:].zfill(64)
+    )
+
+    return {
+        "step1_approve": {
+            "to": token_address,
+            "calldata": approve_calldata,
+            "value_wei": "0",
+            "description": f"approve Uniswap V2 router to spend {token_amount_wei} tokens",
+        },
+        "step2_add_liquidity": {
+            "to": UNISWAP_V2_ROUTER_BASE,
+            "calldata": add_liq_calldata,
+            "value_wei": eth_amount_wei,
+            "description": f"addLiquidityETH — pair token with {eth_amount_wei} wei ETH",
+        },
+    }
+
+
+def execute_launcher_deploy(wallet_id: str, token_name: str, token_symbol: str,
+                             total_supply: int, decimals: int = 18,
+                             chain: str = "base", dry_run: bool = False) -> dict:
+    """Full pipeline: Launcher→Executor (deploy)→confirm address→approve→addLiquidityETH.
+
+    Returns post-deploy checklist dict.
+    """
+    if not LAUNCHER_ENABLED:
+        return {"error": "LAUNCHER_ENABLED=false — set in .env and restart"}
+
+    total_eth_needed = LAUNCHER_INITIAL_LIQUIDITY_ETH
+    if total_eth_needed > LAUNCHER_MAX_DEPLOY_ETH:
+        return {"error": f"LAUNCHER_INITIAL_LIQUIDITY_ETH {total_eth_needed} exceeds LAUNCHER_MAX_DEPLOY_ETH {LAUNCHER_MAX_DEPLOY_ETH}"}
+
+    # 1. Call Launcher agent for deploy calldata
+    launcher_msg = json.dumps({
+        "action": "deploy_erc20",
+        "name": token_name,
+        "symbol": token_symbol,
+        "total_supply": total_supply,
+        "decimals": decimals,
+        "chain": chain,
+    })
+    launcher_result = call_agent("launcher", launcher_msg)
+    try:
+        launcher_parsed = json.loads(launcher_result.get("response", "{}")) if isinstance(launcher_result.get("response"), str) else launcher_result.get("response", {})
+    except (json.JSONDecodeError, TypeError):
+        launcher_parsed = {}
+
+    calldata = launcher_parsed.get("calldata", "")
+    if not calldata:
+        return {"error": "Launcher agent returned no calldata", "launcher_response": launcher_parsed}
+
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "calldata_preview": calldata[:64] + "...",
+            "token_name": token_name,
+            "token_symbol": token_symbol,
+            "total_supply": total_supply,
+            "initial_liquidity_eth": LAUNCHER_INITIAL_LIQUIDITY_ETH,
+            "chain": chain,
+        }
+
+    # 2. Executor broadcasts deploy TX (to=None = contract deploy)
+    exec_msg = json.dumps({
+        "wallet_id": wallet_id,
+        "calldata": calldata,
+        "to": None,
+        "value_wei": "0",
+        "chain": chain,
+        "action": "deploy_contract",
+    })
+    deploy_result = call_agent("executor", exec_msg)
+    try:
+        deploy_parsed = json.loads(deploy_result.get("response", "{}")) if isinstance(deploy_result.get("response"), str) else deploy_result.get("response", {})
+    except (json.JSONDecodeError, TypeError):
+        deploy_parsed = {}
+
+    if deploy_parsed.get("status") != "success" and deploy_result.get("status") != "ok":
+        return {"error": "deploy TX failed", "executor_response": deploy_parsed}
+
+    tx_hash = deploy_parsed.get("tx_hash", "")
+
+    # 3. Confirm contract address from receipt
+    log.info(f"[launcher] deploy TX broadcast: {tx_hash} — polling for receipt...")
+    receipt = confirm_contract_address(tx_hash, chain=chain)
+    if "error" in receipt:
+        return {"error": f"deploy confirmation failed: {receipt['error']}", "tx_hash": tx_hash}
+
+    contract_address = receipt["contract_address"]
+    log.info(f"[launcher] contract confirmed: {contract_address}")
+
+    # Store in Redis
+    r = _redis_client()
+    r.lpush("vespra:deployed_contracts", json.dumps({
+        "contract_address": contract_address,
+        "tx_hash": tx_hash,
+        "token_name": token_name,
+        "token_symbol": token_symbol,
+        "total_supply": total_supply,
+        "chain": chain,
+        "wallet_id": wallet_id,
+        "deployed_at": time.time(),
+    }))
+    r.ltrim("vespra:deployed_contracts", 0, 99)
+
+    result = {
+        "deployed": True,
+        "contract_address": contract_address,
+        "tx_hash": tx_hash,
+        "token_name": token_name,
+        "token_symbol": token_symbol,
+        "chain": chain,
+        "dex_url": f"https://dexscreener.com/base/{contract_address}",
+        "liquidity_provisioned": False,
+        "liquidity_tx_hash": None,
+    }
+
+    # 4. Auto-liquidity provisioning
+    if LAUNCHER_AUTO_LIQUIDITY:
+        token_amount_wei = str(total_supply * (10 ** decimals) // 2)  # 50% of supply to LP
+        eth_amount_wei = str(int(LAUNCHER_INITIAL_LIQUIDITY_ETH * 1e18))
+
+        # Get wallet address for the LP recipient
+        wallet_address = wallet_id
+        try:
+            km = keymaster_call("get_wallet", {"wallet_id": wallet_id})
+            km_resp = km.get("response", {})
+            if isinstance(km_resp, str):
+                km_resp = json.loads(km_resp)
+            wallet_address = km_resp.get("address", wallet_id) if isinstance(km_resp, dict) else wallet_id
+        except Exception:
+            pass
+
+        liq_calldata = build_liquidity_calldata(
+            token_address=contract_address,
+            token_amount_wei=token_amount_wei,
+            eth_amount_wei=eth_amount_wei,
+            wallet_address=wallet_address,
+            chain=chain,
+        )
+
+        # Step 1: approve
+        approve_msg = json.dumps({
+            "wallet_id": wallet_id,
+            "calldata": liq_calldata["step1_approve"]["calldata"],
+            "to": contract_address,
+            "value_wei": "0",
+            "chain": chain,
+            "action": "approve",
+        })
+        approve_result = call_agent("executor", approve_msg)
+        try:
+            approve_parsed = json.loads(approve_result.get("response", "{}")) if isinstance(approve_result.get("response"), str) else approve_result.get("response", {})
+        except (json.JSONDecodeError, TypeError):
+            approve_parsed = {}
+
+        if approve_parsed.get("status") == "success" or approve_result.get("status") == "ok":
+            # Step 2: addLiquidityETH
+            liq_msg = json.dumps({
+                "wallet_id": wallet_id,
+                "calldata": liq_calldata["step2_add_liquidity"]["calldata"],
+                "to": liq_calldata["step2_add_liquidity"]["to"],
+                "value_wei": eth_amount_wei,
+                "chain": chain,
+                "action": "add_liquidity",
+            })
+            liq_result = call_agent("executor", liq_msg)
+            try:
+                liq_parsed = json.loads(liq_result.get("response", "{}")) if isinstance(liq_result.get("response"), str) else liq_result.get("response", {})
+            except (json.JSONDecodeError, TypeError):
+                liq_parsed = {}
+
+            if liq_parsed.get("status") == "success" or liq_result.get("status") == "ok":
+                result["liquidity_provisioned"] = True
+                result["liquidity_tx_hash"] = liq_parsed.get("tx_hash", "")
+                log.info(f"[launcher] liquidity provisioned: {result['liquidity_tx_hash']}")
+            else:
+                result["liquidity_error"] = liq_parsed.get("error", "add_liquidity failed")
+        else:
+            result["liquidity_error"] = approve_parsed.get("error", "approve failed")
+
+    return result
 
 
 # ─── Command Mode helpers ─────────────────────────────────────────
@@ -3204,7 +3308,7 @@ def call_agent(agent_key, message):
             )
             trader_context += trade_up_prompt
 
-    # Yield: inject live multi-protocol market data before the user message
+    # Yield: inject live Aave market data before the user message
     yield_context = ""
     if agent_key == "yield":
         from datetime import datetime, timezone
@@ -3212,26 +3316,12 @@ def call_agent(agent_key, message):
         msg_lower = message.lower()
         if "base" in msg_lower:
             chain_id = 8453
-            chain_name = "base"
         elif "arbitrum" in msg_lower:
             chain_id = 42161
-            chain_name = "arbitrum"
         else:
-            chain_id = 1
-            chain_name = "ethereum"
-
-        # Multi-protocol fetch (replaces single Aave fetch)
-        multi_data = pre_fetch_yield_multiprotocol(chain_name)
-        # Also fetch legacy Aave data for backwards compat
+            chain_id = 1  # default to Ethereum
         market_data = pre_fetch_yield(chain_id)
-
-        # Inject multi-protocol prompt
-        yield_context = YIELD_MULTIPROTOCOL_PROMPT.format(
-            chain=chain_name,
-            yield_data=json.dumps(multi_data, indent=2),
-            aerodrome_max_pct=YIELD_AERODROME_MAX_PCT,
-        )
-        yield_context += f"\n\nLEGACY_AAVE_DATA:\n{json.dumps(market_data)}"
+        yield_context = f"\n\nLIVE_MARKET_DATA:\n{json.dumps(market_data)}"
 
     # Sentinel: inject live wallet + Aave health data before the user message
     sentinel_context = ""
@@ -3508,20 +3598,6 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, _get_current_yield_position(wallet_id))
             return
 
-        if self.path.startswith("/yield/protocols"):
-            # Parse ?chain= query param
-            chain = "base"
-            if "?" in self.path:
-                from urllib.parse import urlparse, parse_qs
-                qs = parse_qs(urlparse(self.path).query)
-                chain = qs.get("chain", ["base"])[0]
-            try:
-                data = pre_fetch_yield_multiprotocol(chain)
-                self._json(200, data)
-            except Exception as e:
-                self._json(500, {"error": str(e)})
-            return
-
         if self.path == "/sniper/entries":
             entries = _get_sniper_entries()
             self._json(200, {"count": len(entries), "entries": entries})
@@ -3568,6 +3644,36 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         status[strategy] = {"wallet_id": wid, "strategy": strategy}
                 self._json(200, {"wallet_map": wallet_map, "strategy_status": status})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if self.path == "/launcher/contracts":
+            try:
+                r = _redis_client()
+                raw = r.lrange("vespra:deployed_contracts", 0, 99)
+                contracts = []
+                for item in raw:
+                    try:
+                        contracts.append(json.loads(item))
+                    except Exception:
+                        pass
+                self._json(200, {"count": len(contracts), "contracts": contracts})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if self.path == "/launcher/status":
+            try:
+                r = _redis_client()
+                count = r.llen("vespra:deployed_contracts")
+                self._json(200, {
+                    "LAUNCHER_ENABLED": LAUNCHER_ENABLED,
+                    "LAUNCHER_AUTO_LIQUIDITY": LAUNCHER_AUTO_LIQUIDITY,
+                    "LAUNCHER_INITIAL_LIQUIDITY_ETH": LAUNCHER_INITIAL_LIQUIDITY_ETH,
+                    "LAUNCHER_MAX_DEPLOY_ETH": LAUNCHER_MAX_DEPLOY_ETH,
+                    "deployed_contract_count": count,
+                })
             except Exception as e:
                 self._json(500, {"error": str(e)})
             return
@@ -3797,6 +3903,32 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"error": "Provide either 'command' or 'total_eth + yield_pct + sniper_pct + trade_up_pct'"})
 
             result = execute_portfolio_launch(split, dry_run=dry_run)
+            self._json(200, result)
+
+        elif self.path == "/launcher/deploy":
+            if not LAUNCHER_ENABLED:
+                return self._json(403, {"error": "LAUNCHER_ENABLED=false — set in .env and restart"})
+
+            wallet_id = body.get("wallet_id", "")
+            token_name = body.get("token_name", "")
+            token_symbol = body.get("token_symbol", "")
+            total_supply = int(body.get("total_supply", 1000000))
+            decimals = int(body.get("decimals", 18))
+            chain = body.get("chain", "base")
+            dry_run = body.get("dry_run", False)
+
+            if not all([wallet_id, token_name, token_symbol]):
+                return self._json(400, {"error": "wallet_id, token_name, and token_symbol are required"})
+
+            result = execute_launcher_deploy(
+                wallet_id=wallet_id,
+                token_name=token_name,
+                token_symbol=token_symbol,
+                total_supply=total_supply,
+                decimals=decimals,
+                chain=chain,
+                dry_run=dry_run,
+            )
             self._json(200, result)
 
         elif self.path == "/swarm/command":
