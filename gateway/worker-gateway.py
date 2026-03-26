@@ -416,6 +416,16 @@ if PERF_FEE_ENABLED and not TREASURY_WALLET_ADDRESS:
     logging.getLogger("vespra").error("[perf_fee] PERF_FEE_ENABLED=true but TREASURY_WALLET_ADDRESS is not set — disabling performance fee")
     PERF_FEE_ENABLED = False
 
+# ─── AUM Fee config ───────────────────────────────────────────────
+AUM_FEE_ENABLED              = os.environ.get("AUM_FEE_ENABLED", "false").lower() == "true"
+AUM_FEE_ANNUAL_PCT           = float(os.environ.get("AUM_FEE_ANNUAL_PCT", "0.5"))
+AUM_FEE_SWEEP_INTERVAL_DAYS  = int(os.environ.get("AUM_FEE_SWEEP_INTERVAL_DAYS", "7"))
+AUM_FEE_MIN_SWEEP_ETH        = float(os.environ.get("AUM_FEE_MIN_SWEEP_ETH", "0.001"))
+
+if AUM_FEE_ENABLED and not TREASURY_WALLET_ADDRESS:
+    logging.getLogger("vespra").error("[aum_fee] AUM_FEE_ENABLED=true but TREASURY_WALLET_ADDRESS is not set — disabling AUM fee")
+    AUM_FEE_ENABLED = False
+
 
 def _fetch_aave_health_factors(addresses, chain="base"):
     subgraph_url = AAVE_V3_SUBGRAPHS.get(chain)
@@ -1672,6 +1682,107 @@ def sweep_performance_fee(wallet_id: str, new_capital_eth: float, strategy: str,
     r.ltrim("vespra:fee_sweeps", 0, 199)
 
     return {"fee_eth": fee_eth, "swept": swept, "tx_hash": tx_hash, "new_hwm": new_hwm}
+
+
+# ─── AUM Fee helpers ──────────────────────────────────────────────
+
+def calculate_aum_fee(aum_eth: float, days: float) -> float:
+    """Pure fee math: 0.5% annual = 0.005 / 365 per day."""
+    daily_rate = AUM_FEE_ANNUAL_PCT / 100 / 365
+    return aum_eth * daily_rate * days
+
+
+def sweep_aum_fee():
+    """Read Sentinel snapshot for total AUM, calculate accrual since last sweep,
+    sweep to treasury if above dust threshold.
+    """
+    if not AUM_FEE_ENABLED:
+        return
+
+    r = _redis_client()
+
+    # Read last sweep timestamp
+    last_sweep_raw = r.get("vespra:aum_fee_last_sweep")
+    last_sweep_ts = float(last_sweep_raw) if last_sweep_raw else None
+    now = time.time()
+
+    if last_sweep_ts is None:
+        r.set("vespra:aum_fee_last_sweep", str(now))
+        log.info("[aum_fee] first run — initialized sweep timestamp, will sweep after first interval")
+        return
+
+    days_elapsed = (now - last_sweep_ts) / 86400
+
+    # Read AUM from Sentinel snapshot
+    snapshot_raw = r.get("vespra:sentinel_snapshot")
+    if not snapshot_raw:
+        log.warning("[aum_fee] no Sentinel snapshot found — skipping sweep")
+        return
+
+    try:
+        snapshot = json.loads(snapshot_raw)
+    except (json.JSONDecodeError, ValueError) as e:
+        log.warning(f"[aum_fee] failed to parse Sentinel snapshot: {e}")
+        return
+
+    # Extract total AUM
+    total_aum_eth = 0.0
+    if isinstance(snapshot, dict):
+        for key in ("total_eth", "total_value_eth", "aum_eth", "balance_eth"):
+            if key in snapshot:
+                total_aum_eth = float(snapshot[key])
+                break
+        if total_aum_eth == 0.0 and "wallets" in snapshot:
+            for w in snapshot.get("wallets", []):
+                total_aum_eth += float(w.get("balance_eth", 0))
+
+    if total_aum_eth <= 0:
+        log.info("[aum_fee] AUM is 0 or not readable from snapshot — skipping sweep")
+        return
+
+    accrual_eth = calculate_aum_fee(total_aum_eth, days_elapsed)
+    log.info(f"[aum_fee] aum={total_aum_eth:.6f} ETH days={days_elapsed:.2f} accrual={accrual_eth:.8f} ETH")
+
+    tx_hash = None
+    swept = False
+
+    if accrual_eth >= AUM_FEE_MIN_SWEEP_ETH:
+        sweep_result = keymaster_call("send_native", {
+            "wallet_id": "",
+            "to": TREASURY_WALLET_ADDRESS,
+            "amount_eth": str(round(accrual_eth, 8)),
+            "chain": "base",
+        })
+        km_resp = sweep_result.get("response", {})
+        if isinstance(km_resp, str):
+            try:
+                km_resp = json.loads(km_resp)
+            except Exception:
+                km_resp = {}
+        tx_hash_val = km_resp.get("tx_hash") if isinstance(km_resp, dict) else None
+        if tx_hash_val:
+            tx_hash = tx_hash_val
+            swept = True
+            log.info(f"[aum_fee] swept {accrual_eth:.8f} ETH to treasury — tx={tx_hash}")
+        else:
+            log.warning(f"[aum_fee] sweep failed: {sweep_result}")
+    else:
+        log.info(f"[aum_fee] accrual {accrual_eth:.8f} ETH below dust threshold {AUM_FEE_MIN_SWEEP_ETH} — not sweeping")
+
+    # Always update last sweep timestamp
+    r.set("vespra:aum_fee_last_sweep", str(now))
+
+    # Log regardless of whether sweep fired
+    r.lpush("vespra:aum_fee_sweeps", json.dumps({
+        "aum_eth": total_aum_eth,
+        "days_elapsed": round(days_elapsed, 4),
+        "accrual_eth": round(accrual_eth, 8),
+        "fee_pct_annual": AUM_FEE_ANNUAL_PCT,
+        "swept": swept,
+        "tx_hash": tx_hash,
+        "timestamp": now,
+    }))
+    r.ltrim("vespra:aum_fee_sweeps", 0, 199)
 
 
 # ─── Portfolio Manager helpers ────────────────────────────────────
@@ -3810,6 +3921,87 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": str(e)})
             return
 
+        if self.path == "/fees/aum":
+            try:
+                r = _redis_client()
+                raw = r.lrange("vespra:aum_fee_sweeps", 0, 199)
+                sweeps = []
+                for item in raw:
+                    try:
+                        sweeps.append(json.loads(item))
+                    except Exception:
+                        pass
+                total_fee_eth = sum(s.get("accrual_eth", 0) for s in sweeps if s.get("swept"))
+
+                last_sweep_raw = r.get("vespra:aum_fee_last_sweep")
+                last_sweep_ts = float(last_sweep_raw) if last_sweep_raw else None
+                if last_sweep_ts:
+                    next_sweep_in_days = max(0, AUM_FEE_SWEEP_INTERVAL_DAYS - (time.time() - last_sweep_ts) / 86400)
+                else:
+                    next_sweep_in_days = AUM_FEE_SWEEP_INTERVAL_DAYS
+
+                # Current AUM from latest Sentinel snapshot
+                current_aum_eth = None
+                snapshot_raw = r.get("vespra:sentinel_snapshot")
+                if snapshot_raw:
+                    try:
+                        snapshot = json.loads(snapshot_raw)
+                        for key in ("total_eth", "total_value_eth", "aum_eth", "balance_eth"):
+                            if key in snapshot:
+                                current_aum_eth = float(snapshot[key])
+                                break
+                    except Exception:
+                        pass
+
+                self._json(200, {
+                    "count": len(sweeps),
+                    "total_fee_eth": round(total_fee_eth, 8),
+                    "fee_annual_pct": AUM_FEE_ANNUAL_PCT,
+                    "enabled": AUM_FEE_ENABLED,
+                    "treasury": TREASURY_WALLET_ADDRESS or "not set",
+                    "current_aum_eth": current_aum_eth,
+                    "next_sweep_in_days": round(next_sweep_in_days, 2),
+                    "sweep_interval_days": AUM_FEE_SWEEP_INTERVAL_DAYS,
+                    "sweeps": sweeps,
+                })
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if self.path == "/fees/summary":
+            try:
+                r = _redis_client()
+
+                perf_raw = r.lrange("vespra:fee_sweeps", 0, 199)
+                perf_sweeps = []
+                for item in perf_raw:
+                    try:
+                        perf_sweeps.append(json.loads(item))
+                    except Exception:
+                        pass
+                perf_total = sum(s.get("fee_eth", 0) for s in perf_sweeps if s.get("swept"))
+
+                aum_raw = r.lrange("vespra:aum_fee_sweeps", 0, 199)
+                aum_sweeps = []
+                for item in aum_raw:
+                    try:
+                        aum_sweeps.append(json.loads(item))
+                    except Exception:
+                        pass
+                aum_total = sum(s.get("accrual_eth", 0) for s in aum_sweeps if s.get("swept"))
+
+                self._json(200, {
+                    "perf_fee_total_eth": round(perf_total, 8),
+                    "aum_fee_total_eth": round(aum_total, 8),
+                    "grand_total_eth": round(perf_total + aum_total, 8),
+                    "treasury": TREASURY_WALLET_ADDRESS or "not set",
+                    "perf_fee_enabled": PERF_FEE_ENABLED,
+                    "aum_fee_enabled": AUM_FEE_ENABLED,
+                })
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
         if self.path == "/portfolio/history":
             try:
                 r = _redis_client()
@@ -4126,6 +4318,22 @@ if __name__ == "__main__":
     _sentinel_thread = threading.Thread(target=_sentinel_poll_loop, daemon=True, name="sentinel-poll")
     _sentinel_thread.start()
     log.info(f"Sentinel poll thread started (every {SENTINEL_POLL_INTERVAL}s)")
+
+    # AUM fee background sweep thread
+    def _aum_fee_loop():
+        log.info(f"[aum_fee] background thread started (interval={AUM_FEE_SWEEP_INTERVAL_DAYS}d)")
+        # Initial delay — wait one full interval before first sweep attempt
+        time.sleep(AUM_FEE_SWEEP_INTERVAL_DAYS * 86400)
+        while True:
+            try:
+                sweep_aum_fee()
+            except Exception as e:
+                log.error(f"[aum_fee] loop error: {e}")
+            time.sleep(AUM_FEE_SWEEP_INTERVAL_DAYS * 86400)
+
+    _aum_fee_thread = threading.Thread(target=_aum_fee_loop, daemon=True, name="aum-fee")
+    _aum_fee_thread.start()
+    log.info(f"[aum_fee] fee thread started (every {AUM_FEE_SWEEP_INTERVAL_DAYS}d, enabled={AUM_FEE_ENABLED})")
 
     if QUEUE_ENABLED:
         _worker_thread = threading.Thread(target=_queue_worker, daemon=True, name="queue-worker")
