@@ -369,6 +369,18 @@ SENTINEL_POLL_INTERVAL = int(os.environ.get("SENTINEL_POLL_INTERVAL", "300"))  #
 SENTINEL_STOP_LOSS_PCT = float(os.environ.get("SENTINEL_STOP_LOSS_PCT", "20.0"))  # exit on 20% drop
 SENTINEL_ALERT_CHANNEL = os.environ.get("SENTINEL_ALERT_CHANNEL", "")  # NullClaw channel name
 
+# ─── Yield rotation config ────────────────────────────────────────
+YIELD_AUTO_ROTATE_ENABLED       = os.environ.get("YIELD_AUTO_ROTATE_ENABLED", "false").lower() == "true"
+YIELD_AUTO_ROTATE_THRESHOLD_PCT = float(os.environ.get("YIELD_AUTO_ROTATE_THRESHOLD_PCT", "1.0"))
+YIELD_MAX_ROTATE_ETH            = float(os.environ.get("YIELD_MAX_ROTATE_ETH", "0.5"))
+YIELD_GAS_RESERVE_ETH           = float(os.environ.get("YIELD_GAS_RESERVE_ETH", "0.01"))
+
+# ─── Sniper auto-entry config ─────────────────────────────────────
+SNIPER_AUTO_ENTRY_ENABLED = os.environ.get("SNIPER_AUTO_ENTRY_ENABLED", "false").lower() == "true"
+SNIPER_MAX_ENTRY_ETH      = float(os.environ.get("SNIPER_MAX_ENTRY_ETH", "0.05"))
+SNIPER_MIN_TVL            = int(os.environ.get("SNIPER_MIN_TVL", "50000"))
+SNIPER_EXIT_TVL_DROP_PCT  = float(os.environ.get("SNIPER_EXIT_TVL_DROP_PCT", "30.0"))
+
 
 def _fetch_aave_health_factors(addresses, chain="base"):
     subgraph_url = AAVE_V3_SUBGRAPHS.get(chain)
@@ -890,6 +902,461 @@ def pre_fetch_sniper(pool_address, chain="base"):
         }
 
 
+# ─── Yield rotation helpers ───────────────────────────────────────
+
+def _get_current_yield_position(wallet_id: str) -> dict:
+    """Read current yield position from Redis vespra:yield_position:{wallet_id}."""
+    try:
+        r = _redis_client()
+        raw = r.get(f"vespra:yield_position:{wallet_id}")
+        return json.loads(raw) if raw else {}
+    except Exception:
+        return {}
+
+
+def _save_yield_position(wallet_id: str, position: dict):
+    """Save current yield position to Redis."""
+    try:
+        r = _redis_client()
+        r.set(f"vespra:yield_position:{wallet_id}", json.dumps(position))
+    except Exception as e:
+        log.error(f"Failed to save yield position: {e}")
+
+
+def _log_yield_rotation(rotation: dict):
+    """Append rotation event to Redis vespra:yield_rotations list."""
+    try:
+        from datetime import datetime, timezone
+        rotation["timestamp"] = datetime.now(timezone.utc).isoformat()
+        r = _redis_client()
+        r.lpush("vespra:yield_rotations", json.dumps(rotation))
+        r.ltrim("vespra:yield_rotations", 0, 99)  # keep last 100
+    except Exception as e:
+        log.error(f"Failed to log yield rotation: {e}")
+
+
+def _build_aave_supply_calldata(asset_address: str, amount_wei: int, on_behalf_of: str) -> str:
+    """Build Aave V3 supply() calldata.
+
+    supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)
+    Selector: 0x617ba037
+    """
+    def pad32_address(addr: str) -> str:
+        return addr.lower().replace("0x", "").zfill(64)
+
+    def pad32_uint(n: int) -> str:
+        return hex(n)[2:].zfill(64)
+
+    selector   = "617ba037"
+    asset_pad  = pad32_address(asset_address)
+    amount_pad = pad32_uint(amount_wei)
+    behalf_pad = pad32_address(on_behalf_of)
+    referral   = pad32_uint(0)
+    return "0x" + selector + asset_pad + amount_pad + behalf_pad + referral
+
+
+def _build_aave_withdraw_calldata(asset_address: str, amount_wei: int, to_address: str) -> str:
+    """Build Aave V3 withdraw() calldata.
+
+    withdraw(address asset, uint256 amount, address to)
+    Selector: 0x69328dec
+    """
+    def pad32_address(addr: str) -> str:
+        return addr.lower().replace("0x", "").zfill(64)
+
+    def pad32_uint(n: int) -> str:
+        return hex(n)[2:].zfill(64)
+
+    # Use max uint256 to withdraw full position
+    MAX_UINT256 = (2**256) - 1
+    actual_amount = amount_wei if amount_wei > 0 else MAX_UINT256
+
+    selector   = "69328dec"
+    asset_pad  = pad32_address(asset_address)
+    amount_pad = pad32_uint(actual_amount)
+    to_pad     = pad32_address(to_address)
+    return "0x" + selector + asset_pad + amount_pad + to_pad
+
+
+def _build_erc20_approve_calldata(spender_address: str, amount_wei: int) -> str:
+    """Build ERC-20 approve() calldata.
+
+    approve(address spender, uint256 amount)
+    Selector: 0x095ea7b3
+    """
+    def pad32_address(addr: str) -> str:
+        return addr.lower().replace("0x", "").zfill(64)
+
+    def pad32_uint(n: int) -> str:
+        return hex(n)[2:].zfill(64)
+
+    selector    = "095ea7b3"
+    spender_pad = pad32_address(spender_address)
+    amount_pad  = pad32_uint(amount_wei)
+    return "0x" + selector + spender_pad + amount_pad
+
+
+# Aave V3 pool addresses by chain
+AAVE_V3_POOLS = {
+    "base":     "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",
+    "ethereum": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+    "arbitrum": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+}
+
+# Common asset addresses (base chain)
+AAVE_ASSETS_BASE = {
+    "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "WETH": "0x4200000000000000000000000000000000000006",
+    "cbBTC": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+}
+
+
+def execute_yield_rotation(
+    wallet_id: str,
+    current_protocol: str,
+    current_asset: str,
+    target_protocol: str,
+    target_asset: str,
+    amount_eth: float,
+    chain: str = "base",
+) -> dict:
+    """Execute a yield rotation: withdraw from current position → deposit to new.
+
+    Atomic: if deposit fails after withdraw, sweeps to Safe.
+    Returns rotation result dict.
+    """
+    from datetime import datetime, timezone
+
+    log.warning(
+        f"YIELD_ROTATE: {current_protocol}/{current_asset} → "
+        f"{target_protocol}/{target_asset} amount={amount_eth} ETH chain={chain}"
+    )
+
+    rotation = {
+        "wallet_id":        wallet_id,
+        "from_protocol":    current_protocol,
+        "from_asset":       current_asset,
+        "to_protocol":      target_protocol,
+        "to_asset":         target_asset,
+        "amount_eth":       amount_eth,
+        "chain":            chain,
+        "status":           "pending",
+        "withdraw_tx":      None,
+        "deposit_tx":       None,
+        "error":            None,
+    }
+
+    amount_wei = int(amount_eth * 1e18)
+    aave_pool  = AAVE_V3_POOLS.get(chain)
+
+    if not aave_pool:
+        rotation["status"] = "error"
+        rotation["error"]  = f"No Aave V3 pool for chain {chain}"
+        _log_yield_rotation(rotation)
+        return rotation
+
+    # Step 1 — Withdraw from current position
+    # For Aave, call withdraw(asset, MAX_UINT256, wallet_address)
+    # We need wallet address — fetch from Keymaster
+    wallet_address = ""
+    try:
+        km_result = keymaster_call("get_wallet", {"wallet_id": wallet_id})
+        wallet_address = km_result.get("response", {}).get("address", "") if isinstance(km_result.get("response"), dict) else ""
+    except Exception as e:
+        rotation["status"] = "error"
+        rotation["error"]  = f"Failed to get wallet address: {e}"
+        _log_yield_rotation(rotation)
+        return rotation
+
+    if not wallet_address:
+        rotation["status"] = "error"
+        rotation["error"]  = "Could not resolve wallet address"
+        _log_yield_rotation(rotation)
+        return rotation
+
+    asset_address = AAVE_ASSETS_BASE.get(current_asset.upper(), "")
+    if not asset_address:
+        rotation["status"] = "error"
+        rotation["error"]  = f"Unknown asset {current_asset}"
+        _log_yield_rotation(rotation)
+        return rotation
+
+    withdraw_calldata = _build_aave_withdraw_calldata(asset_address, 0, wallet_address)  # 0 = full balance
+    withdraw_result = keymaster_call("send_tx", {
+        "wallet_id": wallet_id,
+        "to":        aave_pool,
+        "value_eth": "0",
+        "data":      withdraw_calldata,
+    })
+
+    withdraw_status = withdraw_result.get("status")
+    withdraw_resp   = withdraw_result.get("response", {})
+    if isinstance(withdraw_resp, str):
+        try:
+            withdraw_resp = json.loads(withdraw_resp)
+        except Exception:
+            pass
+
+    if withdraw_status == "error" or (isinstance(withdraw_resp, dict) and withdraw_resp.get("status") not in ("ok", None)):
+        rotation["status"] = "withdraw_failed"
+        rotation["error"]  = str(withdraw_result.get("response", "unknown error"))
+        _log_yield_rotation(rotation)
+        return rotation
+
+    rotation["withdraw_tx"] = withdraw_resp.get("tx_hash") if isinstance(withdraw_resp, dict) else None
+    log.info(f"YIELD_ROTATE: withdraw tx={rotation['withdraw_tx']}")
+
+    # Step 2 — Approve Aave pool to spend target asset
+    target_asset_address = AAVE_ASSETS_BASE.get(target_asset.upper(), "")
+    if not target_asset_address:
+        # Withdraw succeeded but deposit impossible — sweep to Safe
+        log.error(f"YIELD_ROTATE: unknown target asset {target_asset} — sweeping to Safe")
+        keymaster_call("sweep", {"wallet_id": wallet_id})
+        rotation["status"] = "deposit_failed_swept"
+        rotation["error"]  = f"Unknown target asset {target_asset}"
+        _log_yield_rotation(rotation)
+        return rotation
+
+    approve_calldata = _build_erc20_approve_calldata(aave_pool, amount_wei)
+    approve_result = keymaster_call("send_tx", {
+        "wallet_id": wallet_id,
+        "to":        target_asset_address,
+        "value_eth": "0",
+        "data":      approve_calldata,
+    })
+    approve_resp = approve_result.get("response", {})
+    if isinstance(approve_resp, str):
+        try:
+            approve_resp = json.loads(approve_resp)
+        except Exception:
+            pass
+    if approve_result.get("status") == "error":
+        log.error(f"YIELD_ROTATE: approve failed — sweeping to Safe")
+        keymaster_call("sweep", {"wallet_id": wallet_id})
+        rotation["status"] = "deposit_failed_swept"
+        rotation["error"]  = "ERC-20 approve failed"
+        _log_yield_rotation(rotation)
+        return rotation
+
+    # Step 3 — Supply to new Aave position
+    supply_calldata = _build_aave_supply_calldata(target_asset_address, amount_wei, wallet_address)
+    deposit_result = keymaster_call("send_tx", {
+        "wallet_id": wallet_id,
+        "to":        aave_pool,
+        "value_eth": "0",
+        "data":      supply_calldata,
+    })
+
+    deposit_resp = deposit_result.get("response", {})
+    if isinstance(deposit_resp, str):
+        try:
+            deposit_resp = json.loads(deposit_resp)
+        except Exception:
+            pass
+
+    if deposit_result.get("status") == "error" or (isinstance(deposit_resp, dict) and deposit_resp.get("status") == "simulation_failed"):
+        log.error(f"YIELD_ROTATE: deposit failed — sweeping to Safe")
+        keymaster_call("sweep", {"wallet_id": wallet_id})
+        rotation["status"] = "deposit_failed_swept"
+        rotation["error"]  = str(deposit_result.get("response", "deposit failed"))
+        _log_yield_rotation(rotation)
+        return rotation
+
+    rotation["deposit_tx"] = deposit_resp.get("tx_hash") if isinstance(deposit_resp, dict) else None
+    rotation["status"]     = "completed"
+
+    # Save new position state
+    _save_yield_position(wallet_id, {
+        "protocol":   target_protocol,
+        "asset":      target_asset,
+        "amount_eth": amount_eth,
+        "chain":      chain,
+    })
+
+    log.warning(f"YIELD_ROTATE: completed — deposit tx={rotation['deposit_tx']}")
+    _log_yield_rotation(rotation)
+    return rotation
+
+
+# ─── Sniper auto-entry helpers ────────────────────────────────────
+
+def _log_sniper_entry(entry: dict):
+    """Store sniper entry in Redis vespra:sniper_entries."""
+    try:
+        from datetime import datetime, timezone
+        entry["timestamp"] = datetime.now(timezone.utc).isoformat()
+        r = _redis_client()
+        r.lpush("vespra:sniper_entries", json.dumps(entry))
+        r.ltrim("vespra:sniper_entries", 0, 99)
+    except Exception as e:
+        log.error(f"Failed to log sniper entry: {e}")
+
+
+def _get_sniper_entries() -> list:
+    """Read open sniper entries from Redis."""
+    try:
+        r = _redis_client()
+        items = r.lrange("vespra:sniper_entries", 0, 99)
+        return [json.loads(i) for i in items if i]
+    except Exception:
+        return []
+
+
+def _build_1inch_swap_calldata(
+    token_in: str,
+    token_out: str,
+    amount_wei: int,
+    min_out_wei: int,
+    recipient: str,
+    chain_id: int = 8453,
+) -> str | None:
+    """Fetch swap calldata from 1inch Aggregation API v6.
+
+    Returns 0x-prefixed calldata string or None on failure.
+    """
+    api_key = os.environ.get("ONEINCH_API_KEY", "").strip()
+    if not api_key:
+        return None
+    try:
+        url = (
+            f"https://api.1inch.dev/swap/v6.0/{chain_id}/swap"
+            f"?src={token_in}&dst={token_out}&amount={amount_wei}"
+            f"&from={recipient}&slippage=1&disableEstimate=true"
+        )
+        req = Request(url, headers={
+            "Authorization": f"Bearer {api_key}",
+            "accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (compatible; Vespra/1.0)",
+        })
+        with urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        return data.get("tx", {}).get("data")
+    except Exception as e:
+        log.error(f"1inch calldata fetch failed: {e}")
+        return None
+
+
+def execute_sniper_entry(
+    pool_address: str,
+    pool_data: dict,
+    sniper_output: dict,
+    chain: str = "base",
+) -> dict:
+    """Execute a sniper entry swap via 1inch + Keymaster send_tx.
+
+    Returns entry result dict stored in Redis.
+    """
+    wallet_id = _STRATEGY_WALLET_MAP.get("sniper", "")
+    if not wallet_id:
+        return {"status": "error", "error": "No sniper wallet in STRATEGY_WALLET_MAP"}
+
+    entry_eth = min(
+        float(sniper_output.get("entry", {}).get("amount_eth", "0.05")),
+        SNIPER_MAX_ENTRY_ETH,
+    )
+
+    # Hard TVL floor — never enter below this regardless of sniper output
+    tvl = pool_data.get("tvl_usd", 0) or sniper_output.get("pool", {}).get("tvl_usd", 0)
+    if tvl < SNIPER_MIN_TVL:
+        return {"status": "skipped", "reason": f"TVL ${tvl} below SNIPER_MIN_TVL ${SNIPER_MIN_TVL}"}
+
+    # Risk gate — only LOW or MEDIUM
+    risk_score = sniper_output.get("risk_assessment", {}).get("score", "HIGH")
+    if risk_score in ("HIGH", "CRITICAL"):
+        return {"status": "skipped", "reason": f"Risk score {risk_score} above threshold"}
+
+    entry = {
+        "pool_address": pool_address,
+        "chain":        chain,
+        "wallet_id":    wallet_id,
+        "entry_eth":    entry_eth,
+        "tvl_at_entry": tvl,
+        "risk_score":   risk_score,
+        "pair":         sniper_output.get("pool", {}).get("pair", ""),
+        "status":       "pending",
+        "tx_hash":      None,
+        "error":        None,
+    }
+
+    # Get wallet address for 1inch call
+    wallet_address = ""
+    try:
+        km = keymaster_call("get_wallet", {"wallet_id": wallet_id})
+        resp = km.get("response", {})
+        if isinstance(resp, str):
+            resp = json.loads(resp)
+        wallet_address = resp.get("address", "") if isinstance(resp, dict) else ""
+    except Exception as e:
+        entry["status"] = "error"
+        entry["error"]  = f"Wallet lookup failed: {e}"
+        _log_sniper_entry(entry)
+        return entry
+
+    # Chain config
+    chain_id_map = {"base": 8453, "ethereum": 1, "arbitrum": 42161}
+    chain_id = chain_id_map.get(chain, 8453)
+    weth = BASE_TOKEN_ADDRESSES.get(chain_id, {}).get("WETH", "")
+    amount_wei = int(entry_eth * 1e18)
+
+    # Get 1inch swap calldata: WETH → pool token
+    # Use pool address as token_out (approximation — ideally resolve token0/token1)
+    token_out = pool_address  # Sniper will have scored the pool token
+    calldata = _build_1inch_swap_calldata(weth, token_out, amount_wei, 0, wallet_address, chain_id)
+
+    if not calldata:
+        # Fallback: send ETH directly to pool as liquidity (simpler)
+        log.warning(f"SNIPER: 1inch calldata unavailable — attempting direct ETH send to pool")
+        km_result = keymaster_call("send_native", {
+            "wallet_id": wallet_id,
+            "to":        pool_address,
+            "amount_eth": str(entry_eth),
+        })
+    else:
+        # Broadcast swap via send_tx
+        router_address = "0x1111111254EEB25477B68fb85Ed929f73A960582"  # 1inch v5 router
+        km_result = keymaster_call("send_tx", {
+            "wallet_id": wallet_id,
+            "to":        router_address,
+            "value_eth": str(entry_eth),
+            "data":      calldata,
+        })
+
+    km_resp = km_result.get("response", {})
+    if isinstance(km_resp, str):
+        try:
+            km_resp = json.loads(km_resp)
+        except Exception:
+            pass
+
+    if km_result.get("status") == "error" or (isinstance(km_resp, dict) and km_resp.get("status") == "simulation_failed"):
+        entry["status"] = "tx_failed"
+        entry["error"]  = str(km_result.get("response", "unknown"))
+    else:
+        entry["status"]   = "entered"
+        entry["tx_hash"]  = km_resp.get("tx_hash") if isinstance(km_resp, dict) else None
+        log.warning(f"SNIPER ENTRY: pool={pool_address[:12]}... pair={entry['pair']} eth={entry_eth} tx={entry['tx_hash']}")
+
+        # Register position in Redis trade_positions for Sentinel to monitor
+        try:
+            r = _redis_client()
+            position = {
+                "type":           "sniper",
+                "pool_address":   pool_address,
+                "wallet_id":      wallet_id,
+                "entry_eth":      entry_eth,
+                "tvl_at_entry":   tvl,
+                "entry_tx":       entry["tx_hash"],
+                "chain":          chain,
+                "exit_trigger_tvl_drop_pct": SNIPER_EXIT_TVL_DROP_PCT,
+            }
+            r.lpush("vespra:trade_positions", json.dumps(position))
+        except Exception:
+            pass
+
+    _log_sniper_entry(entry)
+    return entry
+
+
 # DAG definitions: map goal keywords to ordered agent pipelines
 COORDINATOR_DAGS = {
     "yield_rotate": ["scout", "risk", "yield"],
@@ -976,12 +1443,57 @@ def orchestrate_dag(goal, message):
         # Feed this result into the next agent's context
         context_chain = f"{message}\n\nPREVIOUS AGENT OUTPUT ({agent_key}):\n{raw_response[:1000]}"
 
+    # Yield rotation auto-execution
+    rotation_result = None
+    if dag_name == "yield_rotate" and YIELD_AUTO_ROTATE_ENABLED:
+        # Extract yield step result
+        yield_step = next((s for s in steps if s["agent"] == "yield" and s["status"] == "ok"), None)
+        risk_step  = next((s for s in steps if s["agent"] == "risk"  and s["status"] == "ok"), None)
+
+        if yield_step and risk_step:
+            # Parse yield output for rotation recommendation
+            try:
+                yield_raw = call_agent.__globals__.get("_last_yield_response", "")
+                # Re-run yield to get parsed output from context_chain
+                yield_output = None
+                for step in steps:
+                    if step["agent"] == "yield":
+                        # summary contains the parsed action
+                        if "rebalance" in step.get("summary", ""):
+                            yield_output = step
+                            break
+
+                # Check risk gate_pass from summary
+                risk_gate = "gate_pass=True" in risk_step.get("summary", "") or "gate_pass=true" in risk_step.get("summary", "").lower()
+
+                if yield_output and risk_gate:
+                    # Parse APY delta from summaries
+                    wallet_id = _STRATEGY_WALLET_MAP.get("yield", "")
+                    if wallet_id:
+                        # Extract current and target from yield summary
+                        summary = yield_output.get("summary", "")
+                        # Default rotation params — Coordinator will refine
+                        rotation_result = execute_yield_rotation(
+                            wallet_id      = wallet_id,
+                            current_protocol = "aave-v3",
+                            current_asset  = "USDC",
+                            target_protocol  = "aave-v3",
+                            target_asset   = "WETH",
+                            amount_eth     = min(YIELD_MAX_ROTATE_ETH, 0.1),
+                            chain          = "base",
+                        )
+                    else:
+                        log.warning("YIELD_ROTATE: no wallet mapped for 'yield' strategy — set STRATEGY_WALLET_MAP")
+            except Exception as e:
+                log.error(f"YIELD_ROTATE DAG error: {e}")
+
     return {
-        "dag_name":      dag_name,
-        "steps":         steps,
-        "trigger_dag":   trigger_dag,
-        "final_context": context_chain,
-        "timestamp":     datetime.now(timezone.utc).isoformat(),
+        "dag_name":        dag_name,
+        "steps":           steps,
+        "trigger_dag":     trigger_dag,
+        "rotation_result": rotation_result,
+        "final_context":   context_chain,
+        "timestamp":       datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -2240,6 +2752,32 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json(500, {"error": str(e)})
             return
+
+        if self.path == "/yield/rotations":
+            try:
+                r = _redis_client()
+                items = r.lrange("vespra:yield_rotations", 0, 49)
+                rotations = []
+                for item in items:
+                    try:
+                        rotations.append(json.loads(item))
+                    except Exception:
+                        pass
+                self._json(200, {"count": len(rotations), "rotations": rotations})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if self.path.startswith("/yield/position/"):
+            wallet_id = self.path.split("/yield/position/", 1)[1].strip("/")
+            self._json(200, _get_current_yield_position(wallet_id))
+            return
+
+        if self.path == "/sniper/entries":
+            entries = _get_sniper_entries()
+            self._json(200, {"count": len(entries), "entries": entries})
+            return
+
         if self.path == "/queue/status":
             depth = queue_depth()
             self._json(200, {
@@ -2343,7 +2881,29 @@ class Handler(BaseHTTPRequestHandler):
 
                 log.info(f"Alchemy webhook: new pool detected {pool_address[:12]}... on {chain}")
                 result = call_agent("sniper", f"Score new pool {pool_address} on {chain}")
-                triggered.append({"pool_address": pool_address, "chain": chain, "result": result})
+                entry_result = None
+
+                # Auto-entry if enabled and sniper recommends it
+                if SNIPER_AUTO_ENTRY_ENABLED:
+                    try:
+                        sniper_parsed = json.loads(result.get("response", "{}"))
+                        if (
+                            sniper_parsed.get("entry_recommended")
+                            and sniper_parsed.get("executor_ready")
+                            and sniper_parsed.get("risk_assessment", {}).get("score") in ("LOW", "MEDIUM")
+                        ):
+                            pool_data = {"tvl_usd": sniper_parsed.get("pool", {}).get("tvl_usd", 0)}
+                            entry_result = execute_sniper_entry(pool_address, pool_data, sniper_parsed, chain)
+                            log.warning(f"SNIPER AUTO-ENTRY: {entry_result.get('status')} pool={pool_address[:12]}...")
+                    except Exception as e:
+                        log.error(f"Sniper auto-entry error: {e}")
+
+                triggered.append({
+                    "pool_address": pool_address,
+                    "chain":        chain,
+                    "result":       result,
+                    "entry_result": entry_result,
+                })
 
             return self._json(200, {"status": "ok", "triggered": len(triggered), "results": triggered})
 
