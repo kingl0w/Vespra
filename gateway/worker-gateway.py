@@ -400,6 +400,12 @@ COMMAND_MODE_ENABLED         = os.environ.get("COMMAND_MODE_ENABLED", "false").l
 COMMAND_MODE_MAX_ETH         = float(os.environ.get("COMMAND_MODE_MAX_ETH", "0.1"))
 COMMAND_KILL_SWITCH          = os.environ.get("COMMAND_KILL_SWITCH", "false").lower() == "true"
 
+# ─── Launcher Autonomous Deploy config ────────────────────────────
+LAUNCHER_ENABLED             = os.environ.get("LAUNCHER_ENABLED", "false").lower() == "true"
+LAUNCHER_INITIAL_LIQUIDITY_ETH = float(os.environ.get("LAUNCHER_INITIAL_LIQUIDITY_ETH", "0.05"))
+LAUNCHER_MAX_DEPLOY_ETH      = float(os.environ.get("LAUNCHER_MAX_DEPLOY_ETH", "0.1"))
+LAUNCHER_AUTO_LIQUIDITY      = os.environ.get("LAUNCHER_AUTO_LIQUIDITY", "true").lower() == "true"
+
 
 def _fetch_aave_health_factors(addresses, chain="base"):
     subgraph_url = AAVE_V3_SUBGRAPHS.get(chain)
@@ -1713,6 +1719,262 @@ def execute_portfolio_launch(split: dict, dry_run: bool = False) -> dict:
         log.error(f"[portfolio] Failed to persist launch record: {e}")
 
     return {"status": "ok", "portfolio": portfolio_record}
+
+
+# ─── Launcher Autonomous Deploy helpers ───────────────────────────
+
+def confirm_contract_address(tx_hash: str, chain: str = "base", max_attempts: int = 12, interval_sec: int = 5) -> dict:
+    """Poll Alchemy eth_getTransactionReceipt until confirmed or timeout.
+
+    Returns {"contract_address": "0x...", "tx_hash": ..., "block": int, "status": "confirmed"}
+    or {"error": "timeout"|"deploy_reverted"} after max_attempts.
+    """
+    alchemy_key = os.environ.get("ALCHEMY_API_KEY", "")
+    ALCHEMY_URLS = {
+        "base":         f"https://base-mainnet.g.alchemy.com/v2/{alchemy_key}",
+        "base_sepolia": f"https://base-sepolia.g.alchemy.com/v2/{alchemy_key}",
+        "arbitrum":     f"https://arb-mainnet.g.alchemy.com/v2/{alchemy_key}",
+    }
+    url = ALCHEMY_URLS.get(chain, ALCHEMY_URLS["base"])
+
+    for attempt in range(max_attempts):
+        try:
+            payload = json.dumps({
+                "jsonrpc": "2.0", "id": 1,
+                "method": "eth_getTransactionReceipt",
+                "params": [tx_hash],
+            }).encode()
+            req = Request(url, data=payload,
+                          headers={"Content-Type": "application/json"}, method="POST")
+            with urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+            receipt = data.get("result")
+            if receipt and receipt.get("contractAddress"):
+                return {
+                    "contract_address": receipt["contractAddress"],
+                    "tx_hash": tx_hash,
+                    "block": int(receipt.get("blockNumber", "0x0"), 16),
+                    "status": "confirmed",
+                }
+            if receipt and receipt.get("status") == "0x0":
+                return {"error": "deploy_reverted", "tx_hash": tx_hash}
+        except Exception as e:
+            log.warning(f"[confirm_contract] attempt {attempt + 1} error: {e}")
+        time.sleep(interval_sec)
+
+    return {"error": "timeout", "tx_hash": tx_hash, "attempts": max_attempts}
+
+
+def build_liquidity_calldata(token_address: str, token_amount_wei: str,
+                              eth_amount_wei: str, wallet_address: str,
+                              chain: str = "base") -> dict:
+    """Returns two calldata steps for Uniswap V2 liquidity provisioning.
+
+    Step 1: ERC-20 approve(router, token_amount)
+    Step 2: addLiquidityETH(token, amountTokenDesired, amountTokenMin,
+            amountETHMin, to, deadline)
+    """
+    UNISWAP_V2_ROUTER_BASE = "0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24"
+
+    # Step 1: approve(spender, amount) — selector 0x095ea7b3
+    approve_calldata = (
+        "0x095ea7b3"
+        + UNISWAP_V2_ROUTER_BASE[2:].zfill(64)
+        + hex(int(token_amount_wei))[2:].zfill(64)
+    )
+
+    # Step 2: addLiquidityETH — selector 0xf305d719
+    deadline = int(time.time()) + 1200  # 20 min
+    add_liq_calldata = (
+        "0xf305d719"
+        + token_address[2:].zfill(64)
+        + hex(int(token_amount_wei))[2:].zfill(64)
+        + "0" * 64  # amountTokenMin = 0
+        + "0" * 64  # amountETHMin = 0
+        + (wallet_address[2:] if wallet_address else "0" * 40).zfill(64)
+        + hex(deadline)[2:].zfill(64)
+    )
+
+    return {
+        "step1_approve": {
+            "to": token_address,
+            "calldata": approve_calldata,
+            "value_wei": "0",
+            "description": f"approve Uniswap V2 router to spend {token_amount_wei} tokens",
+        },
+        "step2_add_liquidity": {
+            "to": UNISWAP_V2_ROUTER_BASE,
+            "calldata": add_liq_calldata,
+            "value_wei": eth_amount_wei,
+            "description": f"addLiquidityETH — pair token with {eth_amount_wei} wei ETH",
+        },
+    }
+
+
+def execute_launcher_deploy(wallet_id: str, token_name: str, token_symbol: str,
+                             total_supply: int, decimals: int = 18,
+                             chain: str = "base", dry_run: bool = False) -> dict:
+    """Full pipeline: Launcher→Executor (deploy)→confirm address→approve→addLiquidityETH.
+
+    Returns post-deploy checklist dict.
+    """
+    if not LAUNCHER_ENABLED:
+        return {"error": "LAUNCHER_ENABLED=false — set in .env and restart"}
+
+    total_eth_needed = LAUNCHER_INITIAL_LIQUIDITY_ETH
+    if total_eth_needed > LAUNCHER_MAX_DEPLOY_ETH:
+        return {"error": f"LAUNCHER_INITIAL_LIQUIDITY_ETH {total_eth_needed} exceeds LAUNCHER_MAX_DEPLOY_ETH {LAUNCHER_MAX_DEPLOY_ETH}"}
+
+    # 1. Call Launcher agent for deploy calldata
+    launcher_msg = json.dumps({
+        "action": "deploy_erc20",
+        "name": token_name,
+        "symbol": token_symbol,
+        "total_supply": total_supply,
+        "decimals": decimals,
+        "chain": chain,
+    })
+    launcher_result = call_agent("launcher", launcher_msg)
+    try:
+        launcher_parsed = json.loads(launcher_result.get("response", "{}")) if isinstance(launcher_result.get("response"), str) else launcher_result.get("response", {})
+    except (json.JSONDecodeError, TypeError):
+        launcher_parsed = {}
+
+    calldata = launcher_parsed.get("calldata", "")
+    if not calldata:
+        return {"error": "Launcher agent returned no calldata", "launcher_response": launcher_parsed}
+
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "calldata_preview": calldata[:64] + "...",
+            "token_name": token_name,
+            "token_symbol": token_symbol,
+            "total_supply": total_supply,
+            "initial_liquidity_eth": LAUNCHER_INITIAL_LIQUIDITY_ETH,
+            "chain": chain,
+        }
+
+    # 2. Executor broadcasts deploy TX (to=None = contract deploy)
+    exec_msg = json.dumps({
+        "wallet_id": wallet_id,
+        "calldata": calldata,
+        "to": None,
+        "value_wei": "0",
+        "chain": chain,
+        "action": "deploy_contract",
+    })
+    deploy_result = call_agent("executor", exec_msg)
+    try:
+        deploy_parsed = json.loads(deploy_result.get("response", "{}")) if isinstance(deploy_result.get("response"), str) else deploy_result.get("response", {})
+    except (json.JSONDecodeError, TypeError):
+        deploy_parsed = {}
+
+    if deploy_parsed.get("status") != "success" and deploy_result.get("status") != "ok":
+        return {"error": "deploy TX failed", "executor_response": deploy_parsed}
+
+    tx_hash = deploy_parsed.get("tx_hash", "")
+
+    # 3. Confirm contract address from receipt
+    log.info(f"[launcher] deploy TX broadcast: {tx_hash} — polling for receipt...")
+    receipt = confirm_contract_address(tx_hash, chain=chain)
+    if "error" in receipt:
+        return {"error": f"deploy confirmation failed: {receipt['error']}", "tx_hash": tx_hash}
+
+    contract_address = receipt["contract_address"]
+    log.info(f"[launcher] contract confirmed: {contract_address}")
+
+    # Store in Redis
+    r = _redis_client()
+    r.lpush("vespra:deployed_contracts", json.dumps({
+        "contract_address": contract_address,
+        "tx_hash": tx_hash,
+        "token_name": token_name,
+        "token_symbol": token_symbol,
+        "total_supply": total_supply,
+        "chain": chain,
+        "wallet_id": wallet_id,
+        "deployed_at": time.time(),
+    }))
+    r.ltrim("vespra:deployed_contracts", 0, 99)
+
+    result = {
+        "deployed": True,
+        "contract_address": contract_address,
+        "tx_hash": tx_hash,
+        "token_name": token_name,
+        "token_symbol": token_symbol,
+        "chain": chain,
+        "dex_url": f"https://dexscreener.com/base/{contract_address}",
+        "liquidity_provisioned": False,
+        "liquidity_tx_hash": None,
+    }
+
+    # 4. Auto-liquidity provisioning
+    if LAUNCHER_AUTO_LIQUIDITY:
+        token_amount_wei = str(total_supply * (10 ** decimals) // 2)  # 50% of supply to LP
+        eth_amount_wei = str(int(LAUNCHER_INITIAL_LIQUIDITY_ETH * 1e18))
+
+        # Get wallet address for the LP recipient
+        wallet_address = wallet_id
+        try:
+            km = keymaster_call("get_wallet", {"wallet_id": wallet_id})
+            km_resp = km.get("response", {})
+            if isinstance(km_resp, str):
+                km_resp = json.loads(km_resp)
+            wallet_address = km_resp.get("address", wallet_id) if isinstance(km_resp, dict) else wallet_id
+        except Exception:
+            pass
+
+        liq_calldata = build_liquidity_calldata(
+            token_address=contract_address,
+            token_amount_wei=token_amount_wei,
+            eth_amount_wei=eth_amount_wei,
+            wallet_address=wallet_address,
+            chain=chain,
+        )
+
+        # Step 1: approve
+        approve_msg = json.dumps({
+            "wallet_id": wallet_id,
+            "calldata": liq_calldata["step1_approve"]["calldata"],
+            "to": contract_address,
+            "value_wei": "0",
+            "chain": chain,
+            "action": "approve",
+        })
+        approve_result = call_agent("executor", approve_msg)
+        try:
+            approve_parsed = json.loads(approve_result.get("response", "{}")) if isinstance(approve_result.get("response"), str) else approve_result.get("response", {})
+        except (json.JSONDecodeError, TypeError):
+            approve_parsed = {}
+
+        if approve_parsed.get("status") == "success" or approve_result.get("status") == "ok":
+            # Step 2: addLiquidityETH
+            liq_msg = json.dumps({
+                "wallet_id": wallet_id,
+                "calldata": liq_calldata["step2_add_liquidity"]["calldata"],
+                "to": liq_calldata["step2_add_liquidity"]["to"],
+                "value_wei": eth_amount_wei,
+                "chain": chain,
+                "action": "add_liquidity",
+            })
+            liq_result = call_agent("executor", liq_msg)
+            try:
+                liq_parsed = json.loads(liq_result.get("response", "{}")) if isinstance(liq_result.get("response"), str) else liq_result.get("response", {})
+            except (json.JSONDecodeError, TypeError):
+                liq_parsed = {}
+
+            if liq_parsed.get("status") == "success" or liq_result.get("status") == "ok":
+                result["liquidity_provisioned"] = True
+                result["liquidity_tx_hash"] = liq_parsed.get("tx_hash", "")
+                log.info(f"[launcher] liquidity provisioned: {result['liquidity_tx_hash']}")
+            else:
+                result["liquidity_error"] = liq_parsed.get("error", "add_liquidity failed")
+        else:
+            result["liquidity_error"] = approve_parsed.get("error", "approve failed")
+
+    return result
 
 
 # ─── Command Mode helpers ─────────────────────────────────────────
@@ -3386,6 +3648,36 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": str(e)})
             return
 
+        if self.path == "/launcher/contracts":
+            try:
+                r = _redis_client()
+                raw = r.lrange("vespra:deployed_contracts", 0, 99)
+                contracts = []
+                for item in raw:
+                    try:
+                        contracts.append(json.loads(item))
+                    except Exception:
+                        pass
+                self._json(200, {"count": len(contracts), "contracts": contracts})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if self.path == "/launcher/status":
+            try:
+                r = _redis_client()
+                count = r.llen("vespra:deployed_contracts")
+                self._json(200, {
+                    "LAUNCHER_ENABLED": LAUNCHER_ENABLED,
+                    "LAUNCHER_AUTO_LIQUIDITY": LAUNCHER_AUTO_LIQUIDITY,
+                    "LAUNCHER_INITIAL_LIQUIDITY_ETH": LAUNCHER_INITIAL_LIQUIDITY_ETH,
+                    "LAUNCHER_MAX_DEPLOY_ETH": LAUNCHER_MAX_DEPLOY_ETH,
+                    "deployed_contract_count": count,
+                })
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
         if self.path == "/portfolio/history":
             try:
                 r = _redis_client()
@@ -3611,6 +3903,32 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"error": "Provide either 'command' or 'total_eth + yield_pct + sniper_pct + trade_up_pct'"})
 
             result = execute_portfolio_launch(split, dry_run=dry_run)
+            self._json(200, result)
+
+        elif self.path == "/launcher/deploy":
+            if not LAUNCHER_ENABLED:
+                return self._json(403, {"error": "LAUNCHER_ENABLED=false — set in .env and restart"})
+
+            wallet_id = body.get("wallet_id", "")
+            token_name = body.get("token_name", "")
+            token_symbol = body.get("token_symbol", "")
+            total_supply = int(body.get("total_supply", 1000000))
+            decimals = int(body.get("decimals", 18))
+            chain = body.get("chain", "base")
+            dry_run = body.get("dry_run", False)
+
+            if not all([wallet_id, token_name, token_symbol]):
+                return self._json(400, {"error": "wallet_id, token_name, and token_symbol are required"})
+
+            result = execute_launcher_deploy(
+                wallet_id=wallet_id,
+                token_name=token_name,
+                token_symbol=token_symbol,
+                total_supply=total_supply,
+                decimals=decimals,
+                chain=chain,
+                dry_run=dry_run,
+            )
             self._json(200, result)
 
         elif self.path == "/swarm/command":
