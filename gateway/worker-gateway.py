@@ -357,6 +357,159 @@ def pre_fetch_yield(chain_id=1):
         return {"markets": [], "gas_price_gwei": 0, "error": str(e), "timestamp": ""}
 
 
+def pre_fetch_yield_multiprotocol(chain: str = "base") -> dict:
+    """Fetch live APY data for all YIELD_PROTOCOLS from DeFi Llama yields API.
+
+    Uses concurrent fetches per protocol and returns a unified comparison dict.
+    """
+    import concurrent.futures
+
+    PROTOCOL_SLUGS = {
+        "aave":      ["aave-v3"],
+        "morpho":    ["morpho-blue", "morpho"],
+        "spark":     ["spark"],
+        "compound":  ["compound-v3"],
+        "aerodrome": ["aerodrome-finance", "aerodrome"],
+    }
+
+    LLAMA_CHAIN_MAP = {
+        "base":      "Base",
+        "arbitrum":  "Arbitrum",
+        "ethereum":  "Ethereum",
+    }
+    llama_chain = LLAMA_CHAIN_MAP.get(chain.lower(), "Base")
+
+    # Fetch all pools once, then filter per protocol
+    all_llama_pools = []
+    try:
+        req = Request("https://yields.llama.fi/pools", method="GET")
+        with urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        all_llama_pools = data.get("data", [])
+    except Exception as e:
+        log.warning(f"[yield_multiprotocol] DeFi Llama fetch failed: {e}")
+
+    def filter_protocol(protocol: str) -> tuple:
+        try:
+            slugs = PROTOCOL_SLUGS.get(protocol, [protocol])
+            matches = [
+                p for p in all_llama_pools
+                if p.get("chain", "").lower() == llama_chain.lower()
+                and any(s in p.get("project", "").lower() for s in slugs)
+                and (p.get("apy") or 0) >= YIELD_MIN_APY
+            ]
+            matches = sorted(matches, key=lambda x: x.get("apy", 0), reverse=True)[:3]
+            return protocol, [
+                {
+                    "protocol": protocol,
+                    "pool": p.get("symbol", ""),
+                    "apy": round(p.get("apy", 0), 2),
+                    "tvl_usd": p.get("tvlUsd", 0),
+                    "pool_id": p.get("pool", ""),
+                    "il_risk": p.get("ilRisk", "no"),
+                    "stablecoin": p.get("stablecoin", False),
+                }
+                for p in matches
+            ]
+        except Exception as e:
+            log.warning(f"[yield_multiprotocol] filter_protocol {protocol} error: {e}")
+            return protocol, []
+
+    active_protocols = [p.strip() for p in YIELD_PROTOCOLS if p.strip()]
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(filter_protocol, p): p for p in active_protocols}
+        for future in concurrent.futures.as_completed(futures):
+            protocol, pools = future.result()
+            results[protocol] = pools
+
+    # Flatten and rank all pools across protocols
+    all_pools = []
+    for protocol, pools in results.items():
+        if protocol == "aerodrome":
+            for pool in pools:
+                pool["note"] = f"LP position — IL risk present. Max allocation: {YIELD_AERODROME_MAX_PCT}% of capital"
+        all_pools.extend(pools)
+
+    all_pools_ranked = sorted(all_pools, key=lambda x: x.get("apy", 0), reverse=True)
+
+    return {
+        "chain": chain,
+        "protocols_fetched": list(results.keys()),
+        "top_opportunities": all_pools_ranked[:10],
+        "per_protocol": results,
+        "fetch_timestamp": time.time(),
+    }
+
+
+# ─── Yield multi-protocol prompt ──────────────────────────────────
+YIELD_MULTIPROTOCOL_PROMPT = """
+You are the Yield agent in multi-protocol mode. You have live APY data from multiple
+DeFi protocols on {chain}. Your job is to recommend the single best deposit action.
+
+LIVE_YIELD_DATA:
+{yield_data}
+
+Rules:
+- Recommend the highest net APY opportunity that passes risk constraints
+- Aave and Compound are lowest risk (battle-tested, no IL)
+- Morpho gives slightly better rates by optimizing Aave/Compound positions
+- Spark is stable-focused (DAI/USDC) — recommend for stablecoin capital only
+- Aerodrome LP has IL risk — only recommend if apy > 15% and stablecoin=true,
+  and cap at {aerodrome_max_pct}% of total capital
+- Output strict JSON only:
+{{
+  "recommended_protocol": "aave"|"morpho"|"spark"|"compound"|"aerodrome",
+  "pool_id": "<DeFi Llama pool ID>",
+  "pool_symbol": "<symbol>",
+  "apy": <float>,
+  "action": "deposit"|"hold",
+  "amount_eth": "<amount or 'all'>",
+  "reasoning": "<one line>",
+  "executor_ready": true|false
+}}
+"""
+
+
+def build_yield_deposit_calldata(protocol: str, pool_id: str, amount_wei: str, chain: str) -> dict:
+    """Returns deposit calldata for the given protocol.
+
+    Aave V3 is fully implemented. Others return a structured intent
+    for Executor to handle — extendable as ABIs are added.
+    """
+    AAVE_V3_POOL_BASE = "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5"
+
+    if protocol == "aave":
+        asset = "0x4200000000000000000000000000000000000006"  # WETH on Base
+        calldata = (
+            "0x617ba037"
+            + asset[2:].zfill(64)
+            + hex(int(amount_wei))[2:].zfill(64)
+            + "0000000000000000000000000000000000000000000000000000000000000000"
+            + "0000000000000000000000000000000000000000000000000000000000000000"
+        )
+        return {
+            "protocol": "aave",
+            "to": AAVE_V3_POOL_BASE,
+            "calldata": calldata,
+            "amount_wei": amount_wei,
+            "chain": chain,
+        }
+
+    elif protocol in ("morpho", "spark", "compound", "aerodrome"):
+        return {
+            "protocol": protocol,
+            "pool_id": pool_id,
+            "amount_wei": amount_wei,
+            "chain": chain,
+            "calldata": None,
+            "note": f"{protocol} deposit intent — ABI calldata generation pending VES-42 expansion",
+            "executor_ready": False,
+        }
+
+    return {"error": f"unknown protocol: {protocol}"}
+
+
 AAVE_V3_SUBGRAPHS = {
     "base":      "https://api.goldsky.com/api/public/project_clk74pd7lueg738tw9t0cepc5/subgraphs/aave-v3-base/1.0.0/gn",
     "ethereum":  "https://api.thegraph.com/subgraphs/name/aave/protocol-v3",
@@ -399,6 +552,11 @@ PORTFOLIO_MIN_STRATEGY_PCT   = float(os.environ.get("PORTFOLIO_MIN_STRATEGY_PCT"
 COMMAND_MODE_ENABLED         = os.environ.get("COMMAND_MODE_ENABLED", "false").lower() == "true"
 COMMAND_MODE_MAX_ETH         = float(os.environ.get("COMMAND_MODE_MAX_ETH", "0.1"))
 COMMAND_KILL_SWITCH          = os.environ.get("COMMAND_KILL_SWITCH", "false").lower() == "true"
+
+# ─── Yield Multi-Protocol config ──────────────────────────────────
+YIELD_PROTOCOLS              = os.environ.get("YIELD_PROTOCOLS", "aave,morpho,spark,compound,aerodrome").split(",")
+YIELD_MIN_APY                = float(os.environ.get("YIELD_MIN_APY", "2.0"))
+YIELD_AERODROME_MAX_PCT      = float(os.environ.get("YIELD_AERODROME_MAX_PCT", "30.0"))
 
 
 def _fetch_aave_health_factors(addresses, chain="base"):
@@ -3046,7 +3204,7 @@ def call_agent(agent_key, message):
             )
             trader_context += trade_up_prompt
 
-    # Yield: inject live Aave market data before the user message
+    # Yield: inject live multi-protocol market data before the user message
     yield_context = ""
     if agent_key == "yield":
         from datetime import datetime, timezone
@@ -3054,12 +3212,26 @@ def call_agent(agent_key, message):
         msg_lower = message.lower()
         if "base" in msg_lower:
             chain_id = 8453
+            chain_name = "base"
         elif "arbitrum" in msg_lower:
             chain_id = 42161
+            chain_name = "arbitrum"
         else:
-            chain_id = 1  # default to Ethereum
+            chain_id = 1
+            chain_name = "ethereum"
+
+        # Multi-protocol fetch (replaces single Aave fetch)
+        multi_data = pre_fetch_yield_multiprotocol(chain_name)
+        # Also fetch legacy Aave data for backwards compat
         market_data = pre_fetch_yield(chain_id)
-        yield_context = f"\n\nLIVE_MARKET_DATA:\n{json.dumps(market_data)}"
+
+        # Inject multi-protocol prompt
+        yield_context = YIELD_MULTIPROTOCOL_PROMPT.format(
+            chain=chain_name,
+            yield_data=json.dumps(multi_data, indent=2),
+            aerodrome_max_pct=YIELD_AERODROME_MAX_PCT,
+        )
+        yield_context += f"\n\nLEGACY_AAVE_DATA:\n{json.dumps(market_data)}"
 
     # Sentinel: inject live wallet + Aave health data before the user message
     sentinel_context = ""
@@ -3334,6 +3506,20 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/yield/position/"):
             wallet_id = self.path.split("/yield/position/", 1)[1].strip("/")
             self._json(200, _get_current_yield_position(wallet_id))
+            return
+
+        if self.path.startswith("/yield/protocols"):
+            # Parse ?chain= query param
+            chain = "base"
+            if "?" in self.path:
+                from urllib.parse import urlparse, parse_qs
+                qs = parse_qs(urlparse(self.path).query)
+                chain = qs.get("chain", ["base"])[0]
+            try:
+                data = pre_fetch_yield_multiprotocol(chain)
+                self._json(200, data)
+            except Exception as e:
+                self._json(500, {"error": str(e)})
             return
 
         if self.path == "/sniper/entries":
