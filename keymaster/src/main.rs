@@ -80,7 +80,9 @@ async fn main() {
         .route("/balance/:chain/:address", get(routes::get_balance))
         .route("/balances/:chain", get(routes::get_all_balances))
         .route("/chain/:chain", get(routes::chain_status))
-        .route("/tx/log/:wallet_id", get(routes::get_tx_log));
+        .route("/tx/log/:wallet_id", get(routes::get_tx_log))
+        .route("/fees/aum", get(routes::fees_aum))
+        .route("/fees/summary", get(routes::fees_summary));
 
     // Protected write routes — Bearer token required
     let protected_routes = Router::new()
@@ -95,6 +97,9 @@ async fn main() {
         .route("/settings/safes/:chain", put(routes::set_safe))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require_auth));
 
+    // Clone state for AUM fee background task before moving into router
+    let aum_state = Arc::clone(&state);
+
     let app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
@@ -106,6 +111,12 @@ async fn main() {
         eprintln!("ERROR: Invalid bind address");
         std::process::exit(1);
     });
+
+    // AUM fee sweep background task — VES-56
+    tokio::spawn(async move {
+        routes::aum_sweep_loop(aum_state).await;
+    });
+    tracing::info!("[aum_fee] sweep thread spawned (interval=7d)");
 
     tracing::info!(%addr, "Vespra Keymaster listening");
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| {
