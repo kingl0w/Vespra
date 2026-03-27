@@ -16,6 +16,12 @@ KEYMASTER_TOKEN = os.environ.get("VESPRA_KM_AUTH_TOKEN", "")
 TIMEOUT = 120
 
 import threading
+import requests
+
+# ─── Shared requests session for DefiLlama API ──────────────────
+_llama_session = requests.Session()
+_llama_session.headers.update({"User-Agent": "vespra-gateway/1.0"})
+_llama_session.timeout = 15
 
 # ─── Redis queue config ───────────────────────────────────────────
 REDIS_HOST     = os.environ.get("REDIS_HOST", "127.0.0.1")
@@ -185,9 +191,9 @@ def pre_fetch_scout():
 def pre_fetch_risk(protocol, contract_address=None, chain="base"):
     """Fetch live protocol data + contract analysis for Risk agent."""
     try:
-        req = Request(f"https://api.llama.fi/protocol/{protocol}", method="GET")
-        with urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read())
+        resp = _llama_session.get(f"https://api.llama.fi/protocol/{protocol}", timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
         tvl_array = data.get("tvl", [])
         audits = data.get("audits") or data.get("audit_links") or data.get("auditLinks") or []
 
@@ -715,9 +721,9 @@ def _get_tvl_velocity(protocol: str) -> float:
         cached = r.get(cache_key)
 
         # Fetch current TVL
-        req = Request(f"https://api.llama.fi/protocol/{protocol}", method="GET")
-        with urlopen(req, timeout=6) as resp:
-            data = json.loads(resp.read())
+        resp = _llama_session.get(f"https://api.llama.fi/protocol/{protocol}", timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
         tvl_array = data.get("tvl", [])
         current_tvl = 0
         if tvl_array and isinstance(tvl_array[-1], dict):
