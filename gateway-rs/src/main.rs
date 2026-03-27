@@ -77,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
         config.keymaster_url.clone(),
         config.keymaster_token.clone(),
         http_client.clone(),
+        chain_registry.clone(),
     ));
 
     // 7. Build price oracle via config-driven router
