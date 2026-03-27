@@ -89,8 +89,19 @@ async fn main() -> anyhow::Result<()> {
         ));
 
     // 8. Build LLM client + agents
+    // Separate HTTP client for LLM — disable auto-decompression to avoid
+    // "error decoding response body" when DeepSeek returns chunked gzip
+    let llm_http = reqwest::Client::builder()
+        .user_agent("vespra-gateway-rs/0.1.0")
+        .timeout(std::time::Duration::from_secs(120))
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .build()?;
+    tracing::info!("LLM provider={} model={} base_url={} api_key len={}",
+        config.llm_provider, config.llm_model, config.llm_base_url, config.llm_api_key.len());
     let llm: Arc<dyn gateway_rs::agents::AgentClient> = Arc::new(LlmClient::new(
-        http_client.clone(),
+        llm_http,
         config.llm_base_url.clone(),
         config.llm_api_key.clone(),
         config.llm_model.clone(),
