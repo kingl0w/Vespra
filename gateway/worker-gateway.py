@@ -1447,8 +1447,18 @@ def execute_trade_up_cycle(wallet_id: str, cycle_num: int, capital_eth: float) -
     except (json.JSONDecodeError, TypeError):
         risk_parsed = {}
 
-    risk_score = risk_parsed.get("risk_assessment", {}).get("score", "HIGH")
-    if risk_score == "HIGH":
+    # Risk agent returns score/gate_pass at top level (or nested under risk_assessment)
+    _ra = risk_parsed.get("risk_assessment", {}) if isinstance(risk_parsed.get("risk_assessment"), dict) else {}
+    risk_score = risk_parsed.get("score") or _ra.get("score") or "HIGH"
+    risk_score = risk_score.upper() if isinstance(risk_score, str) else "HIGH"
+    gate_pass = risk_parsed.get("gate_pass") if risk_parsed.get("gate_pass") is not None else _ra.get("gate_pass")
+    # Normalise gate_pass: accept bool True or string "true"/"True"
+    if isinstance(gate_pass, str):
+        gate_pass = gate_pass.lower() == "true"
+    elif not isinstance(gate_pass, bool):
+        gate_pass = False
+    # Block only when gate_pass is explicitly false AND score is HIGH
+    if not gate_pass and risk_score == "HIGH":
         return {"status": "hold", "reason": "risk_gate_blocked", "new_capital_eth": capital_eth}
 
     # 3. Sentinel stop-loss check
