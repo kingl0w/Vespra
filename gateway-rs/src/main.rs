@@ -72,7 +72,11 @@ async fn main() -> anyhow::Result<()> {
         redis_client.clone(),
         chain_registry.clone(),
     ));
-    let quote_fetcher = Arc::new(QuoteFetcher::new());
+    let quote_fetcher = Arc::new(QuoteFetcher::new(
+        http_client.clone(),
+        config.oneinch_api_key.clone(),
+        chain_registry.clone(),
+    ));
     let wallet_fetcher = Arc::new(WalletFetcher::new(
         config.keymaster_url.clone(),
         config.keymaster_token.clone(),

@@ -68,6 +68,8 @@ pub struct GatewayConfig {
     #[serde(default = "default_auto_execute_max_eth")]
     pub auto_execute_max_eth: f64,
     #[serde(default)]
+    pub oneinch_api_key: Option<String>,
+    #[serde(default)]
     pub rpc_urls: HashMap<String, String>,
 }
 
