@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -118,6 +119,7 @@ pub struct TradeUpOrchestrator {
     pub config: Arc<GatewayConfig>,
     pub chain_registry: Arc<ChainRegistry>,
     pub redis: Arc<redis::Client>,
+    pub kill_flag: Arc<AtomicBool>,
     active_loops: Arc<Mutex<HashMap<Uuid, (watch::Sender<bool>, tokio::task::JoinHandle<()>)>>>,
 }
 
@@ -137,6 +139,7 @@ impl TradeUpOrchestrator {
         config: Arc<GatewayConfig>,
         chain_registry: Arc<ChainRegistry>,
         redis: Arc<redis::Client>,
+        kill_flag: Arc<AtomicBool>,
     ) -> Self {
         Self {
             pool_fetcher,
@@ -152,8 +155,14 @@ impl TradeUpOrchestrator {
             config,
             chain_registry,
             redis,
+            kill_flag,
             active_loops: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Returns true if the global kill switch is active.
+    pub fn is_killed(&self) -> bool {
+        self.kill_flag.load(Ordering::SeqCst)
     }
 
     // ═════════════════════════════════════════════════════════════
@@ -167,6 +176,12 @@ impl TradeUpOrchestrator {
         capital_eth: f64,
         chains: &[String],
     ) -> CycleResult {
+        // Kill switch check — top of cycle
+        if self.is_killed() {
+            tracing::warn!("[cycle {cycle_num}] kill switch active — aborting cycle for wallet {wallet_id}");
+            return CycleResult::exit(cycle_num, "kill_switch_active").with_capital(capital_eth);
+        }
+
         // ═══════════════════════════════════════
         // PHASE 1: DATA FETCH (no agents)
         // ═══════════════════════════════════════
@@ -216,6 +231,12 @@ impl TradeUpOrchestrator {
         // PHASE 2: AGENT DECISIONS (no data fetching)
         // ═══════════════════════════════════════
 
+        // Kill switch check — before scout
+        if self.is_killed() {
+            tracing::warn!("[cycle {cycle_num}] kill switch active — halting before scout for wallet {wallet_id}");
+            return CycleResult::exit(cycle_num, "kill_switch_active").with_capital(capital_eth);
+        }
+
         // 6. Scout decision
         let scout_ctx = ScoutContext {
             wallet_id,
@@ -263,6 +284,12 @@ impl TradeUpOrchestrator {
             best.momentum_score
         );
 
+        // Kill switch check — before risk
+        if self.is_killed() {
+            tracing::warn!("[cycle {cycle_num}] kill switch active — halting before risk for wallet {wallet_id}");
+            return CycleResult::exit(cycle_num, "kill_switch_active").with_capital(capital_eth);
+        }
+
         // 7. Risk decision
         let risk_ctx = RiskContext {
             opportunity: best.clone(),
@@ -281,6 +308,12 @@ impl TradeUpOrchestrator {
             return CycleResult::hold(cycle_num, "risk_gate_blocked").with_capital(capital_eth);
         }
         tracing::info!("[cycle {cycle_num}] risk gate passed: {:?}", risk_decision);
+
+        // Kill switch check — before sentinel
+        if self.is_killed() {
+            tracing::warn!("[cycle {cycle_num}] kill switch active — halting before sentinel for wallet {wallet_id}");
+            return CycleResult::exit(cycle_num, "kill_switch_active").with_capital(capital_eth);
+        }
 
         // 8. Sentinel decision
         let sentinel_ctx = SentinelContext {
@@ -310,6 +343,12 @@ impl TradeUpOrchestrator {
             .fetch_quote("WETH", &best.pool, &amount_wei, chain_id)
             .await
             .unwrap_or_default();
+
+        // Kill switch check — before trader
+        if self.is_killed() {
+            tracing::warn!("[cycle {cycle_num}] kill switch active — halting before trader for wallet {wallet_id}");
+            return CycleResult::exit(cycle_num, "kill_switch_active").with_capital(capital_eth);
+        }
 
         // 10. Trader decision
         let trader_ctx = TraderContext {
@@ -566,6 +605,12 @@ async fn run_loop_task(
         .await;
 
     loop {
+        // Check kill switch
+        if orch.is_killed() {
+            tracing::warn!("kill switch active — halting loop for wallet {wallet_id}");
+            break;
+        }
+
         // Check cancellation
         if *cancel_rx.borrow() {
             tracing::info!("trade-up loop cancelled for wallet {wallet_id}");

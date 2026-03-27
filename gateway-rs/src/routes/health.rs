@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use axum::extract::State;
 use axum::routing::get;
 use axum::Json;
@@ -20,6 +22,7 @@ async fn health_check(State(state): State<AppState>) -> Json<serde_json::Value> 
         "provider": state.config.llm_provider,
         "model": state.config.llm_model,
         "chains": available_chains,
+        "kill_flag": state.kill_flag.load(Ordering::SeqCst),
     }))
 }
 

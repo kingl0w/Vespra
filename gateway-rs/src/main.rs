@@ -106,7 +106,8 @@ async fn main() -> anyhow::Result<()> {
         http_client.clone(),
     ));
 
-    // 9. Build orchestrator
+    // 9. Build shared kill flag + orchestrator
+    let kill_flag = Arc::new(AtomicBool::new(false));
     let trade_up_orchestrator = Arc::new(TradeUpOrchestrator::new(
         pool_fetcher,
         protocol_fetcher,
@@ -121,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
         config.clone(),
         chain_registry.clone(),
         redis_client.clone(),
+        kill_flag.clone(),
     ));
 
     // 10. Build app state and router
@@ -129,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
         chain_registry,
         redis: redis_client,
         trade_up_orchestrator,
-        kill_flag: Arc::new(AtomicBool::new(false)),
+        kill_flag,
     };
 
     let app = routes::router(state);
