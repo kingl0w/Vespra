@@ -1,0 +1,15 @@
+[Unit]
+Description=Vespra Gateway (Rust)
+After=network.target redis.service
+
+[Service]
+Type=simple
+User=taddymason
+WorkingDirectory=/home/taddymason/vespra/gateway-rs
+EnvironmentFile=/home/taddymason/vespra/gateway-rs/.env
+ExecStart=/home/taddymason/vespra/gateway-rs/target/release/gateway-rs
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
