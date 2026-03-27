@@ -55,13 +55,9 @@ fn resolve_route<'a>(
 /// Uses a fallback on a nested `/api` scope so it doesn't interfere with
 /// top-level routes like /trade-up/*, /swarm/*, /health, etc.
 pub fn router() -> Router<AppState> {
-    use axum::routing::get;
     Router::new().nest(
         "/api",
-        Router::new()
-            .route("/health", get(super::health::api_health_aggregate))
-            .route("/rate-limits", get(super::health::api_rate_limits))
-            .fallback(api_proxy_handler),
+        Router::new().fallback(api_proxy_handler),
     )
 }
 

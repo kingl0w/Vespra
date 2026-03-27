@@ -84,4 +84,6 @@ pub async fn api_rate_limits(State(state): State<AppState>) -> Json<serde_json::
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/health", get(health_check))
+        .route("/api/health", get(api_health_aggregate))
+        .route("/api/rate-limits", get(api_rate_limits))
 }
