@@ -1,0 +1,92 @@
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+use crate::agents::AgentClient;
+use crate::types::decisions::SentinelDecision;
+use crate::types::wallet::WalletState;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SentinelContext {
+    pub wallets: Vec<WalletState>,
+    pub stop_loss_pct: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SentinelRaw {
+    #[serde(default)]
+    overall_status: Option<String>,
+    #[serde(default)]
+    stop_loss_triggered: Option<bool>,
+    #[serde(default)]
+    wallet_id: Option<String>,
+    #[serde(default)]
+    loss_pct: Option<f64>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+const SYSTEM_PROMPT: &str = "You are Sentinel, the portfolio watchdog of the Vespra DeFi swarm. \
+You MUST respond with valid JSON only.\n\n\
+Monitor wallet positions and health. Check for stop-loss conditions, \
+abnormal balance changes, and position health.\n\n\
+Output schema: { \"overall_status\": \"healthy|warning|critical\", \
+\"stop_loss_triggered\": true|false, \
+\"wallet_id\": \"<uuid if stop loss>\", \
+\"loss_pct\": <float if stop loss>, \
+\"message\": \"<details>\" }\n\n\
+Rules:\n\
+- If any wallet drawdown exceeds stop_loss_pct → overall_status=\"critical\", stop_loss_triggered=true\n\
+- If balance decreased >10% in 24h → overall_status=\"warning\"\n\
+- Otherwise → overall_status=\"healthy\"";
+
+pub struct SentinelAgent {
+    llm: Arc<dyn AgentClient>,
+}
+
+impl SentinelAgent {
+    pub fn new(llm: Arc<dyn AgentClient>) -> Self {
+        Self { llm }
+    }
+
+    pub async fn check(&self, ctx: &SentinelContext) -> Result<SentinelDecision> {
+        let task = serde_json::to_string(ctx)?;
+        let raw = self.llm.call(SYSTEM_PROMPT, &task).await?;
+
+        let parsed: SentinelRaw = serde_json::from_str(&raw).unwrap_or(SentinelRaw {
+            overall_status: None,
+            stop_loss_triggered: None,
+            wallet_id: None,
+            loss_pct: None,
+            message: Some(format!("parse_error: {raw}")),
+        });
+
+        let status = parsed
+            .overall_status
+            .as_deref()
+            .unwrap_or("healthy")
+            .to_lowercase();
+
+        if status == "critical" || parsed.stop_loss_triggered.unwrap_or(false) {
+            let wallet_id = parsed
+                .wallet_id
+                .as_deref()
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .unwrap_or_default();
+            return Ok(SentinelDecision::StopLoss {
+                wallet_id,
+                loss_pct: parsed.loss_pct.unwrap_or(0.0),
+            });
+        }
+
+        if status == "warning" {
+            return Ok(SentinelDecision::Alert {
+                message: parsed
+                    .message
+                    .unwrap_or_else(|| "warning condition".into()),
+            });
+        }
+
+        Ok(SentinelDecision::Healthy)
+    }
+}
