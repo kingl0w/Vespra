@@ -1431,7 +1431,11 @@ def execute_trade_up_cycle(wallet_id: str, cycle_num: int, capital_eth: float) -
 
     # 2. Risk gate
     token_address = best.get("token_address", best.get("pool", ""))
-    risk_result = call_agent("risk", f"Analyze risk for token {token_address} on {best.get('chain', 'base')}")
+    protocol_slug = best.get("protocol", "")
+    pool_name = best.get("pool", "")
+    chain_name = best.get("chain", "base")
+    risk_msg = f"Analyze risk for protocol {protocol_slug} pool {pool_name} on {chain_name}" if protocol_slug else f"Analyze risk for token {token_address} on {chain_name}"
+    risk_result = call_agent("risk", risk_msg)
     try:
         risk_parsed = json.loads(risk_result.get("response", "{}")) if isinstance(risk_result.get("response"), str) else risk_result.get("response", {})
     except (json.JSONDecodeError, TypeError):
@@ -3596,16 +3600,24 @@ def call_agent(agent_key, message):
         # Extract protocol name from message
         msg_lower = message.lower()
         protocol_name = None
-        for keyword in ["analyze", "score", "check", "risk"]:
-            if keyword in msg_lower:
-                parts = msg_lower.split(keyword, 1)[1].strip().split()
-                # Skip filler words like "risk", "for", "of"
-                for word in parts:
-                    if word not in ("risk", "for", "of", "the", "protocol"):
-                        protocol_name = word.strip(".,!?\"'")
+
+        # Preferred: explicit "protocol <slug>" in message (set by trade-up loop)
+        proto_match = re.search(r'\bprotocol\s+([\w-]+)', msg_lower)
+        if proto_match:
+            protocol_name = proto_match.group(1).strip(".,!?\"'")
+
+        # Fallback: keyword-based extraction (legacy messages)
+        if not protocol_name:
+            for keyword in ["analyze", "score", "check", "risk"]:
+                if keyword in msg_lower:
+                    parts = msg_lower.split(keyword, 1)[1].strip().split()
+                    # Skip filler words like "risk", "for", "of"
+                    for word in parts:
+                        if word not in ("risk", "for", "of", "the", "protocol", "pool"):
+                            protocol_name = word.strip(".,!?\"'")
+                            break
+                    if protocol_name:
                         break
-                if protocol_name:
-                    break
         if not protocol_name:
             # Fallback: first word of message
             protocol_name = message.strip().split()[0].lower() if message.strip() else ""
