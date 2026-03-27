@@ -97,10 +97,22 @@ async fn trade_up_status(
 }
 
 async fn trade_up_history(State(state): State<AppState>) -> Json<serde_json::Value> {
+    read_history_from_redis(&state, "vespra:trade_up_history").await
+}
+
+async fn trade_up_wallet_history(
+    State(state): State<AppState>,
+    Path(wallet_id): Path<Uuid>,
+) -> Json<serde_json::Value> {
+    let key = format!("vespra:trade_up_history:{wallet_id}");
+    read_history_from_redis(&state, &key).await
+}
+
+async fn read_history_from_redis(state: &AppState, key: &str) -> Json<serde_json::Value> {
     match redis::Client::get_multiplexed_async_connection(state.redis.as_ref()).await {
         Ok(mut conn) => {
             let raw: Vec<String> = conn
-                .lrange("vespra:trade_up_history", 0, 99)
+                .lrange(key, 0, 99)
                 .await
                 .unwrap_or_default();
             let cycles: Vec<serde_json::Value> = raw
@@ -123,7 +135,8 @@ async fn trade_up_history(State(state): State<AppState>) -> Json<serde_json::Val
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/trade-up/start", post(start_trade_up))
-        .route("/trade-up/stop/{wallet_id}", post(stop_trade_up))
-        .route("/trade-up/status/{wallet_id}", get(trade_up_status))
+        .route("/trade-up/stop/:wallet_id", post(stop_trade_up))
+        .route("/trade-up/status/:wallet_id", get(trade_up_status))
         .route("/trade-up/history", get(trade_up_history))
+        .route("/trade-up/history/:wallet_id", get(trade_up_wallet_history))
 }

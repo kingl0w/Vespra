@@ -5,6 +5,7 @@ pub mod proxy;
 pub mod ratelimit;
 pub mod swarm;
 pub mod trade_up;
+pub mod yield_routes;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -139,8 +140,9 @@ pub fn router(state: AppState) -> Router {
         .merge(swarm::router())
         .merge(config::router())
         .merge(fees::router())
-        // Proxy fallback — catches /api/* paths not matched by explicit routes above
-        .fallback(proxy::fallback_handler)
+        .merge(yield_routes::router())
+        // Proxy routes — nested under /api, won't interfere with top-level routes
+        .merge(proxy::router())
         .with_state(state.clone())
         // Middleware stack (outermost first)
         .layer(middleware::from_fn_with_state(state.clone(), inject_extensions))

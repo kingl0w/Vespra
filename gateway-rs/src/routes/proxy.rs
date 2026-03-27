@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Router;
 
 use super::AppState;
 
@@ -50,7 +51,21 @@ fn resolve_route<'a>(
     None
 }
 
-pub async fn fallback_handler(
+/// Build a nested router for /api/* routes.
+/// Uses a fallback on a nested `/api` scope so it doesn't interfere with
+/// top-level routes like /trade-up/*, /swarm/*, /health, etc.
+pub fn router() -> Router<AppState> {
+    use axum::routing::get;
+    Router::new().nest(
+        "/api",
+        Router::new()
+            .route("/health", get(super::health::api_health_aggregate))
+            .route("/rate-limits", get(super::health::api_rate_limits))
+            .fallback(api_proxy_handler),
+    )
+}
+
+async fn api_proxy_handler(
     State(state): State<AppState>,
     req: Request<Body>,
 ) -> Response {
@@ -58,13 +73,9 @@ pub async fn fallback_handler(
     let uri_path = req.uri().path().to_string();
     let headers = req.headers().clone();
 
-    // Strip /api/ prefix
-    let rest = match uri_path.strip_prefix("/api/") {
-        Some(r) => r,
-        None => {
-            return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({"error": "not found"}))).into_response();
-        }
-    };
+    // uri_path is already relative to /api (axum strips the nest prefix)
+    // so "/api/wallet/xyz" arrives here as "/wallet/xyz"
+    let rest = uri_path.trim_start_matches('/');
 
     // Resolve upstream
     let (upstream_base, target_path, needs_auth) = match resolve_route(rest, &state.config) {

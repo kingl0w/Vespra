@@ -28,7 +28,8 @@ async fn health_check(State(state): State<AppState>) -> Json<serde_json::Value> 
 }
 
 /// GET /api/health — aggregated health from gateway + NullBoiler + Keymaster
-async fn api_health_aggregate(State(state): State<AppState>) -> Json<serde_json::Value> {
+/// (called from proxy router, path is "/health" under the /api nest)
+pub async fn api_health_aggregate(State(state): State<AppState>) -> Json<serde_json::Value> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
@@ -75,14 +76,12 @@ async fn api_health_aggregate(State(state): State<AppState>) -> Json<serde_json:
     }))
 }
 
-/// GET /api/rate-limits — return rate limit config
-async fn api_rate_limits(State(state): State<AppState>) -> Json<serde_json::Value> {
+/// GET /api/rate-limits
+pub async fn api_rate_limits(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(state.rate_limiter.config_json())
 }
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/health", get(health_check))
-        .route("/api/health", get(api_health_aggregate))
-        .route("/api/rate-limits", get(api_rate_limits))
 }

@@ -505,6 +505,43 @@ impl TradeUpOrchestrator {
         Ok(())
     }
 
+    /// Persist every cycle result to the per-wallet and global history lists.
+    pub async fn persist_cycle_to_history(&self, wallet_id: Uuid, result: &CycleResult) -> Result<()> {
+        let mut conn =
+            redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await?;
+
+        let status_str = match result.status {
+            CycleStatus::Executed => "executed",
+            CycleStatus::Hold => "hold",
+            CycleStatus::Exit => "exit",
+            CycleStatus::Error => "error",
+        };
+
+        let entry = serde_json::json!({
+            "wallet_id": wallet_id.to_string(),
+            "cycle": result.cycle,
+            "status": status_str,
+            "reason": result.reason,
+            "capital_eth": result.capital_eth,
+            "gain_pct": result.gain_pct,
+            "tx_hash": result.tx_hash,
+            "timestamp": result.timestamp,
+        });
+
+        let json = serde_json::to_string(&entry)?;
+
+        // Per-wallet history
+        let wallet_key = format!("vespra:trade_up_history:{wallet_id}");
+        conn.lpush::<_, _, ()>(&wallet_key, &json).await?;
+        conn.ltrim::<_, ()>(&wallet_key, 0, 99).await?;
+
+        // Global history
+        conn.lpush::<_, _, ()>("vespra:trade_up_history", &json).await?;
+        conn.ltrim::<_, ()>("vespra:trade_up_history", 0, 99).await?;
+
+        Ok(())
+    }
+
     async fn persist_loop_state(
         &self,
         wallet_id: Uuid,
@@ -646,6 +683,9 @@ async fn run_loop_task(
         };
         orch.persist_loop_state(wallet_id, cycle, capital, status_str, true)
             .await;
+
+        // Persist cycle to history list (every cycle, not just executed swaps)
+        let _ = orch.persist_cycle_to_history(wallet_id, &result).await;
 
         // Stop-loss: check drawdown from peak
         let drawdown_pct = if peak_capital > 0.0 {
