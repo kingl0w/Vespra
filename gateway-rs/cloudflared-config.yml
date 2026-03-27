@@ -1,0 +1,7 @@
+tunnel: 8dc14b89-d540-4064-8a9b-b8b81f442d71
+credentials-file: /home/taddymason/.cloudflared/8dc14b89-d540-4064-8a9b-b8b81f442d71.json
+
+ingress:
+  - hostname: api.vespra.xyz
+    service: http://localhost:9001
+  - service: http_status:404

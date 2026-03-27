@@ -140,13 +140,25 @@ async fn main() -> anyhow::Result<()> {
         kill_flag.clone(),
     ));
 
-    // 10. Build app state and router
+    // 10. Build rate limiter + app state
+    let rate_limiter = Arc::new(gateway_rs::routes::ratelimit::RateLimiter::new(
+        config.rl_agent_rpm,
+        config.rl_wallet_rph,
+        config.rl_tx_rph,
+    ));
+    tracing::info!(
+        "rate limits: agent={}/min wallet={}/hr tx={}/hr  cors={} cf_access={}",
+        config.rl_agent_rpm, config.rl_wallet_rph, config.rl_tx_rph,
+        config.cors_origin, config.cf_access_required,
+    );
+
     let state = AppState {
         config: config.clone(),
         chain_registry,
         redis: redis_client,
         trade_up_orchestrator,
         kill_flag,
+        rate_limiter,
     };
 
     let app = routes::router(state);
