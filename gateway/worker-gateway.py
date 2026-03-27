@@ -23,6 +23,10 @@ _llama_session = requests.Session()
 _llama_session.headers.update({"User-Agent": "vespra-gateway/1.0"})
 _llama_session.timeout = 15
 
+# ─── Price oracle config ─────────────────────────────────────────
+PRICE_ORACLE          = os.environ.get("PRICE_ORACLE", "defillama").strip().lower()
+PRICE_ORACLE_FALLBACK = os.environ.get("PRICE_ORACLE_FALLBACK", "coingecko").strip().lower()
+
 # ─── Redis queue config ───────────────────────────────────────────
 REDIS_HOST     = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT     = int(os.environ.get("REDIS_PORT", "6379"))
@@ -74,25 +78,25 @@ def pre_fetch_scout():
             and p.get("chain", "") in SCOUT_CHAINS
         ]
 
-        # Fetch price data from DeFi Llama coins API for top tokens
+        # Fetch price data via pluggable oracle for top tokens
         price_map = {}
         try:
-            # Build coin list from top pool symbols
-            symbols = list({p.get("symbol", "").split("-")[0] for p in filtered[:50]})
-            # DeFi Llama coins batch price endpoint
-            coin_ids = ",".join(f"coingecko:{s.lower()}" for s in symbols[:20])
-            price_req = Request(
-                f"https://coins.llama.fi/prices/current/{coin_ids}",
-                method="GET",
-            )
-            with urlopen(price_req, timeout=6) as pr:
-                price_data = json.loads(pr.read())
-            for key, val in price_data.get("coins", {}).items():
-                symbol = key.replace("coingecko:", "").upper()
-                price_map[symbol] = {
-                    "price_usd":          val.get("price", 0.0),
-                    "price_change_24h":   val.get("change_24h") or 0.0,
-                }
+            base_tokens = BASE_TOKEN_ADDRESSES.get(8453, {})
+            symbols_seen = set()
+            for p in filtered[:50]:
+                symbol = p.get("symbol", "").split("-")[0].upper()
+                if symbol and symbol not in symbols_seen:
+                    symbols_seen.add(symbol)
+                    chain = p.get("chain", "Base")
+                    addr = base_tokens.get(symbol)
+                    if addr:
+                        price_info = fetch_token_price(addr, chain)
+                    else:
+                        price_info = {"price_usd": 0.0, "price_change_24h_pct": 0.0, "source": "none"}
+                    price_map[symbol] = {
+                        "price_usd":        price_info.get("price_usd", 0.0),
+                        "price_change_24h": price_info.get("price_change_24h_pct", 0.0),
+                    }
         except Exception:
             pass  # Price feed is best-effort
 
@@ -262,6 +266,88 @@ BASE_TOKEN_ADDRESSES = {
         "DAI":  "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb",
     }
 }
+
+# ─── Chain name → DefiLlama coins API prefix ─────────────────────
+_CHAIN_TO_LLAMA_PREFIX = {
+    "base": "base", "ethereum": "ethereum", "arbitrum": "arbitrum",
+    "Base": "base", "Ethereum": "ethereum", "Arbitrum": "arbitrum",
+}
+
+
+def _price_from_defillama(token_address: str, chain: str) -> dict:
+    """Fetch price from DefiLlama coins API."""
+    prefix = _CHAIN_TO_LLAMA_PREFIX.get(chain, chain.lower())
+    coin_id = f"{prefix}:{token_address}"
+    resp = _llama_session.get(
+        f"https://coins.llama.fi/prices/current/{coin_id}", timeout=15,
+    )
+    resp.raise_for_status()
+    coin_data = resp.json().get("coins", {}).get(coin_id, {})
+    return {
+        "price_usd":            coin_data.get("price", 0.0),
+        "price_change_24h_pct": coin_data.get("change_24h") or 0.0,
+        "source":               "defillama",
+    }
+
+
+def _price_from_coingecko(token_address: str, chain: str) -> dict:
+    """Fetch price from CoinGecko via DefiLlama coins API (coingecko: prefix)."""
+    # CoinGecko adapter — uses the llama coins proxy with coingecko prefix
+    # to avoid needing a separate CG API key.
+    resp = _llama_session.get(
+        f"https://coins.llama.fi/prices/current/coingecko:{token_address}",
+        timeout=15,
+    )
+    resp.raise_for_status()
+    coin_data = resp.json().get("coins", {}).get(f"coingecko:{token_address}", {})
+    return {
+        "price_usd":            coin_data.get("price", 0.0),
+        "price_change_24h_pct": coin_data.get("change_24h") or 0.0,
+        "source":               "coingecko",
+    }
+
+
+_PRICE_ADAPTERS = {
+    "defillama": _price_from_defillama,
+    "coingecko": _price_from_coingecko,
+}
+
+_PRICE_FALLBACK = {"price_usd": 0.0, "price_change_24h_pct": 0.0, "source": "none"}
+
+
+def fetch_token_price(token_address: str, chain: str = "base") -> dict:
+    """Fetch token price with caching, primary/fallback oracle, and Redis TTL."""
+    # Check Redis cache first
+    try:
+        r = _redis_client()
+        cache_key = f"vespra:price:{chain.lower()}:{token_address.lower()}"
+        cached = r.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    except Exception:
+        r = None
+        cache_key = None
+
+    # Try primary oracle, then fallback
+    for adapter_name in [PRICE_ORACLE, PRICE_ORACLE_FALLBACK]:
+        adapter = _PRICE_ADAPTERS.get(adapter_name)
+        if not adapter:
+            continue
+        try:
+            result = adapter(token_address, chain)
+            if result.get("price_usd", 0) > 0:
+                # Cache in Redis with 300s TTL
+                if r and cache_key:
+                    try:
+                        r.set(cache_key, json.dumps(result), ex=300)
+                    except Exception:
+                        pass
+                return result
+        except Exception:
+            continue
+
+    return dict(_PRICE_FALLBACK)
+
 
 def pre_fetch_trader(token_in, token_out, amount_wei, chain_id=8453):
     """Fetch live swap quote from 1inch aggregator for Trader agent context."""
@@ -1472,6 +1558,7 @@ def execute_trade_up_cycle(wallet_id: str, cycle_num: int, capital_eth: float) -
         return {"status": "exit", "reason": "stop_loss_triggered", "new_capital_eth": capital_eth}
 
     # 4. Trader — TRADE_UP_MODE quote
+    pool_apy = float(best.get("apy", 0))
     amount_wei = str(int(capital_eth * 1e18))
     trader_msg = json.dumps({
         "mode": "trade_up",
@@ -1480,6 +1567,7 @@ def execute_trade_up_cycle(wallet_id: str, cycle_num: int, capital_eth: float) -
         "amount_wei": amount_wei,
         "momentum_score": best.get("momentum_score"),
         "risk_score": risk_score,
+        "pool_apy": pool_apy,
         "sentinel_data": sentinel_parsed,
         "capital_eth": capital_eth,
         "TRADE_UP_MIN_GAIN_PCT": TRADE_UP_MIN_GAIN_PCT,
@@ -1496,7 +1584,15 @@ def execute_trade_up_cycle(wallet_id: str, cycle_num: int, capital_eth: float) -
         return {"status": action, "reason": trader_parsed.get("reasoning", "trader declined"), "new_capital_eth": capital_eth}
 
     expected_gain = float(trader_parsed.get("expected_gain_pct", 0))
-    if expected_gain < TRADE_UP_MIN_GAIN_PCT:
+    price_change = float(best.get("price_change_24h_pct", 0))
+
+    # For yield positions (no price movement, high APY), derive per-cycle gain from APY
+    if expected_gain == 0 and pool_apy > 0:
+        expected_gain = (pool_apy / 365 / 24 / 60) * (TRADE_UP_CYCLE_INTERVAL_SEC / 60)
+
+    # Yield positions with APY >= 50% and no price action: bypass min gain check
+    is_yield_position = pool_apy >= 50 and price_change == 0
+    if not is_yield_position and expected_gain < TRADE_UP_MIN_GAIN_PCT:
         return {"status": "hold", "reason": f"gain {expected_gain}% below min {TRADE_UP_MIN_GAIN_PCT}%", "new_capital_eth": capital_eth}
 
     # 5. Queue for approval (no auto-execute without explicit approval flow)
