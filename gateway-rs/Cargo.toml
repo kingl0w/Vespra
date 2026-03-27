@@ -1,0 +1,22 @@
+[package]
+name = "gateway-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json"] }
+redis = { version = "0.25", features = ["tokio-comp"] }
+sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "uuid", "chrono"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+alloy = { version = "0.3", features = ["providers", "signers"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "1"
+figment = { version = "0.10", features = ["toml", "env"] }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
