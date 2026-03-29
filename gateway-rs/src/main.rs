@@ -206,16 +206,13 @@ async fn main() -> anyhow::Result<()> {
         kill_flag.clone(),
     ));
 
-    // 10. Build rate limiter + app state
-    let rate_limiter = Arc::new(gateway_rs::routes::ratelimit::RateLimiter::new(
-        config.rl_agent_rpm,
-        config.rl_wallet_rph,
-        config.rl_tx_rph,
-    ));
+    // 10. Build webhook rate limiter + app state
+    let webhook_rate_limiter = Arc::new(
+        gateway_rs::routes::ratelimit::WebhookRateLimiter::new(config.rl_webhook_rpm),
+    );
     tracing::info!(
-        "rate limits: agent={}/min wallet={}/hr tx={}/hr  cors={} cf_access={}",
-        config.rl_agent_rpm, config.rl_wallet_rph, config.rl_tx_rph,
-        config.cors_origin, config.cf_access_required,
+        "webhook rate limit: {}/min  cors={} cf_access={}",
+        config.rl_webhook_rpm, config.cors_origin, config.cf_access_required,
     );
 
     let state = AppState {
@@ -229,7 +226,7 @@ async fn main() -> anyhow::Result<()> {
         launcher_orchestrator,
         portfolio_orchestrator,
         kill_flag,
-        rate_limiter,
+        webhook_rate_limiter,
     };
 
     let app = routes::router(state);

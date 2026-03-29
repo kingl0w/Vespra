@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use dashmap::DashMap;
 
-/// Token bucket for a single IP+bucket key.
+/// Token bucket for a single IP.
 struct TokenBucket {
     tokens: f64,
     last: Instant,
@@ -37,95 +37,42 @@ impl TokenBucket {
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct BucketConfig {
-    pub capacity: f64,
-    pub refill_rate: f64,
-}
-
-pub struct RateLimiter {
+/// Rate limiter for the Alchemy webhook endpoint only.
+/// Per-IP token bucket, configurable max requests per minute.
+pub struct WebhookRateLimiter {
     buckets: DashMap<String, TokenBucket>,
-    configs: std::collections::HashMap<String, BucketConfig>,
+    capacity: f64,
+    refill_rate: f64,
 }
 
-impl RateLimiter {
-    pub fn new(agent_rpm: u32, wallet_rph: u32, tx_rph: u32) -> Self {
-        let mut configs = std::collections::HashMap::new();
-        configs.insert(
-            "agent".into(),
-            BucketConfig {
-                capacity: agent_rpm as f64,
-                refill_rate: agent_rpm as f64 / 60.0,
-            },
-        );
-        configs.insert(
-            "wallet".into(),
-            BucketConfig {
-                capacity: wallet_rph as f64,
-                refill_rate: wallet_rph as f64 / 3600.0,
-            },
-        );
-        configs.insert(
-            "tx".into(),
-            BucketConfig {
-                capacity: tx_rph as f64,
-                refill_rate: tx_rph as f64 / 3600.0,
-            },
-        );
+impl WebhookRateLimiter {
+    pub fn new(max_rpm: u64) -> Self {
+        let capacity = max_rpm as f64;
         Self {
             buckets: DashMap::new(),
-            configs,
+            capacity,
+            refill_rate: capacity / 60.0,
         }
     }
 
-    /// Classify a request into a rate limit bucket. Returns None if not limited.
-    pub fn classify(&self, method: &str, path: &str) -> Option<&str> {
-        if path.starts_with("/api/agent") || path.starts_with("/api/swarm") {
-            return Some("agent");
-        }
-        if method == "POST" {
-            if path.starts_with("/api/wallet") {
-                return Some("wallet");
-            }
-            if path.starts_with("/api/tx") || path.starts_with("/api/dispatch") {
-                return Some("tx");
-            }
-        }
-        None
-    }
-
-    /// Check rate limit. Returns (allowed, retry_after_seconds).
-    pub fn check(&self, ip: &str, bucket_name: &str) -> (bool, f64) {
-        let key = format!("{ip}:{bucket_name}");
-        let config = match self.configs.get(bucket_name) {
-            Some(c) => *c,
-            None => return (true, 0.0),
-        };
-        let mut entry = self.buckets.entry(key).or_insert_with(|| {
-            TokenBucket::new(config.capacity, config.refill_rate)
-        });
+    /// Check rate limit for the given IP. Returns (allowed, retry_after_seconds).
+    pub fn check(&self, ip: &str) -> (bool, f64) {
+        let capacity = self.capacity;
+        let refill_rate = self.refill_rate;
+        let mut entry = self
+            .buckets
+            .entry(ip.to_string())
+            .or_insert_with(|| TokenBucket::new(capacity, refill_rate));
         entry.consume()
     }
 
     /// Return rate limit config as JSON for /api/rate-limits endpoint.
     pub fn config_json(&self) -> serde_json::Value {
         serde_json::json!({
-            "limits": {
-                "agent": {
-                    "max": self.configs.get("agent").map(|c| c.capacity as u32).unwrap_or(0),
-                    "window": "1m",
-                    "paths": ["/api/agent", "/api/swarm"]
-                },
-                "wallet": {
-                    "max": self.configs.get("wallet").map(|c| c.capacity as u32).unwrap_or(0),
-                    "window": "1h",
-                    "paths": ["/api/wallet"]
-                },
-                "tx": {
-                    "max": self.configs.get("tx").map(|c| c.capacity as u32).unwrap_or(0),
-                    "window": "1h",
-                    "paths": ["/api/tx", "/api/dispatch"]
-                }
+            "webhook": {
+                "max": self.capacity as u64,
+                "window": "1m",
+                "path": "/webhooks/alchemy"
             }
         })
     }

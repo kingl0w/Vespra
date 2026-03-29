@@ -1,4 +1,5 @@
 use axum::extract::{Path, State};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use redis::AsyncCommands;
@@ -33,7 +34,24 @@ async fn alchemy_webhook(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
-) -> Json<serde_json::Value> {
+) -> axum::response::Response {
+    // Rate limit — webhook endpoint faces external traffic
+    let client_ip = crate::routes::ratelimit::extract_client_ip(&headers);
+    let (allowed, retry_after) = state.webhook_rate_limiter.check(&client_ip);
+    if !allowed {
+        let retry_ceil = retry_after.ceil() as u64;
+        tracing::warn!("WEBHOOK_RATE_LIMIT ip={client_ip} retry_after={retry_ceil}s");
+        return (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", retry_ceil.to_string())],
+            Json(serde_json::json!({
+                "error": "rate limit exceeded",
+                "retry_after": retry_ceil,
+            })),
+        )
+            .into_response();
+    }
+
     // Validate HMAC-SHA256 signature
     let secret = &state.config.alchemy_webhook_secret;
     if !secret.is_empty() {
@@ -46,7 +64,7 @@ async fn alchemy_webhook(
             return Json(serde_json::json!({
                 "status": "error",
                 "error": "invalid_signature",
-            }));
+            })).into_response();
         }
     }
 
@@ -57,7 +75,7 @@ async fn alchemy_webhook(
             return Json(serde_json::json!({
                 "status": "error",
                 "error": format!("parse_error: {e}"),
-            }));
+            })).into_response();
         }
     };
 
@@ -112,7 +130,7 @@ async fn alchemy_webhook(
         "status": "processed",
         "events": logs.len(),
         "results": results,
-    }))
+    })).into_response()
 }
 
 async fn sniper_positions(State(state): State<AppState>) -> Json<serde_json::Value> {

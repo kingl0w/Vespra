@@ -78,7 +78,7 @@ pub async fn api_health_aggregate(State(state): State<AppState>) -> Json<serde_j
 
 /// GET /api/rate-limits
 pub async fn api_rate_limits(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json(state.rate_limiter.config_json())
+    Json(state.webhook_rate_limiter.config_json())
 }
 
 pub fn router() -> Router<AppState> {

@@ -20,9 +20,7 @@ fn default_trade_up_stop_loss_pct() -> f64 { 5.0 }
 fn default_auto_execute_max_eth() -> f64 { 0.05 }
 fn default_cors_origin() -> String { "*".into() }
 fn default_nullboiler_url() -> String { "http://127.0.0.1:9090".into() }
-fn default_rl_agent_rpm() -> u32 { 10 }
-fn default_rl_wallet_rph() -> u32 { 5 }
-fn default_rl_tx_rph() -> u32 { 20 }
+fn default_rl_webhook_rpm() -> u64 { 60 }
 fn default_yield_auto_rotate_threshold_pct() -> f64 { 1.0 }
 fn default_yield_max_rotate_eth() -> f64 { 0.05 }
 fn default_yield_cycle_interval_secs() -> u64 { 3600 }
@@ -110,12 +108,8 @@ pub struct GatewayConfig {
     pub cf_access_required: bool,
     #[serde(default = "default_nullboiler_url")]
     pub nullboiler_url: String,
-    #[serde(default = "default_rl_agent_rpm")]
-    pub rl_agent_rpm: u32,
-    #[serde(default = "default_rl_wallet_rph")]
-    pub rl_wallet_rph: u32,
-    #[serde(default = "default_rl_tx_rph")]
-    pub rl_tx_rph: u32,
+    #[serde(default = "default_rl_webhook_rpm")]
+    pub rl_webhook_rpm: u64,
     #[serde(default)]
     pub rpc_urls: HashMap<String, String>,
 }
