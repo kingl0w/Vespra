@@ -1,8 +1,12 @@
+pub mod coordinator;
 pub mod executor;
+pub mod launcher;
 pub mod risk;
 pub mod scout;
 pub mod sentinel;
+pub mod sniper;
 pub mod trader;
+pub mod yield_agent;
 
 use anyhow::Result;
 use async_trait::async_trait;

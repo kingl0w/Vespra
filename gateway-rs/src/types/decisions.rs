@@ -65,6 +65,61 @@ impl SentinelDecision {
     }
 }
 
+// ─── Yield decisions ──────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub enum YieldDecision {
+    Rebalance {
+        target_protocol: String,
+        target_pool_id: String,
+        expected_gain_pct: f64,
+        reasoning: String,
+    },
+    Hold { reasoning: String },
+}
+
+// ─── Sniper decisions ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub enum SniperDecision {
+    Enter {
+        confidence: f64,
+        max_entry_eth: f64,
+        reasoning: String,
+    },
+    Pass { reasoning: String },
+}
+
+// ─── Coordinator decisions ────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandIntent {
+    pub strategy: String,
+    pub wallet_id: Option<String>,
+    pub capital_eth: Option<f64>,
+    pub chain: Option<String>,
+    pub max_eth: Option<f64>,
+    pub stop_loss_pct: Option<f64>,
+    pub threshold_pct: Option<f64>,
+    pub reasoning: String,
+}
+
+// ─── Launcher decisions ───────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub enum LaunchDecision {
+    Approved {
+        suggested_liquidity_eth: f64,
+        reasoning: String,
+    },
+    Rejected { reasoning: String },
+}
+
+// ─── Executor ─────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutorResult {
     pub status: ExecutorStatus,

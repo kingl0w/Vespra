@@ -25,3 +25,7 @@ tower = { version = "0.5", features = ["util"] }
 dashmap = "6"
 axum-extra = { version = "0.9", features = ["typed-header"] }
 http = "1"
+ethabi = "18"
+hex = "0.4"
+hmac = "0.12"
+sha2 = "0.10"

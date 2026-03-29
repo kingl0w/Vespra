@@ -3,11 +3,15 @@ use std::sync::Arc;
 
 use tracing_subscriber::EnvFilter;
 
+use gateway_rs::agents::coordinator::CoordinatorAgent;
 use gateway_rs::agents::executor::ExecutorAgent;
+use gateway_rs::agents::launcher::LauncherAgent;
 use gateway_rs::agents::risk::RiskAgent;
 use gateway_rs::agents::scout::ScoutAgent;
 use gateway_rs::agents::sentinel::SentinelAgent;
+use gateway_rs::agents::sniper::SniperAgent;
 use gateway_rs::agents::trader::TraderAgent;
+use gateway_rs::agents::yield_agent::YieldAgent;
 use gateway_rs::agents::LlmClient;
 use gateway_rs::chain::ChainRegistry;
 use gateway_rs::config::GatewayConfig;
@@ -16,7 +20,11 @@ use gateway_rs::data::price::OracleRouter;
 use gateway_rs::data::protocol::ProtocolFetcher;
 use gateway_rs::data::quote::QuoteFetcher;
 use gateway_rs::data::wallet::WalletFetcher;
+use gateway_rs::orchestrator::command::CommandOrchestrator;
+use gateway_rs::orchestrator::launcher::LauncherOrchestrator;
+use gateway_rs::orchestrator::sniper::SniperOrchestrator;
 use gateway_rs::orchestrator::trade_up::TradeUpOrchestrator;
+use gateway_rs::orchestrator::yield_rot::YieldOrchestrator;
 use gateway_rs::routes::{self, AppState};
 
 #[tokio::main]
@@ -115,6 +123,10 @@ async fn main() -> anyhow::Result<()> {
     let risk = Arc::new(RiskAgent::new(llm.clone()));
     let trader = Arc::new(TraderAgent::new(llm.clone()));
     let sentinel = Arc::new(SentinelAgent::new(llm.clone()));
+    let yield_agent = Arc::new(YieldAgent::new(llm.clone()));
+    let sniper_agent = Arc::new(SniperAgent::new(llm.clone()));
+    let coordinator_agent = Arc::new(CoordinatorAgent::new(llm.clone()));
+    let launcher_agent = Arc::new(LauncherAgent::new(llm.clone()));
     let executor = Arc::new(ExecutorAgent::new(
         config.keymaster_url.clone(),
         config.keymaster_token.clone(),
@@ -124,18 +136,61 @@ async fn main() -> anyhow::Result<()> {
     // 9. Build shared kill flag + orchestrator
     let kill_flag = Arc::new(AtomicBool::new(false));
     let trade_up_orchestrator = Arc::new(TradeUpOrchestrator::new(
-        pool_fetcher,
-        protocol_fetcher,
+        pool_fetcher.clone(),
+        protocol_fetcher.clone(),
         price_oracle,
         wallet_fetcher,
-        quote_fetcher,
+        quote_fetcher.clone(),
         scout,
-        risk,
+        risk.clone(),
         trader,
         sentinel,
-        executor,
+        executor.clone(),
         config.clone(),
         chain_registry.clone(),
+        redis_client.clone(),
+        kill_flag.clone(),
+    ));
+
+    // 9b. Build yield orchestrator
+    let yield_orchestrator = Arc::new(YieldOrchestrator::new(
+        pool_fetcher,
+        protocol_fetcher.clone(),
+        risk.clone(),
+        yield_agent,
+        executor.clone(),
+        config.clone(),
+        redis_client.clone(),
+        kill_flag.clone(),
+    ));
+
+    // 9c. Build sniper orchestrator
+    let sniper_orchestrator = Arc::new(SniperOrchestrator::new(
+        risk,
+        sniper_agent,
+        executor.clone(),
+        protocol_fetcher,
+        quote_fetcher,
+        chain_registry.clone(),
+        config.clone(),
+        redis_client.clone(),
+        kill_flag.clone(),
+    ));
+
+    // 9d. Build command orchestrator
+    let command_orchestrator = Arc::new(CommandOrchestrator::new(
+        coordinator_agent,
+        trade_up_orchestrator.clone(),
+        yield_orchestrator.clone(),
+        config.clone(),
+        kill_flag.clone(),
+    ));
+
+    // 9e. Build launcher orchestrator
+    let launcher_orchestrator = Arc::new(LauncherOrchestrator::new(
+        launcher_agent,
+        executor,
+        config.clone(),
         redis_client.clone(),
         kill_flag.clone(),
     ));
@@ -157,6 +212,10 @@ async fn main() -> anyhow::Result<()> {
         chain_registry,
         redis: redis_client,
         trade_up_orchestrator,
+        yield_orchestrator,
+        sniper_orchestrator,
+        command_orchestrator,
+        launcher_orchestrator,
         kill_flag,
         rate_limiter,
     };

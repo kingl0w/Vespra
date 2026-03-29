@@ -19,7 +19,7 @@ async fn health_check(State(state): State<AppState>) -> Json<serde_json::Value> 
     Json(serde_json::json!({
         "status": "ok",
         "service": "vespra-gateway-rs",
-        "agents": ["scout", "risk", "trader", "sentinel", "executor", "coordinator", "yield", "sniper", "launcher"],
+        "agents": ["scout", "risk", "trader", "sentinel", "executor", "yield", "sniper", "coordinator", "launcher"],
         "provider": state.config.llm_provider,
         "model": state.config.llm_model,
         "chains": available_chains,

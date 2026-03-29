@@ -1,8 +1,10 @@
-use axum::extract::{Query, State};
-use axum::routing::get;
+use axum::extract::{Path, Query, State};
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use redis::AsyncCommands;
 use serde::Deserialize;
 use std::collections::BTreeSet;
+use uuid::Uuid;
 
 use super::AppState;
 
@@ -92,6 +94,118 @@ async fn yield_protocols(
     }))
 }
 
+// ─── Yield loop control ──────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct YieldStartRequest {
+    wallet_id: Uuid,
+    capital_eth: f64,
+    chain: String,
+}
+
+async fn yield_start(
+    State(state): State<AppState>,
+    Json(body): Json<YieldStartRequest>,
+) -> Json<serde_json::Value> {
+    match state
+        .yield_orchestrator
+        .start_loop(body.wallet_id, body.capital_eth, body.chain.clone())
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({
+            "status": "started",
+            "wallet_id": body.wallet_id,
+            "capital_eth": body.capital_eth,
+            "chain": body.chain,
+        })),
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "error": e.to_string(),
+        })),
+    }
+}
+
+async fn yield_stop(
+    State(state): State<AppState>,
+    Path(wallet_id): Path<Uuid>,
+) -> Json<serde_json::Value> {
+    match state.yield_orchestrator.stop_loop(wallet_id).await {
+        Ok(()) => Json(serde_json::json!({
+            "status": "stop_requested",
+            "wallet_id": wallet_id,
+        })),
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "error": e.to_string(),
+        })),
+    }
+}
+
+async fn yield_status(
+    State(state): State<AppState>,
+    Path(wallet_id): Path<Uuid>,
+) -> Json<serde_json::Value> {
+    let active_wallets = state.yield_orchestrator.active_wallets().await;
+    let is_active = active_wallets.contains(&wallet_id);
+
+    let (cycle, capital, last_status) = match redis::Client::get_multiplexed_async_connection(
+        state.redis.as_ref(),
+    )
+    .await
+    {
+        Ok(mut conn) => {
+            let key = format!("vespra:yield_state:{wallet_id}");
+            let raw: Option<String> = conn.get(&key).await.ok().flatten();
+            match raw.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()) {
+                Some(v) => (
+                    v.get("cycle").and_then(|c| c.as_u64()).unwrap_or(0) as u32,
+                    v.get("capital_eth").and_then(|c| c.as_f64()).unwrap_or(0.0),
+                    v.get("status").and_then(|s| s.as_str()).unwrap_or("unknown").to_string(),
+                ),
+                None => (0, 0.0, "no_data".into()),
+            }
+        }
+        Err(_) => (0, 0.0, "redis_unavailable".into()),
+    };
+
+    Json(serde_json::json!({
+        "active": is_active,
+        "cycle": cycle,
+        "capital_eth": capital,
+        "last_status": last_status,
+    }))
+}
+
+async fn yield_history(
+    State(state): State<AppState>,
+    Path(wallet_id): Path<Uuid>,
+) -> Json<serde_json::Value> {
+    let key = format!("vespra:yield_rotations:{wallet_id}");
+    match redis::Client::get_multiplexed_async_connection(state.redis.as_ref()).await {
+        Ok(mut conn) => {
+            let raw: Vec<String> = conn.lrange(&key, 0, 99).await.unwrap_or_default();
+            let cycles: Vec<serde_json::Value> = raw
+                .iter()
+                .filter_map(|s| serde_json::from_str(s).ok())
+                .collect();
+            Json(serde_json::json!({
+                "count": cycles.len(),
+                "cycles": cycles,
+            }))
+        }
+        Err(_) => Json(serde_json::json!({
+            "count": 0,
+            "cycles": [],
+            "error": "redis_unavailable",
+        })),
+    }
+}
+
 pub fn router() -> Router<AppState> {
-    Router::new().route("/yield/protocols", get(yield_protocols))
+    Router::new()
+        .route("/yield/protocols", get(yield_protocols))
+        .route("/yield/start", post(yield_start))
+        .route("/yield/stop/:wallet_id", post(yield_stop))
+        .route("/yield/status/:wallet_id", get(yield_status))
+        .route("/yield/history/:wallet_id", get(yield_history))
 }

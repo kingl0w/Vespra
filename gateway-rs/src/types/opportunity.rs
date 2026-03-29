@@ -20,7 +20,7 @@ pub enum RiskTier {
     High,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Opportunity {
     pub protocol: String,
     pub pool: String,

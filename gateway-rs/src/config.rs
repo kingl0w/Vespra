@@ -23,6 +23,13 @@ fn default_nullboiler_url() -> String { "http://127.0.0.1:9090".into() }
 fn default_rl_agent_rpm() -> u32 { 10 }
 fn default_rl_wallet_rph() -> u32 { 5 }
 fn default_rl_tx_rph() -> u32 { 20 }
+fn default_yield_auto_rotate_threshold_pct() -> f64 { 1.0 }
+fn default_yield_max_rotate_eth() -> f64 { 0.05 }
+fn default_yield_cycle_interval_secs() -> u64 { 3600 }
+fn default_sniper_max_entry_eth() -> f64 { 0.05 }
+fn default_sniper_min_tvl() -> f64 { 50000.0 }
+fn default_sniper_exit_tvl_drop_pct() -> f64 { 30.0 }
+fn default_launcher_initial_liquidity_eth() -> f64 { 0.05 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GatewayConfig {
@@ -68,6 +75,26 @@ pub struct GatewayConfig {
     pub trade_up_stop_loss_pct: f64,
     #[serde(default)]
     pub yield_auto_rotate_enabled: bool,
+    #[serde(default = "default_yield_auto_rotate_threshold_pct")]
+    pub yield_auto_rotate_threshold_pct: f64,
+    #[serde(default = "default_yield_max_rotate_eth")]
+    pub yield_max_rotate_eth: f64,
+    #[serde(default = "default_yield_cycle_interval_secs")]
+    pub yield_cycle_interval_secs: u64,
+    #[serde(default)]
+    pub sniper_auto_entry_enabled: bool,
+    #[serde(default = "default_sniper_max_entry_eth")]
+    pub sniper_max_entry_eth: f64,
+    #[serde(default = "default_sniper_min_tvl")]
+    pub sniper_min_tvl: f64,
+    #[serde(default = "default_sniper_exit_tvl_drop_pct")]
+    pub sniper_exit_tvl_drop_pct: f64,
+    #[serde(default)]
+    pub alchemy_webhook_secret: String,
+    #[serde(default)]
+    pub launcher_enabled: bool,
+    #[serde(default = "default_launcher_initial_liquidity_eth")]
+    pub launcher_initial_liquidity_eth: f64,
     #[serde(default)]
     pub auto_execute_enabled: bool,
     #[serde(default = "default_auto_execute_max_eth")]

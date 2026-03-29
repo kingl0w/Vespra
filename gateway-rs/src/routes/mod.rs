@@ -1,8 +1,10 @@
 pub mod config;
 pub mod fees;
 pub mod health;
+pub mod launcher;
 pub mod proxy;
 pub mod ratelimit;
+pub mod sniper;
 pub mod swarm;
 pub mod trade_up;
 pub mod yield_routes;
@@ -20,7 +22,11 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::chain::ChainRegistry;
 use crate::config::GatewayConfig;
+use crate::orchestrator::command::CommandOrchestrator;
+use crate::orchestrator::launcher::LauncherOrchestrator;
+use crate::orchestrator::sniper::SniperOrchestrator;
 use crate::orchestrator::trade_up::TradeUpOrchestrator;
+use crate::orchestrator::yield_rot::YieldOrchestrator;
 
 use self::ratelimit::RateLimiter;
 
@@ -30,6 +36,10 @@ pub struct AppState {
     pub chain_registry: Arc<ChainRegistry>,
     pub redis: Arc<redis::Client>,
     pub trade_up_orchestrator: Arc<TradeUpOrchestrator>,
+    pub yield_orchestrator: Arc<YieldOrchestrator>,
+    pub sniper_orchestrator: Arc<SniperOrchestrator>,
+    pub command_orchestrator: Arc<CommandOrchestrator>,
+    pub launcher_orchestrator: Arc<LauncherOrchestrator>,
     pub kill_flag: Arc<AtomicBool>,
     pub rate_limiter: Arc<RateLimiter>,
 }
@@ -141,6 +151,8 @@ pub fn router(state: AppState) -> Router {
         .merge(config::router())
         .merge(fees::router())
         .merge(yield_routes::router())
+        .merge(sniper::router())
+        .merge(launcher::router())
         // Proxy routes — nested under /api, won't interfere with top-level routes
         .merge(proxy::router())
         .with_state(state.clone())
