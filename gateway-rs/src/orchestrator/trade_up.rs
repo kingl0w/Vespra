@@ -332,7 +332,7 @@ impl TradeUpOrchestrator {
             return CycleResult::exit(cycle_num, "stop_loss_triggered").with_capital(capital_eth);
         }
 
-        // 9. Get swap quote (stub for now)
+        // 9. Get swap quote (1inch real or simulated fallback)
         let chain_id = self
             .chain_registry
             .chain_id(&best.chain.to_lowercase())

@@ -240,11 +240,9 @@ impl PriceOracle for OnchainTwapOracle {
             });
         }
 
-        // TODO: Phase 6.2 — implement TWAP via alloy eth_call to pool observe()
-        // Will use cfg.rpc_url and cfg.native_token_address to make an eth_call
-        // to the Uniswap V3 / Aerodrome pool's observe() function.
+        // Phase 6.2 — TWAP via alloy eth_call to pool observe() (not yet implemented)
         Ok(PriceData {
-            source: "onchain_twap_stub".into(),
+            source: "onchain_twap_pending".into(),
             ..PriceData::default()
         })
     }

@@ -49,8 +49,8 @@ impl QuoteFetcher {
         let api_key = match &self.api_key {
             Some(k) if !k.is_empty() => k,
             _ => {
-                tracing::warn!("no 1inch API key — using stub quote");
-                return Ok(self.stub_quote(token_in, token_out, amount_in_wei));
+                tracing::warn!("no 1inch API key — using simulated fallback quote");
+                return Ok(self.fallback_quote(token_in, token_out, amount_in_wei));
             }
         };
 
@@ -68,8 +68,8 @@ impl QuoteFetcher {
         {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("1inch quote request failed: {e} — falling back to stub");
-                return Ok(self.stub_quote(token_in, token_out, amount_in_wei));
+                tracing::warn!("1inch quote request failed: {e} — using fallback");
+                return Ok(self.fallback_quote(token_in, token_out, amount_in_wei));
             }
         };
 
@@ -77,8 +77,8 @@ impl QuoteFetcher {
         let body = match resp.text().await {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!("1inch quote read body failed: {e} — falling back to stub");
-                return Ok(self.stub_quote(token_in, token_out, amount_in_wei));
+                tracing::warn!("1inch quote read body failed: {e} — using fallback");
+                return Ok(self.fallback_quote(token_in, token_out, amount_in_wei));
             }
         };
 
@@ -87,14 +87,14 @@ impl QuoteFetcher {
                 "1inch quote returned {status}: {}",
                 &body[..body.len().min(300)]
             );
-            return Ok(self.stub_quote(token_in, token_out, amount_in_wei));
+            return Ok(self.fallback_quote(token_in, token_out, amount_in_wei));
         }
 
         let parsed: OneInchQuoteResponse = match serde_json::from_str(&body) {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!("1inch quote parse error: {e} — falling back to stub");
-                return Ok(self.stub_quote(token_in, token_out, amount_in_wei));
+                tracing::warn!("1inch quote parse error: {e} — using fallback");
+                return Ok(self.fallback_quote(token_in, token_out, amount_in_wei));
             }
         };
 
@@ -126,7 +126,7 @@ impl QuoteFetcher {
         })
     }
 
-    fn stub_quote(&self, token_in: &str, token_out: &str, amount_in_wei: &str) -> SwapQuote {
+    fn fallback_quote(&self, token_in: &str, token_out: &str, amount_in_wei: &str) -> SwapQuote {
         SwapQuote {
             token_in: token_in.to_string(),
             token_out: token_out.to_string(),
