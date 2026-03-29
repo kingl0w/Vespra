@@ -1,11 +1,11 @@
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
+use redis::AsyncCommands;
 
 use super::AppState;
 
 async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value> {
-    // Return config with secrets redacted
     let cfg = &state.config;
     Json(serde_json::json!({
         "host": cfg.host,
@@ -27,15 +27,49 @@ async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value> {
         "yield_auto_rotate_enabled": cfg.yield_auto_rotate_enabled,
         "auto_execute_enabled": cfg.auto_execute_enabled,
         "auto_execute_max_eth": cfg.auto_execute_max_eth,
+        "default_custody": cfg.default_custody,
     }))
 }
 
 async fn patch_config(
-    State(_state): State<AppState>,
-    Json(_body): Json<serde_json::Value>,
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    // TODO: persist partial config updates to SQLite
-    Json(serde_json::json!({ "status": "updated" }))
+    // Persist config overrides to Redis — applied on next service restart
+    match redis::Client::get_multiplexed_async_connection(state.redis.as_ref()).await {
+        Ok(mut conn) => {
+            // Merge incoming fields into existing overrides
+            let existing: serde_json::Value = conn
+                .get::<_, Option<String>>("vespra:config_overrides")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or(serde_json::json!({}));
+
+            let mut merged = existing.as_object().cloned().unwrap_or_default();
+            if let Some(obj) = body.as_object() {
+                for (k, v) in obj {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+
+            let json = serde_json::to_string(&merged).unwrap_or_default();
+            let _: Result<(), _> = conn
+                .set::<_, _, ()>("vespra:config_overrides", &json)
+                .await;
+
+            Json(serde_json::json!({
+                "status": "updated",
+                "persisted_keys": merged.keys().collect::<Vec<_>>(),
+                "note": "overrides take effect on next service restart",
+            }))
+        }
+        Err(_) => Json(serde_json::json!({
+            "status": "error",
+            "error": "redis_unavailable",
+        })),
+    }
 }
 
 pub fn router() -> Router<AppState> {

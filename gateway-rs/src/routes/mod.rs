@@ -2,6 +2,7 @@ pub mod config;
 pub mod fees;
 pub mod health;
 pub mod launcher;
+pub mod portfolio;
 pub mod proxy;
 pub mod ratelimit;
 pub mod sniper;
@@ -24,6 +25,7 @@ use crate::chain::ChainRegistry;
 use crate::config::GatewayConfig;
 use crate::orchestrator::command::CommandOrchestrator;
 use crate::orchestrator::launcher::LauncherOrchestrator;
+use crate::orchestrator::portfolio::PortfolioOrchestrator;
 use crate::orchestrator::sniper::SniperOrchestrator;
 use crate::orchestrator::trade_up::TradeUpOrchestrator;
 use crate::orchestrator::yield_rot::YieldOrchestrator;
@@ -40,6 +42,7 @@ pub struct AppState {
     pub sniper_orchestrator: Arc<SniperOrchestrator>,
     pub command_orchestrator: Arc<CommandOrchestrator>,
     pub launcher_orchestrator: Arc<LauncherOrchestrator>,
+    pub portfolio_orchestrator: Arc<PortfolioOrchestrator>,
     pub kill_flag: Arc<AtomicBool>,
     pub rate_limiter: Arc<RateLimiter>,
 }
@@ -153,6 +156,7 @@ pub fn router(state: AppState) -> Router {
         .merge(yield_routes::router())
         .merge(sniper::router())
         .merge(launcher::router())
+        .merge(portfolio::router())
         // Proxy routes — nested under /api, won't interfere with top-level routes
         .merge(proxy::router())
         .with_state(state.clone())

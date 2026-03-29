@@ -22,6 +22,7 @@ use gateway_rs::data::quote::QuoteFetcher;
 use gateway_rs::data::wallet::WalletFetcher;
 use gateway_rs::orchestrator::command::CommandOrchestrator;
 use gateway_rs::orchestrator::launcher::LauncherOrchestrator;
+use gateway_rs::orchestrator::portfolio::PortfolioOrchestrator;
 use gateway_rs::orchestrator::sniper::SniperOrchestrator;
 use gateway_rs::orchestrator::trade_up::TradeUpOrchestrator;
 use gateway_rs::orchestrator::yield_rot::YieldOrchestrator;
@@ -189,7 +190,17 @@ async fn main() -> anyhow::Result<()> {
     // 9e. Build launcher orchestrator
     let launcher_orchestrator = Arc::new(LauncherOrchestrator::new(
         launcher_agent,
+        executor.clone(),
+        config.clone(),
+        redis_client.clone(),
+        kill_flag.clone(),
+    ));
+
+    // 9f. Build portfolio orchestrator
+    let portfolio_orchestrator = Arc::new(PortfolioOrchestrator::new(
         executor,
+        trade_up_orchestrator.clone(),
+        yield_orchestrator.clone(),
         config.clone(),
         redis_client.clone(),
         kill_flag.clone(),
@@ -216,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
         sniper_orchestrator,
         command_orchestrator,
         launcher_orchestrator,
+        portfolio_orchestrator,
         kill_flag,
         rate_limiter,
     };

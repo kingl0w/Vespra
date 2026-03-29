@@ -167,6 +167,14 @@ impl CommandOrchestrator {
                     reasoning: format!("{} — sniper activation is webhook-driven, not loop-based", intent.reasoning),
                 }
             }
+            "Portfolio" => {
+                CommandReport {
+                    strategy: "Portfolio".into(),
+                    action_taken: "use_portfolio_endpoint".into(),
+                    params_used: params,
+                    reasoning: format!("{} — portfolio deploy requires allocations, use POST /portfolio/deploy", intent.reasoning),
+                }
+            }
             "Kill" => {
                 self.kill_flag.store(true, Ordering::SeqCst);
                 tracing::warn!("KILL SWITCH ACTIVATED via command");

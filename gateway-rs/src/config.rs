@@ -30,6 +30,7 @@ fn default_sniper_max_entry_eth() -> f64 { 0.05 }
 fn default_sniper_min_tvl() -> f64 { 50000.0 }
 fn default_sniper_exit_tvl_drop_pct() -> f64 { 30.0 }
 fn default_launcher_initial_liquidity_eth() -> f64 { 0.05 }
+fn default_custody() -> String { "safe".into() }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GatewayConfig {
@@ -95,6 +96,8 @@ pub struct GatewayConfig {
     pub launcher_enabled: bool,
     #[serde(default = "default_launcher_initial_liquidity_eth")]
     pub launcher_initial_liquidity_eth: f64,
+    #[serde(default = "default_custody")]
+    pub default_custody: String,
     #[serde(default)]
     pub auto_execute_enabled: bool,
     #[serde(default = "default_auto_execute_max_eth")]
