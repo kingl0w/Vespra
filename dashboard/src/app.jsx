@@ -13,14 +13,14 @@ import { Setup } from "./pages/Setup.jsx";
 
 function SetupBanner() {
   const [dismissed, setDismissed] = useState(false);
-  if (dismissed || localStorage.getItem("vespra-setup-complete")) return null;
+  if (dismissed || localStorage.getItem("vespra-setup-complete") || localStorage.getItem("vespra-setup-dismissed")) return null;
   return (
     <div class="bg-vespra-accent/10 border border-vespra-accent/30 rounded-lg px-4 py-3 mb-4 flex items-center justify-between">
       <span class="text-sm text-vespra-text">
         First time? <a href="/setup" class="text-vespra-accent underline underline-offset-2 font-medium">Run the setup wizard &rarr;</a>
       </span>
       <button
-        onClick={() => setDismissed(true)}
+        onClick={() => { localStorage.setItem("vespra-setup-dismissed", "true"); setDismissed(true); }}
         class="text-vespra-muted hover:text-vespra-text text-lg leading-none px-1"
       >
         &times;

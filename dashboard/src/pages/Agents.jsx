@@ -743,7 +743,8 @@ function AgentResponse({ content, agent }) {
   if (agent === "risk") {
     // Unwrap common wrapper keys
     const riskData = parsed?.risk_assessment || parsed?.assessment || parsed?.risk || parsed?.assessments || parsed;
-    if (Array.isArray(riskData) || riskData?.score || riskData?.factors || riskData?.protocol)
+    // Only render RiskView when we have structured data with a factors array
+    if (Array.isArray(riskData?.factors) && riskData.factors.length > 0)
       return <RiskView data={riskData} />;
   }
   if (agent === "sentinel" && (Array.isArray(parsed) || parsed?.severity || parsed?.alert_type))
