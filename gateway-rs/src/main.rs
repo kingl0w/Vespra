@@ -123,7 +123,12 @@ async fn main() -> anyhow::Result<()> {
     let scout = Arc::new(ScoutAgent::new(llm.clone()));
     let risk = Arc::new(RiskAgent::new(llm.clone()));
     let trader = Arc::new(TraderAgent::new(llm.clone()));
-    let sentinel = Arc::new(SentinelAgent::new(llm.clone()));
+    let sentinel = Arc::new(SentinelAgent::new(
+        llm.clone(),
+        config.keymaster_url.clone(),
+        config.keymaster_token.clone(),
+        http_client.clone(),
+    ));
     let yield_agent = Arc::new(YieldAgent::new(llm.clone()));
     let sniper_agent = Arc::new(SniperAgent::new(llm.clone()));
     let coordinator_agent = Arc::new(CoordinatorAgent::new(llm.clone()));

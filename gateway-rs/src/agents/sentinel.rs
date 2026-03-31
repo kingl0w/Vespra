@@ -42,11 +42,19 @@ Rules:\n\
 
 pub struct SentinelAgent {
     llm: Arc<dyn AgentClient>,
+    keymaster_url: String,
+    keymaster_token: String,
+    http_client: reqwest::Client,
 }
 
 impl SentinelAgent {
-    pub fn new(llm: Arc<dyn AgentClient>) -> Self {
-        Self { llm }
+    pub fn new(
+        llm: Arc<dyn AgentClient>,
+        keymaster_url: String,
+        keymaster_token: String,
+        http_client: reqwest::Client,
+    ) -> Self {
+        Self { llm, keymaster_url, keymaster_token, http_client }
     }
 
     pub async fn check(&self, ctx: &SentinelContext) -> Result<SentinelDecision> {
@@ -91,8 +99,37 @@ impl SentinelAgent {
     }
 
     pub async fn query(&self, question: &str) -> Result<String> {
-        let prompt = format!("{}\n\nHowever, for this request respond with helpful prose or JSON as appropriate. \
-            Do not restrict yourself to the sentinel schema — answer the user's question directly.", SYSTEM_PROMPT);
-        self.llm.call(&prompt, question).await
+        let wallet_data = self
+            .http_client
+            .get(format!("{}/wallets", self.keymaster_url))
+            .header("Authorization", format!("Bearer {}", self.keymaster_token))
+            .send()
+            .await
+            .and_then(|r| Ok(r))
+            .ok();
+
+        let task = if let Some(resp) = wallet_data {
+            let body = resp.text().await.unwrap_or_default();
+            format!(
+                "You are Sentinel. Here is the REAL current wallet data from Keymaster:\n\
+                 {body}\n\n\
+                 Answer this question using ONLY the data above. Do not invent wallet counts, \
+                 balances, or portfolio values. If data is missing, say so explicitly.\n\n\
+                 Question: {question}"
+            )
+        } else {
+            format!(
+                "WARNING: Could not fetch real wallet data. Answer based only on what you know \
+                 from the system context, and explicitly state that real data is unavailable.\n\n\
+                 Question: {question}"
+            )
+        };
+
+        let prompt = format!(
+            "{}\n\nHowever, for this request respond with helpful prose or JSON as appropriate. \
+             Do not restrict yourself to the sentinel schema — answer the user's question directly.",
+            SYSTEM_PROMPT
+        );
+        self.llm.call(&prompt, &task).await
     }
 }
