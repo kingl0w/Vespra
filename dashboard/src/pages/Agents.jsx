@@ -730,6 +730,15 @@ function AgentResponse({ content, agent }) {
   let parsed = typeof content === "string" ? extractJson(content) : content;
 
   if (parsed == null) {
+    const trimmed = typeof content === "string" ? content.trim() : "";
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const formatted = JSON.stringify(JSON.parse(trimmed), null, 2);
+        return (
+          <pre class="text-xs text-vespra-muted bg-vespra-bg rounded border border-vespra-border p-3 overflow-x-auto whitespace-pre-wrap">{formatted}</pre>
+        );
+      } catch {}
+    }
     return <div class="text-sm text-vespra-text whitespace-pre-wrap">{content}</div>;
   }
 
@@ -747,7 +756,7 @@ function AgentResponse({ content, agent }) {
     if (Array.isArray(riskData?.factors) && riskData.factors.length > 0)
       return <RiskView data={riskData} />;
   }
-  if (agent === "sentinel" && (Array.isArray(parsed) || parsed?.severity || parsed?.alert_type))
+  if (agent === "sentinel" && parsed?.severity && parsed?.alert_type)
     return <SentinelView data={parsed} />;
   if (agent === "trader" && (parsed?.swap || parsed?.status === "ready" || parsed?.status === "no_route"))
     return <TraderView data={parsed} />;
