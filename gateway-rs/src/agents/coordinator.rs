@@ -22,18 +22,33 @@ pub struct SystemState {
 const SYSTEM_PROMPT: &str = "You are Coordinator, the command interpreter of the Vespra DeFi agent swarm. \
 You MUST respond with valid JSON only. No prose, no markdown.\n\n\
 Parse the user's natural-language command into a structured action for the swarm.\n\n\
-Output schema: { \"strategy\": \"TradeUp\" | \"YieldRotate\" | \"Sniper\" | \"Kill\" | \"Resume\" | \"Status\", \
+Output schema: { \"strategy\": \"TradeUp\" | \"YieldRotate\" | \"Sniper\" | \"Kill\" | \"Resume\" | \"Status\" \
+| \"AskScout\" | \"AskRisk\" | \"AskSentinel\" | \"AskTrader\" | \"AskYield\" | \"AskSniper\" | \"AskLauncher\" | \"AskExecutor\", \
 \"wallet_id\": string | null, \"capital_eth\": float | null, \"chain\": string | null, \
 \"max_eth\": float | null, \"stop_loss_pct\": float | null, \"threshold_pct\": float | null, \
+\"query\": string | null, \
 \"reasoning\": \"string\" }\n\n\
 Rules:\n\
 - Extract wallet_id, capital amount, chain name, and strategy parameters from the command\n\
 - If the command mentions 'stop' or 'kill', use strategy=Kill\n\
-- If the command mentions 'resume' or 'start' without specifying a strategy, use strategy=Resume\n\
-- If the command mentions 'status' or 'check', use strategy=Status\n\
+- If the command mentions 'resume' without specifying a strategy, use strategy=Resume\n\
+- If the command mentions 'status' or 'check' about the system/swarm, use strategy=Status\n\
+- Use AskScout when the user wants yield opportunities, pool data, APY info, or market scanning\n\
+- Use AskRisk when the user wants a risk assessment of a protocol, token, or position\n\
+- Use AskSentinel when the user wants position health, wallet monitoring, or alert status\n\
+- Use AskTrader when the user wants swap quotes, trade routes, or price impact analysis\n\
+- Use AskYield when the user wants current lending positions, deposit/withdraw recommendations\n\
+- Use AskSniper when the user wants new pool detection or sniper position info\n\
+- Use AskLauncher when the user wants token deployment info or launch planning\n\
+- Use AskExecutor when the user wants wallet balances, transaction history, or execution status\n\
+- For AskX strategies, set \"query\" to the user's original question verbatim. Set query to null for non-Ask strategies.\n\
+- Use TradeUp only when user explicitly wants to START a trade-up loop\n\
+- Use YieldRotate only when user explicitly wants to ROTATE yield positions\n\
+- Use Sniper only when user explicitly wants to ENABLE sniper auto-entry\n\
 - Default chain to null if not specified\n\
 - Default capital_eth to null if not specified\n\
-- Use stop_loss_pct from command or null";
+- Use stop_loss_pct from command or null\n\
+- If the command has an [agent_name] prefix like [scout] or [risk], use the matching AskX strategy";
 
 pub struct CoordinatorAgent {
     llm: Arc<dyn AgentClient>,
@@ -75,6 +90,9 @@ impl CoordinatorAgent {
                 .and_then(|v| v.as_f64()),
             threshold_pct: val.get("threshold_pct")
                 .and_then(|v| v.as_f64()),
+            query: val.get("query")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             reasoning: val.get("reasoning")
                 .and_then(|v| v.as_str())
                 .unwrap_or("command interpreted")

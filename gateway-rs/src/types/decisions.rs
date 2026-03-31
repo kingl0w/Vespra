@@ -103,6 +103,7 @@ pub struct CommandIntent {
     pub max_eth: Option<f64>,
     pub stop_loss_pct: Option<f64>,
     pub threshold_pct: Option<f64>,
+    pub query: Option<String>,
     pub reasoning: String,
 }
 

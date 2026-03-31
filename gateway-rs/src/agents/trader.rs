@@ -86,4 +86,10 @@ impl TraderAgent {
             _ => Ok(TraderDecision::Hold { reason: reasoning }),
         }
     }
+
+    pub async fn query(&self, question: &str) -> Result<String> {
+        let prompt = format!("{}\n\nHowever, for this request respond with helpful prose or JSON as appropriate. \
+            Do not restrict yourself to the swap schema — answer the user's question directly.", SYSTEM_PROMPT);
+        self.llm.call(&prompt, question).await
+    }
 }

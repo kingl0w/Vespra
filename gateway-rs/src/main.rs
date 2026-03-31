@@ -143,10 +143,10 @@ async fn main() -> anyhow::Result<()> {
         price_oracle,
         wallet_fetcher,
         quote_fetcher.clone(),
-        scout,
+        scout.clone(),
         risk.clone(),
-        trader,
-        sentinel,
+        trader.clone(),
+        sentinel.clone(),
         executor.clone(),
         config.clone(),
         chain_registry.clone(),
@@ -159,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
         pool_fetcher,
         protocol_fetcher.clone(),
         risk.clone(),
-        yield_agent,
+        yield_agent.clone(),
         executor.clone(),
         config.clone(),
         redis_client.clone(),
@@ -168,8 +168,8 @@ async fn main() -> anyhow::Result<()> {
 
     // 9c. Build sniper orchestrator
     let sniper_orchestrator = Arc::new(SniperOrchestrator::new(
-        risk,
-        sniper_agent,
+        risk.clone(),
+        sniper_agent.clone(),
         executor.clone(),
         protocol_fetcher,
         quote_fetcher,
@@ -186,6 +186,13 @@ async fn main() -> anyhow::Result<()> {
         yield_orchestrator.clone(),
         config.clone(),
         kill_flag.clone(),
+        scout.clone(),
+        risk.clone(),
+        sentinel.clone(),
+        trader.clone(),
+        yield_agent.clone(),
+        sniper_agent.clone(),
+        launcher_agent.clone(),
     ));
 
     // 9e. Build launcher orchestrator

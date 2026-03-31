@@ -71,6 +71,12 @@ impl ScoutAgent {
             Ok(ScoutDecision::Opportunities(opps))
         }
     }
+
+    pub async fn query(&self, question: &str) -> Result<String> {
+        let prompt = format!("{}\n\nHowever, for this request respond with helpful prose or JSON as appropriate. \
+            Do not restrict yourself to the opportunities schema — answer the user's question directly.", SYSTEM_PROMPT);
+        self.llm.call(&prompt, question).await
+    }
 }
 
 /// Parse an Opportunity from a serde_json::Value, using defaults for missing fields.

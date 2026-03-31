@@ -5,6 +5,13 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::agents::coordinator::{CoordinatorAgent, CoordinatorContext, SystemState};
+use crate::agents::launcher::LauncherAgent;
+use crate::agents::risk::RiskAgent;
+use crate::agents::scout::ScoutAgent;
+use crate::agents::sentinel::SentinelAgent;
+use crate::agents::sniper::SniperAgent;
+use crate::agents::trader::TraderAgent;
+use crate::agents::yield_agent::YieldAgent;
 use crate::config::GatewayConfig;
 use crate::orchestrator::trade_up::TradeUpOrchestrator;
 use crate::orchestrator::yield_rot::YieldOrchestrator;
@@ -27,15 +34,30 @@ pub struct CommandOrchestrator {
     yield_orch: Arc<YieldOrchestrator>,
     config: Arc<GatewayConfig>,
     kill_flag: Arc<AtomicBool>,
+    scout: Arc<ScoutAgent>,
+    risk: Arc<RiskAgent>,
+    sentinel: Arc<SentinelAgent>,
+    trader: Arc<TraderAgent>,
+    yield_agent: Arc<YieldAgent>,
+    sniper: Arc<SniperAgent>,
+    launcher: Arc<LauncherAgent>,
 }
 
 impl CommandOrchestrator {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         coordinator: Arc<CoordinatorAgent>,
         trade_up: Arc<TradeUpOrchestrator>,
         yield_orch: Arc<YieldOrchestrator>,
         config: Arc<GatewayConfig>,
         kill_flag: Arc<AtomicBool>,
+        scout: Arc<ScoutAgent>,
+        risk: Arc<RiskAgent>,
+        sentinel: Arc<SentinelAgent>,
+        trader: Arc<TraderAgent>,
+        yield_agent: Arc<YieldAgent>,
+        sniper: Arc<SniperAgent>,
+        launcher: Arc<LauncherAgent>,
     ) -> Self {
         Self {
             coordinator,
@@ -43,6 +65,13 @@ impl CommandOrchestrator {
             yield_orch,
             config,
             kill_flag,
+            scout,
+            risk,
+            sentinel,
+            trader,
+            yield_agent,
+            sniper,
+            launcher,
         }
     }
 
@@ -203,6 +232,37 @@ impl CommandOrchestrator {
                     action_taken: "kill_flag_cleared".into(),
                     params_used: params,
                     reasoning: intent.reasoning,
+                }
+            }
+            s if s.starts_with("Ask") => {
+                let query = intent.query.unwrap_or_else(|| command.clone());
+                let (agent_name, result) = match s {
+                    "AskScout" => ("scout", self.scout.query(&query).await),
+                    "AskRisk" => ("risk", self.risk.query(&query).await),
+                    "AskSentinel" => ("sentinel", self.sentinel.query(&query).await),
+                    "AskTrader" => ("trader", self.trader.query(&query).await),
+                    "AskYield" => ("yield", self.yield_agent.query(&query).await),
+                    "AskSniper" => ("sniper", self.sniper.query(&query).await),
+                    "AskLauncher" => ("launcher", self.launcher.query(&query).await),
+                    "AskExecutor" => {
+                        // Executor is not LLM-backed — return system state
+                        ("executor", Ok(serde_json::json!({
+                            "note": "Executor handles on-chain transactions via Keymaster. Use wallet endpoints for balances/history.",
+                            "active_trade_up_wallets": trade_up_wallets.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                            "active_yield_wallets": yield_wallets.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                        }).to_string()))
+                    }
+                    _ => ("unknown", Ok("Unknown agent".to_string())),
+                };
+                let response = match result {
+                    Ok(r) => r,
+                    Err(e) => format!("{agent_name} error: {e}"),
+                };
+                CommandReport {
+                    strategy: s.to_string(),
+                    action_taken: "agent_queried".into(),
+                    params_used: serde_json::json!({ "agent": agent_name, "query": query }),
+                    reasoning: response,
                 }
             }
             "Status" | _ => {

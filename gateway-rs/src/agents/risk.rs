@@ -72,6 +72,12 @@ impl RiskAgent {
             Ok(RiskDecision::GateBlock { score, reason })
         }
     }
+
+    pub async fn query(&self, question: &str) -> Result<String> {
+        let prompt = format!("{}\n\nHowever, for this request respond with helpful prose or JSON as appropriate. \
+            Do not restrict yourself to the gate_pass schema — answer the user's question directly.", SYSTEM_PROMPT);
+        self.llm.call(&prompt, question).await
+    }
 }
 
 fn parse_risk_score(s: &str) -> RiskScore {
