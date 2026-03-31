@@ -4,6 +4,7 @@ pub mod config;
 pub mod data;
 pub mod error;
 pub mod fee;
+pub mod guards;
 pub mod orchestrator;
 pub mod routes;
 pub mod types;

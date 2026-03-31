@@ -1,19 +1,29 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 
+use crate::config::GatewayConfig;
 use crate::types::decisions::{ExecutorResult, ExecutorStatus};
 
 pub struct ExecutorAgent {
     keymaster_url: String,
     keymaster_token: String,
     client: reqwest::Client,
+    config: Arc<GatewayConfig>,
 }
 
 impl ExecutorAgent {
-    pub fn new(keymaster_url: String, keymaster_token: String, client: reqwest::Client) -> Self {
+    pub fn new(
+        keymaster_url: String,
+        keymaster_token: String,
+        client: reqwest::Client,
+        config: Arc<GatewayConfig>,
+    ) -> Self {
         Self {
             keymaster_url,
             keymaster_token,
             client,
+            config,
         }
     }
 
@@ -30,6 +40,8 @@ impl ExecutorAgent {
             "to": token_out,
             "amount_eth": amount_wei,
             "chain": chain,
+            "deadline": crate::guards::tx_deadline(&self.config),
+            "rpc_url": self.config.rpc_url_override.as_deref().unwrap_or(""),
         });
 
         let resp = self

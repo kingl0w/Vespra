@@ -28,6 +28,9 @@ async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value> {
         "auto_execute_enabled": cfg.auto_execute_enabled,
         "auto_execute_max_eth": cfg.auto_execute_max_eth,
         "default_custody": cfg.default_custody,
+        "trader_max_slippage_pct": cfg.trader_max_slippage_pct,
+        "volatility_gate_threshold": cfg.volatility_gate_threshold,
+        "rpc_url_override": cfg.rpc_url_override,
     }))
 }
 

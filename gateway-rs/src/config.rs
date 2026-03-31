@@ -29,6 +29,8 @@ fn default_sniper_min_tvl() -> f64 { 50000.0 }
 fn default_sniper_exit_tvl_drop_pct() -> f64 { 30.0 }
 fn default_launcher_initial_liquidity_eth() -> f64 { 0.05 }
 fn default_custody() -> String { "safe".into() }
+fn default_trader_max_slippage_pct() -> f64 { 1.0 }
+fn default_volatility_gate_threshold() -> f64 { 15.0 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GatewayConfig {
@@ -110,6 +112,12 @@ pub struct GatewayConfig {
     pub nullboiler_url: String,
     #[serde(default = "default_rl_webhook_rpm")]
     pub rl_webhook_rpm: u64,
+    #[serde(default = "default_trader_max_slippage_pct")]
+    pub trader_max_slippage_pct: f64,
+    #[serde(default = "default_volatility_gate_threshold")]
+    pub volatility_gate_threshold: f64,
+    #[serde(default)]
+    pub rpc_url_override: Option<String>,
     #[serde(default)]
     pub rpc_urls: HashMap<String, String>,
 }

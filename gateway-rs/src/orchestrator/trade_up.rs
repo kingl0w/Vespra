@@ -284,6 +284,16 @@ impl TradeUpOrchestrator {
             best.momentum_score
         );
 
+        // Volatility gate — reject high 24h price swings
+        if best.price_change_24h_pct.abs() > self.config.volatility_gate_threshold {
+            tracing::warn!(
+                "[cycle {cycle_num}] volatility gate: {:.1}% 24h change exceeds {:.1}% — skipping cycle",
+                best.price_change_24h_pct,
+                self.config.volatility_gate_threshold
+            );
+            return CycleResult::hold(cycle_num, "volatility_gate").with_capital(capital_eth);
+        }
+
         // Kill switch check — before risk
         if self.is_killed() {
             tracing::warn!("[cycle {cycle_num}] kill switch active — halting before risk for wallet {wallet_id}");

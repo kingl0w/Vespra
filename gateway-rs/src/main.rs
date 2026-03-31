@@ -132,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
         config.keymaster_url.clone(),
         config.keymaster_token.clone(),
         http_client.clone(),
+        config.clone(),
     ));
 
     // 9. Build shared kill flag + orchestrator
