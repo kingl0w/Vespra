@@ -183,19 +183,39 @@ export function Pipelines() {
       </Card>
 
       <Card title="DAG Runs" actions={<Button variant="ghost" onClick={refresh}>Refresh</Button>}>
-        {loading && !runs ? (
-          <Loader />
-        ) : !runs || (Array.isArray(runs) && runs.length === 0) ? (
-          <p class="text-vespra-muted text-sm">No DAG runs found</p>
-        ) : Array.isArray(runs) ? (
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {runs.map((run) => (
-              <RunCard key={run.id} run={run} />
-            ))}
-          </div>
-        ) : (
-          <pre class="text-xs text-vespra-muted overflow-auto">{JSON.stringify(runs, null, 2)}</pre>
-        )}
+        {(() => {
+          const items = Array.isArray(runs) ? runs : runs?.items || [];
+          if (loading && !runs) return <Loader />;
+          if (items.length === 0) return <p class="text-vespra-muted text-sm">No DAG runs found</p>;
+          return (
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-left text-xs text-vespra-muted border-b border-vespra-border">
+                    <th class="py-2 px-3 font-medium">ID</th>
+                    <th class="py-2 px-3 font-medium">Status</th>
+                    <th class="py-2 px-3 font-medium">Created</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((run) => {
+                    const st = run.status || "unknown";
+                    const variant = st === "running" ? "yellow" : st === "completed" ? "green" : st === "failed" ? "red" : "default";
+                    return (
+                      <tr key={run.id} class="border-b border-vespra-border">
+                        <td class="py-2 px-3 font-mono text-xs">{(run.id || "").slice(0, 8)}</td>
+                        <td class="py-2 px-3"><Badge variant={variant}>{st}</Badge></td>
+                        <td class="py-2 px-3 text-vespra-muted text-xs">
+                          {run.created_at_ms ? new Date(run.created_at_ms).toLocaleString() : "-"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          );
+        })()}
       </Card>
     </div>
   );
