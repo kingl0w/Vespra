@@ -354,6 +354,11 @@ impl TradeUpOrchestrator {
             .await
             .unwrap_or_default();
 
+        // Slippage guard — reject if price impact exceeds config threshold
+        if !crate::guards::slippage_ok(quote.price_impact, &self.config) {
+            return CycleResult::hold(cycle_num, "slippage_guard").with_capital(capital_eth);
+        }
+
         // Kill switch check — before trader
         if self.is_killed() {
             tracing::warn!("[cycle {cycle_num}] kill switch active — halting before trader for wallet {wallet_id}");
