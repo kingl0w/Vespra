@@ -8,6 +8,7 @@ const LINKS = [
   { href: "/txlog", label: "TX Log" },
   { href: "/killswitch", label: "Kill Switch" },
   { href: "/settings", label: "Settings" },
+  { href: "/setup", label: "\u2699 Setup" },
 ];
 
 export function Nav({ url }) {

@@ -852,6 +852,196 @@ function ChatArchive({ messages, agent }) {
   );
 }
 
+// ─── Agent Config Panel ─────────────────────────────────────────
+
+const BASE_GW = import.meta.env.MODE === "production"
+  ? "https://api.vespra.xyz"
+  : "http://127.0.0.1:9001";
+
+const AGENT_CONFIG_FIELDS = {
+  scout: [
+    { key: "scout_chains", label: "Chains to scan", type: "multiselect", options: ["base", "arbitrum", "optimism", "ethereum"] },
+    { key: "scout_min_tvl_usd", label: "Min TVL ($)", type: "number" },
+    { key: "scout_protocols_whitelist", label: "Protocol whitelist (blank = all)", type: "text" },
+  ],
+  risk: [
+    { key: "risk_max_score", label: "Max risk score", type: "number", min: 0, max: 100 },
+    { key: "risk_blacklisted_protocols", label: "Blacklisted protocols", type: "text" },
+  ],
+  trader: [
+    { key: "trader_max_slippage_pct", label: "Max slippage (%)", type: "number", step: 0.1 },
+    { key: "trader_gas_multiplier", label: "Gas multiplier", type: "number", step: 0.05 },
+  ],
+  sentinel: [
+    { key: "sentinel_alert_severity_min", label: "Min alert severity", type: "select", options: ["low", "medium", "high"] },
+    { key: "sentinel_poll_interval_secs", label: "Poll interval (seconds)", type: "number" },
+  ],
+  yield: [
+    { key: "yield_target_apy_floor", label: "Target APY floor (%)", type: "number" },
+    { key: "yield_max_position_eth", label: "Max position (ETH)", type: "number" },
+  ],
+  sniper: [
+    { key: "sniper_min_pool_liquidity_usd", label: "Min pool liquidity ($)", type: "number" },
+    { key: "sniper_max_pool_age_blocks", label: "Max pool age (blocks)", type: "number" },
+  ],
+  launcher: [
+    { key: "launcher_default_decimals", label: "Default decimals", type: "number" },
+    { key: "launcher_default_supply", label: "Default supply", type: "number" },
+    { key: "launcher_default_chain", label: "Default chain", type: "select", options: ["base", "arbitrum", "optimism", "ethereum"] },
+  ],
+};
+
+function AgentConfigPanel({ agent }) {
+  const fields = AGENT_CONFIG_FIELDS[agent];
+  if (!fields) return null;
+
+  const [open, setOpen] = useState(false);
+  const [values, setValues] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    setOpen(false);
+    setLoaded(false);
+    setSaved(false);
+  }, [agent]);
+
+  useEffect(() => {
+    if (!open || loaded) return;
+    fetch(`${BASE_GW}/config`)
+      .then((r) => r.json())
+      .then((data) => {
+        const init = {};
+        for (const f of fields) {
+          if (data[f.key] !== undefined) {
+            init[f.key] = f.type === "multiselect" && Array.isArray(data[f.key])
+              ? data[f.key]
+              : f.type === "text" && Array.isArray(data[f.key])
+              ? data[f.key].join(", ")
+              : data[f.key];
+          }
+        }
+        setValues(init);
+        setLoaded(true);
+      })
+      .catch(() => setLoaded(true));
+  }, [open, loaded, agent]);
+
+  const updateField = (key, value) => {
+    setValues((v) => ({ ...v, [key]: value }));
+    setSaved(false);
+  };
+
+  const toggleMulti = (key, option) => {
+    setValues((v) => {
+      const arr = v[key] || [];
+      return { ...v, [key]: arr.includes(option) ? arr.filter((x) => x !== option) : [...arr, option] };
+    });
+    setSaved(false);
+  };
+
+  const saveConfig = async () => {
+    setSaving(true);
+    const patch = {};
+    for (const f of fields) {
+      const val = values[f.key];
+      if (val === undefined) continue;
+      if (f.type === "text" && typeof val === "string") {
+        patch[f.key] = val.trim() ? val.split(",").map((s) => s.trim()) : [];
+      } else {
+        patch[f.key] = val;
+      }
+    }
+    try {
+      await fetch(`${BASE_GW}/config`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch {}
+    setSaving(false);
+  };
+
+  return (
+    <div class="mb-3">
+      <button
+        onClick={() => setOpen(!open)}
+        class="flex items-center gap-1.5 text-xs text-vespra-muted hover:text-vespra-text transition-colors"
+      >
+        <svg class={`w-3 h-3 transition-transform ${open ? "rotate-90" : ""}`} viewBox="0 0 16 16" fill="currentColor">
+          <path d="M6 3l5 5-5 5V3z" />
+        </svg>
+        Settings
+      </button>
+      {open && (
+        <div class="mt-2 p-3 bg-vespra-bg rounded border border-vespra-border space-y-3">
+          {fields.map((f) => (
+            <div key={f.key}>
+              <label class="text-xs text-vespra-muted block mb-1">{f.label}</label>
+              {f.type === "number" && (
+                <input
+                  type="number"
+                  value={values[f.key] ?? ""}
+                  onInput={(e) => updateField(f.key, e.target.value === "" ? "" : Number(e.target.value))}
+                  step={f.step}
+                  min={f.min}
+                  max={f.max}
+                  class="bg-vespra-bg border border-vespra-border rounded px-3 py-1.5 text-sm text-vespra-text focus:outline-none focus:border-vespra-accent w-full"
+                />
+              )}
+              {f.type === "text" && (
+                <input
+                  type="text"
+                  value={values[f.key] ?? ""}
+                  onInput={(e) => updateField(f.key, e.target.value)}
+                  placeholder="comma-separated"
+                  class="bg-vespra-bg border border-vespra-border rounded px-3 py-1.5 text-sm text-vespra-text placeholder:text-vespra-muted focus:outline-none focus:border-vespra-accent w-full"
+                />
+              )}
+              {f.type === "select" && (
+                <select
+                  value={values[f.key] ?? ""}
+                  onChange={(e) => updateField(f.key, e.target.value)}
+                  class="bg-vespra-bg border border-vespra-border rounded px-3 py-1.5 text-sm text-vespra-text focus:outline-none focus:border-vespra-accent w-full"
+                >
+                  <option value="">--</option>
+                  {f.options.map((o) => (
+                    <option key={o} value={o}>{o}</option>
+                  ))}
+                </select>
+              )}
+              {f.type === "multiselect" && (
+                <div class="flex gap-3 flex-wrap">
+                  {f.options.map((o) => (
+                    <label key={o} class="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={(values[f.key] || []).includes(o)}
+                        onChange={() => toggleMulti(f.key, o)}
+                        class="accent-vespra-accent"
+                      />
+                      <span class="text-sm text-vespra-text">{o}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+          <div class="flex items-center gap-2 pt-1">
+            <Button variant="accent" onClick={saveConfig} disabled={saving}>
+              {saving ? "Saving..." : "Save"}
+            </Button>
+            {saved && <span class="text-xs text-vespra-green">Saved &#10003;</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main component ──────────────────────────────────────────────
 
 export function Agents() {
@@ -993,6 +1183,9 @@ export function Agents() {
               )
             }
           >
+            {/* Agent Settings */}
+            <AgentConfigPanel agent={selected} />
+
             {/* Archive */}
             {chat.length > 0 && (
               <ChatArchive messages={chat} agent={selected} />
