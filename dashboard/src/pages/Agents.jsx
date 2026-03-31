@@ -896,8 +896,9 @@ export function Agents() {
     abortRef.current[agent] = controller;
 
     try {
-      const res = await api.agentSend(agent, msg, { signal: controller.signal });
-      const content = res.response || res.error || JSON.stringify(res);
+      const cmdText = `[${agent}] ${msg}`;
+      const res = await api.swarmCommand(cmdText, null, { signal: controller.signal });
+      const content = res.reasoning || res.action_taken || res.response || JSON.stringify(res);
       setMessages((m) => ({
         ...m,
         [agent]: [...(m[agent] || updated), { role: "agent", content, ts: Date.now() }],

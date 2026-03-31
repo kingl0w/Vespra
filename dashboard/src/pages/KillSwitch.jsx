@@ -1,5 +1,5 @@
 import { useState } from "preact/hooks";
-import { useApi } from "../hooks/useApi.js";
+import { useApi, usePolling } from "../hooks/useApi.js";
 import { api } from "../lib/api.js";
 import { Card, Button, Badge, Loader } from "../components/Card.jsx";
 
@@ -7,10 +7,40 @@ export function KillSwitch() {
   const [armed, setArmed] = useState(false);
   const [sweeping, setSweeping] = useState(false);
   const [results, setResults] = useState([]);
+  const [killing, setKilling] = useState(false);
+  const [resuming, setResuming] = useState(false);
+  const [swarmMsg, setSwarmMsg] = useState(null);
 
+  const { data: swarmStatus } = usePolling(() => api.swarmStatus().catch(() => null), 5000);
   const { data: wallets, loading } = useApi(() => api.walletList().catch(() => []), []);
 
   const activeWallets = (wallets || []).filter((w) => w.active);
+
+  const killSwarm = async () => {
+    setKilling(true);
+    setSwarmMsg(null);
+    try {
+      const res = await api.swarmKill();
+      setSwarmMsg({ ok: true, msg: `Swarm killed — kill_flag: ${res.kill_flag}` });
+    } catch (err) {
+      setSwarmMsg({ ok: false, msg: err.error || err.message || "Kill failed" });
+    } finally {
+      setKilling(false);
+    }
+  };
+
+  const resumeSwarm = async () => {
+    setResuming(true);
+    setSwarmMsg(null);
+    try {
+      const res = await api.swarmResume();
+      setSwarmMsg({ ok: true, msg: `Swarm resumed — kill_flag: ${res.kill_flag}` });
+    } catch (err) {
+      setSwarmMsg({ ok: false, msg: err.error || err.message || "Resume failed" });
+    } finally {
+      setResuming(false);
+    }
+  };
 
   const sweepAll = async () => {
     if (!armed) return;
@@ -47,6 +77,33 @@ export function KillSwitch() {
   return (
     <div class="space-y-6">
       <h2 class="text-xl font-bold text-vespra-red">Kill Switch</h2>
+
+      <Card title="Swarm Control" className="border-vespra-red/30">
+        <div class="flex items-center justify-between py-3">
+          <div class="flex items-center gap-3">
+            <span class="text-sm text-vespra-muted">Swarm status:</span>
+            <Badge variant={swarmStatus?.kill_flag ? "red" : "green"}>
+              {swarmStatus?.kill_flag ? "KILLED" : swarmStatus ? "RUNNING" : "unknown"}
+            </Badge>
+            {swarmStatus?.status && (
+              <span class="text-xs text-vespra-muted">{swarmStatus.status}</span>
+            )}
+          </div>
+          <div class="flex gap-2">
+            <Button variant="danger" onClick={killSwarm} disabled={killing}>
+              {killing ? "Killing..." : "Kill Swarm"}
+            </Button>
+            <Button variant="accent" onClick={resumeSwarm} disabled={resuming}>
+              {resuming ? "Resuming..." : "Resume Swarm"}
+            </Button>
+          </div>
+        </div>
+        {swarmMsg && (
+          <div class={`text-sm mt-2 ${swarmMsg.ok ? "text-vespra-green" : "text-vespra-red"}`}>
+            {swarmMsg.msg}
+          </div>
+        )}
+      </Card>
 
       <Card className="border-vespra-red/30">
         <div class="text-center py-6 space-y-6">

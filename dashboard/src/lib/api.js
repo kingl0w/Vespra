@@ -2,6 +2,10 @@ const BASE = import.meta.env.MODE === "production"
   ? "https://api.vespra.xyz/api"
   : "/api";
 
+const BASE_GW = import.meta.env.MODE === "production"
+  ? "https://api.vespra.xyz"
+  : "http://127.0.0.1:9001";
+
 async function request(path, opts = {}) {
   const url = `${BASE}${path}`;
   const res = await fetch(url, {
@@ -23,17 +27,29 @@ async function request(path, opts = {}) {
 export const api = {
   // Health
   health: () => request("/health"),
-  healthGateway: () => request("/health/gateway"),
-  healthBoiler: () => request("/health/boiler"),
-  healthKeymaster: () => request("/health/keymaster"),
+  healthAll: () => request("/health"),
+  // Returns { gateway: {...}, boiler: {...}, keymaster: {...} }
 
-  // Agents
-  agentSend: (agent, message, { signal } = {}) =>
-    request(`/agent/${agent}`, {
+  // Swarm
+  swarmCommand: (command, walletId, { signal } = {}) =>
+    fetch(`${BASE_GW}/swarm/command`, {
       method: "POST",
-      body: JSON.stringify({ message }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ command, ...(walletId ? { wallet_id: walletId } : {}) }),
       signal,
-    }),
+    }).then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
+
+  swarmKill: () =>
+    fetch(`${BASE_GW}/swarm/kill`, { method: "POST", headers: { "Content-Type": "application/json" } })
+      .then(r => r.json()),
+
+  swarmResume: () =>
+    fetch(`${BASE_GW}/swarm/resume`, { method: "POST", headers: { "Content-Type": "application/json" } })
+      .then(r => r.json()),
+
+  swarmStatus: () =>
+    fetch(`${BASE_GW}/swarm/status`)
+      .then(r => r.json()),
 
   // DAGs
   dagList: () => request("/dag"),
