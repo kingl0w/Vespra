@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "preact/hooks";
+import { useState, useEffect, useCallback, useRef } from "preact/hooks";
 
 export function useApi(fetcher, deps = []) {
   const [data, setData] = useState(null);
@@ -23,11 +23,28 @@ export function useApi(fetcher, deps = []) {
 
 export function usePolling(fetcher, intervalMs, deps = []) {
   const result = useApi(fetcher, deps);
+  const refreshRef = useRef(result.refresh);
+  refreshRef.current = result.refresh;
 
   useEffect(() => {
-    const id = setInterval(result.refresh, intervalMs);
-    return () => clearInterval(id);
-  }, [result.refresh, intervalMs]);
+    let id = setInterval(() => refreshRef.current(), intervalMs);
+
+    const onVisibility = () => {
+      if (document.hidden) {
+        clearInterval(id);
+        id = null;
+      } else {
+        refreshRef.current(); // fetch fresh data on return
+        id = setInterval(() => refreshRef.current(), intervalMs);
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [intervalMs]);
 
   return result;
 }

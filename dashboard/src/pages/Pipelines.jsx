@@ -122,23 +122,26 @@ function Toast({ toast, onDone }) {
     };
   }, [toast]);
 
-  if (!toast) return null;
-
-  const runId = toast.runId || "";
+  const runId = toast?.runId || "";
   const truncated = runId.length > 8 ? runId.slice(0, 8) + "..." : runId;
 
   return (
-    <div
-      class="fixed bottom-4 right-4 z-50 transition-opacity duration-300"
-      style={{ opacity: visible ? 1 : 0 }}
-      role="status"
-    >
-      <div class="bg-vespra-surface border border-vespra-green/30 rounded-lg px-4 py-3 shadow-lg flex items-center gap-3">
-        <span class="text-sm text-vespra-green font-medium">Pipeline submitted</span>
-        {truncated && (
-          <span class="font-mono text-xs bg-vespra-surface px-2 py-0.5 rounded border border-vespra-border text-vespra-muted">{truncated}</span>
-        )}
-      </div>
+    <div class="fixed bottom-4 right-4 z-50" aria-live="polite" aria-atomic="true">
+      {toast && (
+        <div
+          class="transition-opacity duration-300 cursor-pointer"
+          style={{ opacity: visible ? 1 : 0 }}
+          onClick={onDone}
+          role="status"
+        >
+          <div class="bg-vespra-surface border border-vespra-green/30 rounded-lg px-4 py-3 shadow-lg flex items-center gap-3">
+            <span class="text-sm text-vespra-green font-medium">Pipeline submitted</span>
+            {truncated && (
+              <span class="font-mono text-xs bg-vespra-surface px-2 py-0.5 rounded border border-vespra-border text-vespra-muted">{truncated}</span>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -182,6 +185,7 @@ export function Pipelines() {
   const { data: runs, loading, refresh } = usePolling(() => api.dagList().catch(() => []), 8000);
 
   const submit = async (key) => {
+    if (submitting) return; // prevent concurrent submissions
     setSubmitting(key);
     setError(null);
     try {
@@ -189,7 +193,7 @@ export function Pipelines() {
       setToast({ runId: res.run_id || res.id || "" });
       refresh();
     } catch (err) {
-      setError(err.error || JSON.stringify(err));
+      setError(err.error || err.message || "Pipeline submission failed");
     } finally {
       setSubmitting(null);
     }
@@ -206,7 +210,7 @@ export function Pipelines() {
               key={key}
               variant="accent"
               onClick={() => submit(key)}
-              disabled={submitting === key}
+              disabled={!!submitting}
               className="py-3"
             >
               {submitting === key ? "Submitting..." : preset.name}
@@ -214,7 +218,15 @@ export function Pipelines() {
           ))}
         </div>
         {error && (
-          <div class="mt-3 text-sm text-vespra-red">{error}</div>
+          <div class="mt-3 text-sm text-vespra-red flex items-center gap-2" role="alert">
+            <span>{error}</span>
+            <button
+              onClick={() => setError(null)}
+              class="text-vespra-muted hover:text-vespra-text text-xs underline"
+            >
+              Dismiss
+            </button>
+          </div>
         )}
       </Card>
 
@@ -230,9 +242,9 @@ export function Pipelines() {
               <table class="w-full text-sm">
                 <thead>
                   <tr class="text-left text-xs text-vespra-muted border-b border-vespra-border">
-                    <th scope="col" class="py-2 px-3 font-medium">ID</th>
-                    <th scope="col" class="py-2 px-3 font-medium">Status</th>
-                    <th scope="col" class="py-2 px-3 font-medium">Created</th>
+                    <th scope="col" class="py-2.5 px-3 font-medium">ID</th>
+                    <th scope="col" class="py-2.5 px-3 font-medium">Status</th>
+                    <th scope="col" class="py-2.5 px-3 font-medium">Created</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -240,10 +252,10 @@ export function Pipelines() {
                     const st = run.status || "unknown";
                     const variant = st === "running" ? "yellow" : st === "completed" ? "green" : st === "failed" ? "red" : "default";
                     return (
-                      <tr key={run.id} class="border-b border-vespra-border">
-                        <td class="py-2 px-3 font-mono text-xs">{(run.id || "").slice(0, 8)}</td>
-                        <td class="py-2 px-3"><Badge variant={variant}>{st}</Badge></td>
-                        <td class="py-2 px-3 text-vespra-muted text-xs">
+                      <tr key={run.id} class="border-b border-vespra-border hover:bg-vespra-border/30 transition-colors">
+                        <td class="py-2.5 px-3 font-mono text-xs">{(run.id || "").slice(0, 8)}</td>
+                        <td class="py-2.5 px-3"><Badge variant={variant}>{st}</Badge></td>
+                        <td class="py-2.5 px-3 text-vespra-muted text-xs">
                           {run.created_at_ms ? new Date(run.created_at_ms).toLocaleString() : "-"}
                         </td>
                       </tr>

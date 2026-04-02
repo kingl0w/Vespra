@@ -2,31 +2,71 @@ import { useState, useEffect, useCallback, useRef } from "preact/hooks";
 import { useApi, usePolling } from "../hooks/useApi.js";
 import { useChain } from "../hooks/useChain.jsx";
 import { api } from "../lib/api.js";
-import { Card, Button, Badge, Loader, StatusDot } from "../components/Card.jsx";
+import { Card, Button, Badge, Loader } from "../components/Card.jsx";
 
 const CHAINS = ["sepolia", "base_sepolia", "arbitrum_sepolia", "ethereum", "base", "arbitrum", "optimism"];
 
+const CHAIN_LABELS = {
+  sepolia: "Sepolia",
+  base_sepolia: "Base Sepolia",
+  arbitrum_sepolia: "Arbitrum Sepolia",
+  ethereum: "Ethereum",
+  base: "Base",
+  arbitrum: "Arbitrum",
+  optimism: "Optimism",
+};
+
+function chainLabel(id) {
+  return CHAIN_LABELS[id] || id;
+}
+
+function safeEth(value) {
+  const n = parseFloat(value);
+  return Number.isFinite(n) ? parseFloat(n.toFixed(4)) : null;
+}
+
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false);
-  const copy = () => {
-    navigator.clipboard.writeText(text).then(() => {
+  const [failed, setFailed] = useState(false);
+  const copy = async () => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        // Fallback for insecure contexts
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.cssText = "position:fixed;left:-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    });
+    } catch {
+      setFailed(true);
+      setTimeout(() => setFailed(false), 2000);
+    }
   };
   return (
     <button
       onClick={copy}
-      aria-label={copied ? "Copied to clipboard" : "Copy to clipboard"}
+      aria-label={copied ? "Copied to clipboard" : failed ? "Copy failed" : "Copy to clipboard"}
       class="px-3 py-1.5 min-h-[36px] text-xs bg-vespra-border hover:bg-vespra-accent/15 hover:text-vespra-accent text-vespra-muted rounded transition-colors"
     >
-      {copied ? "Copied" : "Copy"}
+      {copied ? "Copied" : failed ? "Failed" : "Copy"}
     </button>
   );
 }
 
 function BalanceSpinner() {
-  return <span class="inline-block w-3 h-3 border border-vespra-accent border-t-transparent rounded-full animate-spin" />;
+  return (
+    <span class="inline-flex items-center" role="status">
+      <span class="inline-block w-3 h-3 border border-vespra-accent border-t-transparent rounded-full animate-spin" />
+      <span class="sr-only">Loading balance...</span>
+    </span>
+  );
 }
 
 function useWalletBalances() {
@@ -37,7 +77,11 @@ function useWalletBalances() {
   const fetchBalances = useCallback((wallets) => {
     if (!wallets || !Array.isArray(wallets)) return;
     const active = wallets.filter((w) => w.active && w.chain && w.address);
-    for (const w of active) {
+    // Throttle: fetch 3 at a time to avoid API overload
+    let i = 0;
+    const next = () => {
+      if (i >= active.length) return;
+      const w = active[i++];
       const key = w.id || w.wallet_id;
       setLoading((prev) => ({ ...prev, [key]: true }));
       api.balance(w.chain, w.address)
@@ -49,8 +93,12 @@ function useWalletBalances() {
         })
         .finally(() => {
           setLoading((prev) => ({ ...prev, [key]: false }));
+          next();
         });
-    }
+    };
+    // Start up to 3 concurrent fetches
+    const concurrency = Math.min(3, active.length);
+    for (let c = 0; c < concurrency; c++) next();
   }, []);
 
   const fetchOnce = useCallback((wallets) => {
@@ -67,17 +115,29 @@ function useWalletBalances() {
 }
 
 function WalletRow({ wallet, onSelect, balance, balanceLoading }) {
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onSelect(wallet);
+    }
+  };
   return (
     <tr
       class="border-b border-vespra-border hover:bg-vespra-border/30 cursor-pointer transition-colors"
       onClick={() => onSelect(wallet)}
+      onKeyDown={handleKeyDown}
+      tabIndex={0}
+      role="button"
+      aria-label={`View wallet ${wallet.label || wallet.wallet_id}`}
     >
       <td class="py-2.5 px-3">
         <div class="text-sm font-medium">{wallet.label || wallet.wallet_id}</div>
-        <div class="text-xs text-vespra-muted font-mono">{wallet.wallet_id}</div>
+        {wallet.label && (
+          <div class="text-xs text-vespra-muted font-mono">{wallet.wallet_id}</div>
+        )}
       </td>
       <td class="py-2.5 px-3">
-        <Badge variant="accent">{wallet.chain}</Badge>
+        <Badge variant="accent">{chainLabel(wallet.chain)}</Badge>
       </td>
       <td class="py-2.5 px-3 font-mono text-sm">
         <span class="text-vespra-muted">{wallet.address?.slice(0, 6)}...{wallet.address?.slice(-4)}</span>
@@ -88,7 +148,7 @@ function WalletRow({ wallet, onSelect, balance, balanceLoading }) {
         ) : balanceLoading ? (
           <BalanceSpinner />
         ) : balance != null ? (
-          <span>{parseFloat(parseFloat(balance).toFixed(4))} <span class="text-vespra-muted text-xs">ETH</span></span>
+          <span>{safeEth(balance)} <span class="text-vespra-muted text-xs">ETH</span></span>
         ) : (
           <span class="text-vespra-muted">-</span>
         )}
@@ -108,6 +168,9 @@ function WalletRow({ wallet, onSelect, balance, balanceLoading }) {
 function NewWalletCard({ wallet, onDismiss }) {
   const [checking, setChecking] = useState(false);
   const [fundStatus, setFundStatus] = useState(null);
+  const dismissTimer = useRef(null);
+
+  useEffect(() => () => { clearTimeout(dismissTimer.current); }, []);
 
   const checkBalance = async () => {
     setChecking(true);
@@ -116,8 +179,8 @@ function NewWalletCard({ wallet, onDismiss }) {
       const res = await api.balance(wallet.chain, wallet.address);
       const bal = parseFloat(res.balance_eth || res.balance || "0");
       if (bal > 0) {
-        setFundStatus({ funded: true, amount: parseFloat(bal.toFixed(4)) });
-        setTimeout(onDismiss, 3000);
+        setFundStatus({ funded: true, amount: safeEth(bal) });
+        dismissTimer.current = setTimeout(onDismiss, 3000);
       } else {
         setFundStatus({ funded: false });
       }
@@ -136,7 +199,7 @@ function NewWalletCard({ wallet, onDismiss }) {
           <div class="bg-vespra-bg border border-vespra-border rounded-lg p-4 inline-block">
             <div class="font-mono text-lg text-vespra-text tracking-wider">{wallet.address}</div>
             <div class="flex items-center justify-center gap-3 mt-3">
-              <Badge variant="accent">{wallet.chain}</Badge>
+              <Badge variant="accent">{chainLabel(wallet.chain)}</Badge>
               <CopyButton text={wallet.address} />
             </div>
             <div class="mt-4">
@@ -189,7 +252,7 @@ function CreateWalletForm({ onCreated }) {
       setLabel("");
       onCreated?.();
     } catch (err) {
-      setResult({ ok: false, msg: err.error || JSON.stringify(err) });
+      setResult({ ok: false, msg: err.error || err.message || "Wallet creation failed" });
     } finally {
       setCreating(false);
     }
@@ -199,31 +262,34 @@ function CreateWalletForm({ onCreated }) {
     <div class="space-y-4">
       <div class="flex flex-col sm:flex-row items-stretch sm:items-end gap-3">
         <div>
-          <label class="text-xs text-vespra-muted block mb-1">Chain</label>
+          <label for="wallet-chain" class="text-xs text-vespra-muted block mb-1">Chain</label>
           <select
+            id="wallet-chain"
             value={chain}
             onChange={(e) => setChain(e.target.value)}
-            class="bg-vespra-bg border border-vespra-border rounded px-3 py-2.5 min-h-[44px] text-sm text-vespra-text focus:border-vespra-accent w-full"
+            class="bg-vespra-bg border border-vespra-border rounded px-3 py-2.5 min-h-[44px] text-sm text-vespra-text focus:border-vespra-accent focus:outline-none w-full"
           >
             {CHAINS.map((c) => (
-              <option key={c} value={c}>{c}</option>
+              <option key={c} value={c}>{chainLabel(c)}</option>
             ))}
           </select>
         </div>
         <div>
-          <label class="text-xs text-vespra-muted block mb-1">Label</label>
+          <label for="wallet-label" class="text-xs text-vespra-muted block mb-1">Label</label>
           <input
+            id="wallet-label"
             value={label}
             onInput={(e) => setLabel(e.target.value)}
             placeholder="optional"
-            class="bg-vespra-bg border border-vespra-border rounded px-3 py-2.5 min-h-[44px] text-sm text-vespra-text placeholder:text-vespra-muted focus:border-vespra-accent w-full sm:w-40"
+            maxLength={64}
+            class="bg-vespra-bg border border-vespra-border rounded px-3 py-2.5 min-h-[44px] text-sm text-vespra-text placeholder:text-vespra-muted focus:border-vespra-accent focus:outline-none w-full sm:w-40"
           />
         </div>
         <Button variant="accent" onClick={create} disabled={creating}>
           {creating ? "Creating..." : "Create Wallet"}
         </Button>
         {result && !result.ok && (
-          <span class="text-sm text-vespra-red">{result.msg}</span>
+          <span class="text-sm text-vespra-red" role="alert">{result.msg}</span>
         )}
       </div>
       {newWallet && (
@@ -261,16 +327,16 @@ function WalletDetail({ wallet, onClose, onBalanceUpdate }) {
     try {
       const res = await api.txSweep({ wallet_id: wallet.id || wallet.wallet_id });
       const resp = res.response || res;
-      setSweepResult({ ok: true, msg: resp.status === "skip" ? resp.reason : `Swept — tx ${resp.tx_hash?.slice(0, 14)}...` });
+      setSweepResult({ ok: true, msg: resp.status === "skip" ? (resp.reason || "Skipped") : resp.tx_hash ? `Swept — tx ${resp.tx_hash.slice(0, 14)}...` : "Sweep submitted" });
       setTimeout(() => refreshRef.current(), 3000);
     } catch (err) {
-      setSweepResult({ ok: false, msg: err.error || err.response || JSON.stringify(err) });
+      setSweepResult({ ok: false, msg: err.error || err.message || "Sweep failed" });
     } finally {
       setSweeping(false);
     }
   };
 
-  const balEth = balance ? parseFloat(parseFloat(balance.balance_eth || balance.balance).toFixed(4)) : null;
+  const balEth = balance ? safeEth(balance.balance_eth ?? balance.balance) : null;
 
   return (
     <Card
@@ -284,7 +350,7 @@ function WalletDetail({ wallet, onClose, onBalanceUpdate }) {
         </div>
         <div>
           <span class="text-vespra-muted">Chain</span>
-          <div class="mt-1"><Badge variant="accent">{wallet.chain}</Badge></div>
+          <div class="mt-1"><Badge variant="accent">{chainLabel(wallet.chain)}</Badge></div>
         </div>
         <div class="col-span-2">
           <span class="text-vespra-muted">Address</span>
@@ -297,7 +363,7 @@ function WalletDetail({ wallet, onClose, onBalanceUpdate }) {
           <span class="text-vespra-muted">Balance</span>
           <div class="mt-1 flex items-center gap-1.5">
             <span class="text-lg font-bold">
-              {balLoading ? "..." : balEth != null ? balEth : "?"}
+              {balLoading ? "..." : balEth != null ? balEth : "-"}
               <span class="text-vespra-muted text-sm ml-1">ETH</span>
             </span>
             <button
@@ -322,7 +388,7 @@ function WalletDetail({ wallet, onClose, onBalanceUpdate }) {
             {sweeping ? "Sweeping..." : "Sweep to Safe"}
           </Button>
           {sweepResult && (
-            <span class={`text-sm ${sweepResult.ok ? "text-vespra-green" : "text-vespra-red"}`}>
+            <span class={`text-sm ${sweepResult.ok ? "text-vespra-green" : "text-vespra-red"}`} role="status">
               {sweepResult.msg}
             </span>
           )}

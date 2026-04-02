@@ -1,15 +1,17 @@
-import { useState } from "preact/hooks";
+import { useState, lazy, Suspense } from "preact/compat";
 import Router from "preact-router";
 import { ChainProvider } from "./hooks/useChain.jsx";
 import { Nav } from "./components/Nav.jsx";
+import { Loader } from "./components/Card.jsx";
 import { Overview } from "./pages/Overview.jsx";
-import { Agents } from "./pages/Agents.jsx";
-import { Pipelines } from "./pages/Pipelines.jsx";
-import { Wallets } from "./pages/Wallets.jsx";
-import { TxLog } from "./pages/TxLog.jsx";
-import { KillSwitch } from "./pages/KillSwitch.jsx";
-import { Settings } from "./pages/Settings.jsx";
-import { Setup } from "./pages/Setup.jsx";
+
+const Agents = lazy(() => import("./pages/Agents.jsx").then(m => ({ default: m.Agents })));
+const Pipelines = lazy(() => import("./pages/Pipelines.jsx").then(m => ({ default: m.Pipelines })));
+const Wallets = lazy(() => import("./pages/Wallets.jsx").then(m => ({ default: m.Wallets })));
+const TxLog = lazy(() => import("./pages/TxLog.jsx").then(m => ({ default: m.TxLog })));
+const KillSwitch = lazy(() => import("./pages/KillSwitch.jsx").then(m => ({ default: m.KillSwitch })));
+const Settings = lazy(() => import("./pages/Settings.jsx").then(m => ({ default: m.Settings })));
+const Setup = lazy(() => import("./pages/Setup.jsx").then(m => ({ default: m.Setup })));
 
 function SetupBanner() {
   const [dismissed, setDismissed] = useState(false);
@@ -42,16 +44,18 @@ export function App() {
         <Nav url={url} />
         <main id="main-content" class="max-w-7xl mx-auto px-4 py-6">
           <SetupBanner />
-          <Router onChange={(e) => setUrl(e.url)}>
-            <Overview path="/" />
-            <Agents path="/agents" />
-            <Pipelines path="/pipelines" />
-            <Wallets path="/wallets" />
-            <TxLog path="/txlog" />
-            <KillSwitch path="/killswitch" />
-            <Settings path="/settings" />
-            <Setup path="/setup" />
-          </Router>
+          <Suspense fallback={<Loader />}>
+            <Router onChange={(e) => setUrl(e.url)}>
+              <Overview path="/" />
+              <Agents path="/agents" />
+              <Pipelines path="/pipelines" />
+              <Wallets path="/wallets" />
+              <TxLog path="/txlog" />
+              <KillSwitch path="/killswitch" />
+              <Settings path="/settings" />
+              <Setup path="/setup" />
+            </Router>
+          </Suspense>
         </main>
       </div>
     </ChainProvider>
