@@ -17,6 +17,8 @@ fn default_trade_up_max_eth() -> f64 { 0.02 }
 fn default_trade_up_cycle_interval_secs() -> u64 { 300 }
 fn default_trade_up_min_gain_pct() -> f64 { 0.5 }
 fn default_trade_up_stop_loss_pct() -> f64 { 5.0 }
+fn default_trade_up_target_gain_pct() -> f64 { 15.0 }
+fn default_trade_up_gas_reserve_eth() -> f64 { 0.01 }
 fn default_auto_execute_max_eth() -> f64 { 0.05 }
 fn default_cors_origin() -> String { "*".into() }
 fn default_nullboiler_url() -> String { "http://127.0.0.1:9090".into() }
@@ -74,6 +76,10 @@ pub struct GatewayConfig {
     pub trade_up_min_gain_pct: f64,
     #[serde(default = "default_trade_up_stop_loss_pct")]
     pub trade_up_stop_loss_pct: f64,
+    #[serde(default = "default_trade_up_target_gain_pct")]
+    pub trade_up_target_gain_pct: f64,
+    #[serde(default = "default_trade_up_gas_reserve_eth")]
+    pub trade_up_gas_reserve_eth: f64,
     #[serde(default)]
     pub yield_auto_rotate_enabled: bool,
     #[serde(default = "default_yield_auto_rotate_threshold_pct")]

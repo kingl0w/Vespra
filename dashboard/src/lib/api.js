@@ -102,6 +102,28 @@ export const api = {
       body: JSON.stringify({ address }),
     }),
 
+  // Trade Up (VES-37)
+  tradeUpStart: (wallet, chain) =>
+    fetch(`${BASE_GW}/trade-up/position/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wallet, chain }),
+    }).then(r => r.json()),
+
+  tradeUpStop: () =>
+    fetch(`${BASE_GW}/trade-up/position/stop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }).then(r => r.json()),
+
+  tradeUpStatus: () =>
+    fetch(`${BASE_GW}/trade-up/position/status`)
+      .then(r => r.json()),
+
+  tradeUpHistory: () =>
+    fetch(`${BASE_GW}/trade-up/position/history`)
+      .then(r => r.json()),
+
   // Dispatch (generic)
   dispatch: (action, params) =>
     request("/dispatch", {

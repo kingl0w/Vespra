@@ -65,6 +65,18 @@ impl SentinelDecision {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SentinelAssessment {
+    pub action: String,
+    pub reasoning: String,
+}
+
+impl SentinelAssessment {
+    pub fn is_exit(&self) -> bool {
+        self.action == "exit_gain" || self.action == "exit_loss"
+    }
+}
+
 // ─── Yield decisions ──────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

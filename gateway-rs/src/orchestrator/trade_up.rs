@@ -21,7 +21,52 @@ use crate::data::protocol::ProtocolFetcher;
 use crate::data::quote::QuoteFetcher;
 use crate::data::wallet::WalletFetcher;
 use crate::types::decisions::{ExecutorStatus, ScoutDecision, SentinelDecision, TraderDecision};
+use crate::types::trade_up::{
+    PositionStatus, TradePosition, REDIS_ACTIVE_POSITION, REDIS_TRADE_POSITIONS,
+};
 use crate::types::wallet::PriceData;
+
+/// Deterministic UUID from wallet+chain for dedup of position loops.
+fn make_loop_key(wallet: &str, chain: &str) -> Uuid {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    wallet.hash(&mut hasher);
+    chain.hash(&mut hasher);
+    let h = hasher.finish();
+    let bytes = h.to_le_bytes();
+    let mut uuid_bytes = [0u8; 16];
+    uuid_bytes[..8].copy_from_slice(&bytes);
+    uuid_bytes[8..16].copy_from_slice(&bytes);
+    Uuid::from_bytes(uuid_bytes)
+}
+
+// ─── Position loop state machine ─────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopPhase {
+    Idle,
+    Scouting,
+    RiskCheck,
+    Entering,
+    Monitoring,
+    Exiting,
+    Compounding,
+}
+
+impl std::fmt::Display for LoopPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Idle => write!(f, "idle"),
+            Self::Scouting => write!(f, "scouting"),
+            Self::RiskCheck => write!(f, "risk_check"),
+            Self::Entering => write!(f, "entering"),
+            Self::Monitoring => write!(f, "monitoring"),
+            Self::Exiting => write!(f, "exiting"),
+            Self::Compounding => write!(f, "compounding"),
+        }
+    }
+}
 
 // ─── Result types ────────────────────────────────────────────────
 
@@ -635,6 +680,148 @@ impl TradeUpOrchestrator {
         let loops = self.active_loops.lock().await;
         loops.keys().copied().collect()
     }
+
+    // ── Position Redis helpers ───────────────────────────────────
+
+    async fn save_position(&self, position: &TradePosition) -> Result<()> {
+        let mut conn =
+            redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await?;
+        let json = serde_json::to_string(position)?;
+        conn.lpush::<_, _, ()>(REDIS_TRADE_POSITIONS, &json).await?;
+        conn.ltrim::<_, ()>(REDIS_TRADE_POSITIONS, 0, 199).await?;
+        Ok(())
+    }
+
+    async fn set_active_position(&self, position_id: &str) -> Result<()> {
+        let mut conn =
+            redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await?;
+        conn.set::<_, _, ()>(REDIS_ACTIVE_POSITION, position_id).await?;
+        Ok(())
+    }
+
+    async fn clear_active_position(&self) -> Result<()> {
+        let mut conn =
+            redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await?;
+        conn.del::<_, ()>(REDIS_ACTIVE_POSITION).await?;
+        Ok(())
+    }
+
+    pub async fn get_active_position(&self) -> Result<Option<TradePosition>> {
+        let mut conn =
+            redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await?;
+        let active_id: Option<String> = conn.get(REDIS_ACTIVE_POSITION).await?;
+        let active_id = match active_id {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        let raw: Vec<String> = conn.lrange(REDIS_TRADE_POSITIONS, 0, 199).await?;
+        for entry in raw {
+            if let Ok(pos) = serde_json::from_str::<TradePosition>(&entry) {
+                if pos.id == active_id {
+                    return Ok(Some(pos));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    pub async fn get_all_positions(&self) -> Result<Vec<TradePosition>> {
+        let mut conn =
+            redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await?;
+        let raw: Vec<String> = conn.lrange(REDIS_TRADE_POSITIONS, 0, 199).await?;
+        let mut positions: Vec<TradePosition> = raw
+            .iter()
+            .filter_map(|s| serde_json::from_str(s).ok())
+            .collect();
+        positions.sort_by(|a, b| b.opened_at.cmp(&a.opened_at));
+        Ok(positions)
+    }
+
+    async fn update_position_in_redis(&self, position: &TradePosition) -> Result<()> {
+        let mut conn =
+            redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await?;
+        // Read all, replace matching id, rewrite
+        let raw: Vec<String> = conn.lrange(REDIS_TRADE_POSITIONS, 0, 199).await?;
+        let mut entries: Vec<String> = Vec::with_capacity(raw.len());
+        for entry in &raw {
+            if let Ok(pos) = serde_json::from_str::<TradePosition>(entry) {
+                if pos.id == position.id {
+                    entries.push(serde_json::to_string(position)?);
+                    continue;
+                }
+            }
+            entries.push(entry.clone());
+        }
+        conn.del::<_, ()>(REDIS_TRADE_POSITIONS).await?;
+        for e in entries.iter().rev() {
+            conn.lpush::<_, _, ()>(REDIS_TRADE_POSITIONS, e).await?;
+        }
+        Ok(())
+    }
+
+    // ── Position-based loop ──────────────────────────────────────
+
+    pub async fn start_position_loop(
+        self: &Arc<Self>,
+        wallet_label: String,
+        chain: String,
+    ) -> Result<()> {
+        // Use a synthetic UUID derived from wallet+chain for dedup
+        let loop_key = make_loop_key(&wallet_label, &chain);
+
+        let mut loops = self.active_loops.lock().await;
+        if loops.contains_key(&loop_key) {
+            anyhow::bail!("trade-up position loop already running for {wallet_label} on {chain}");
+        }
+
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let orch = Arc::clone(self);
+        let wallet = wallet_label.clone();
+        let ch = chain.clone();
+
+        let handle = tokio::spawn(async move {
+            run_position_loop(orch, wallet, ch, cancel_rx).await;
+        });
+
+        loops.insert(loop_key, (cancel_tx, handle));
+        tracing::info!("trade-up position loop started for {wallet_label} on {chain}");
+        Ok(())
+    }
+
+    pub async fn stop_all_loops(&self) -> Result<()> {
+        let mut loops = self.active_loops.lock().await;
+        for (id, (cancel_tx, _handle)) in loops.drain() {
+            let _ = cancel_tx.send(true);
+            tracing::info!("trade-up loop stop sent for {id}");
+        }
+        Ok(())
+    }
+
+    pub async fn get_loop_phase(&self) -> Option<LoopPhase> {
+        let conn = redis::Client::get_multiplexed_async_connection(self.redis.as_ref())
+            .await
+            .ok();
+        if let Some(mut conn) = conn {
+            let raw: Option<String> = conn
+                .get::<_, Option<String>>("vespra:trade_up:loop_phase")
+                .await
+                .ok()
+                .flatten();
+            raw.and_then(|s| serde_json::from_str(&format!("\"{}\"", s)).ok())
+        } else {
+            None
+        }
+    }
+
+    async fn set_loop_phase(&self, phase: &LoopPhase) {
+        if let Ok(mut conn) =
+            redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await
+        {
+            let _: Result<(), _> = conn
+                .set::<_, _, ()>("vespra:trade_up:loop_phase", phase.to_string())
+                .await;
+        }
+    }
 }
 
 // ─── Background loop task ────────────────────────────────────────
@@ -751,4 +938,438 @@ async fn run_loop_task(
         pnl_pct = ((capital - initial_capital) / initial_capital) * 100.0,
         "trade-up loop ended"
     );
+}
+
+// ─── Position-based state machine loop ──────────────────────────
+
+async fn run_position_loop(
+    orch: Arc<TradeUpOrchestrator>,
+    wallet_label: String,
+    chain: String,
+    mut cancel_rx: watch::Receiver<bool>,
+) {
+    let loop_key = make_loop_key(&wallet_label, &chain);
+
+    tracing::info!(
+        wallet = %wallet_label,
+        chain = %chain,
+        "position loop starting — state machine: SCOUTING → RISK_CHECK → ENTERING → MONITORING → EXITING → COMPOUNDING"
+    );
+
+    loop {
+        if orch.is_killed() || *cancel_rx.borrow() {
+            tracing::info!("position loop cancelled for {wallet_label}");
+            break;
+        }
+
+        // ── SCOUTING ─────────────────────────────────────────
+        orch.set_loop_phase(&LoopPhase::Scouting).await;
+        tracing::info!("[{wallet_label}] SCOUTING on {chain}");
+
+        let chains = vec![chain.clone()];
+        let pools = match orch.pool_fetcher.fetch(&chains).await {
+            Ok(p) if !p.is_empty() => p,
+            _ => {
+                tracing::warn!("[{wallet_label}] no pools — waiting 5min");
+                wait_or_cancel(&mut cancel_rx, 300).await;
+                continue;
+            }
+        };
+
+        let scout_ctx = ScoutContext {
+            wallet_id: loop_key,
+            mode: "momentum".to_string(),
+            pools: pools.clone(),
+            chains: chains.clone(),
+        };
+        let best = match orch.scout.analyze(&scout_ctx).await {
+            Ok(ScoutDecision::Opportunities(opps)) => {
+                match opps
+                    .into_iter()
+                    .max_by(|a, b| {
+                        a.momentum_score
+                            .partial_cmp(&b.momentum_score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    }) {
+                    Some(o) if o.momentum_score >= 0.6 => o,
+                    _ => {
+                        tracing::info!("[{wallet_label}] no high-conviction opportunity — retry in 5min");
+                        wait_or_cancel(&mut cancel_rx, 300).await;
+                        continue;
+                    }
+                }
+            }
+            _ => {
+                tracing::warn!("[{wallet_label}] scout error/no opportunities — retry in 5min");
+                wait_or_cancel(&mut cancel_rx, 300).await;
+                continue;
+            }
+        };
+
+        tracing::info!(
+            "[{wallet_label}] scout picked: {} {} momentum={:.2}",
+            best.protocol,
+            best.pool,
+            best.momentum_score
+        );
+
+        // ── RISK_CHECK ───────────────────────────────────────
+        if orch.is_killed() || *cancel_rx.borrow() { break; }
+        orch.set_loop_phase(&LoopPhase::RiskCheck).await;
+        tracing::info!("[{wallet_label}] RISK_CHECK for {}", best.protocol);
+
+        let protocol_data = orch
+            .protocol_fetcher
+            .fetch_protocol(&best.protocol)
+            .await
+            .unwrap_or_default();
+
+        let risk_ctx = RiskContext {
+            opportunity: best.clone(),
+            protocol_data,
+        };
+        let risk_decision = match orch.risk.assess(&risk_ctx).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("[{wallet_label}] risk error: {e} — retry in 5min");
+                wait_or_cancel(&mut cancel_rx, 300).await;
+                continue;
+            }
+        };
+
+        if risk_decision.is_blocked() {
+            tracing::info!("[{wallet_label}] risk blocked — waiting 5min then re-scouting");
+            wait_or_cancel(&mut cancel_rx, 300).await;
+            continue;
+        }
+        tracing::info!("[{wallet_label}] risk passed: {:?}", risk_decision);
+
+        // ── ENTERING ─────────────────────────────────────────
+        if orch.is_killed() || *cancel_rx.borrow() { break; }
+        orch.set_loop_phase(&LoopPhase::Entering).await;
+        tracing::info!("[{wallet_label}] ENTERING position");
+
+        // Check wallet balance
+        let wallets = orch
+            .wallet_fetcher
+            .fetch_wallets(&chain)
+            .await
+            .unwrap_or_default();
+        let wallet_state = wallets
+            .iter()
+            .find(|w| w.address.contains(&wallet_label) || w.chain == chain);
+        let wallet_balance = wallet_state.map(|w| w.balance_eth).unwrap_or(0.0);
+        let gas_reserve = orch.config.trade_up_gas_reserve_eth;
+
+        if wallet_balance <= gas_reserve {
+            tracing::warn!(
+                "[{wallet_label}] insufficient balance {wallet_balance} ETH <= gas reserve {gas_reserve} ETH — aborting"
+            );
+            break;
+        }
+
+        let max_eth = orch.config.trade_up_max_eth;
+        let position_eth = f64::min(wallet_balance - gas_reserve, max_eth);
+
+        // Get quote for entry
+        let chain_id = orch
+            .chain_registry
+            .chain_id(&chain.to_lowercase())
+            .unwrap_or(8453);
+        let amount_wei = format!("{:.0}", position_eth * 1e18);
+        let quote = orch
+            .quote_fetcher
+            .fetch_quote("WETH", &best.pool, &amount_wei, chain_id)
+            .await
+            .unwrap_or_default();
+
+        // Execute entry swap via trader + executor
+        let trader_ctx = TraderContext {
+            opportunity: best.clone(),
+            quote: quote.clone(),
+            capital_eth: position_eth,
+            risk_score: risk_decision.score().clone(),
+            min_gain_pct: orch.config.trade_up_min_gain_pct,
+            max_eth,
+        };
+        let trader_decision = match orch.trader.evaluate(&trader_ctx).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!("[{wallet_label}] trader error: {e} — retry in 5min");
+                wait_or_cancel(&mut cancel_rx, 300).await;
+                continue;
+            }
+        };
+
+        let (token_out, amount_in_wei_str) = match &trader_decision {
+            TraderDecision::Swap { token_out, amount_in_wei, .. } => {
+                (token_out.clone(), amount_in_wei.clone())
+            }
+            TraderDecision::Hold { reason } => {
+                tracing::info!("[{wallet_label}] trader says hold: {reason} — retry in 5min");
+                wait_or_cancel(&mut cancel_rx, 300).await;
+                continue;
+            }
+            TraderDecision::Exit { reason } => {
+                tracing::info!("[{wallet_label}] trader says exit: {reason} — retry in 5min");
+                wait_or_cancel(&mut cancel_rx, 300).await;
+                continue;
+            }
+        };
+
+        // Execute entry
+        let wallet_uuid = wallet_state
+            .map(|w| w.wallet_id)
+            .unwrap_or_else(Uuid::new_v4);
+        let exec_result = match orch
+            .executor
+            .execute(wallet_uuid, "WETH", &token_out, &amount_in_wei_str, &chain)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("[{wallet_label}] executor error: {e}");
+                wait_or_cancel(&mut cancel_rx, 300).await;
+                continue;
+            }
+        };
+
+        if exec_result.status != ExecutorStatus::Success {
+            tracing::error!(
+                "[{wallet_label}] entry tx failed: {:?}",
+                exec_result.error
+            );
+            wait_or_cancel(&mut cancel_rx, 300).await;
+            continue;
+        }
+
+        // Create position
+        let token_amount = quote.amount_out_wei.parse::<f64>().unwrap_or(0.0);
+        let position_id = Uuid::new_v4().to_string();
+        let mut position = TradePosition {
+            id: position_id.clone(),
+            wallet: wallet_label.clone(),
+            chain: chain.clone(),
+            token_address: best.pool.clone(),
+            token_symbol: best.protocol.clone(),
+            entry_price_usd: best.price_usd,
+            entry_eth: position_eth,
+            token_amount,
+            opened_at: chrono::Utc::now().timestamp(),
+            status: PositionStatus::Open,
+            exit_price_usd: None,
+            exit_eth: None,
+            gas_cost_eth: None,
+            net_gain_eth: None,
+            exit_reason: None,
+            closed_at: None,
+        };
+
+        let _ = orch.save_position(&position).await;
+        let _ = orch.set_active_position(&position_id).await;
+        tracing::info!(
+            "[{wallet_label}] position opened: {} {:.4} ETH → {} at {:.4} USD",
+            position_id,
+            position_eth,
+            best.protocol,
+            best.price_usd
+        );
+
+        // ── MONITORING (poll every 5 min) ────────────────────
+        orch.set_loop_phase(&LoopPhase::Monitoring).await;
+        #[allow(unused_assignments)]
+        let mut exit_reason: Option<String> = None;
+        let target_gain_pct = orch.config.trade_up_target_gain_pct;
+        let stop_loss_pct = orch.config.trade_up_stop_loss_pct;
+
+        loop {
+            if orch.is_killed() || *cancel_rx.borrow() {
+                exit_reason = Some("cancelled".into());
+                break;
+            }
+
+            // Wait 5min between checks
+            if wait_or_cancel(&mut cancel_rx, 300).await {
+                exit_reason = Some("cancelled".into());
+                break;
+            }
+
+            tracing::info!("[{wallet_label}] MONITORING position {position_id}");
+
+            // Fetch current price
+            let price_data = orch
+                .price_oracle
+                .fetch(&position.token_address, &chain)
+                .await
+                .unwrap_or_default();
+            let current_price = price_data.price_usd;
+
+            if current_price <= 0.0 {
+                tracing::warn!("[{wallet_label}] price unavailable — skipping check");
+                continue;
+            }
+
+            let gain_pct = ((current_price - position.entry_price_usd)
+                / position.entry_price_usd)
+                * 100.0;
+            tracing::info!(
+                "[{wallet_label}] price={:.4} entry={:.4} gain={:.2}%",
+                current_price,
+                position.entry_price_usd,
+                gain_pct
+            );
+
+            // Check gain/loss thresholds
+            if gain_pct >= target_gain_pct {
+                exit_reason = Some("target_gain".into());
+                break;
+            }
+            if gain_pct <= -stop_loss_pct {
+                exit_reason = Some("stop_loss".into());
+                break;
+            }
+
+            // Sentinel assessment
+            if let Ok(assessment) = orch
+                .sentinel
+                .monitor_position(&position, current_price)
+                .await
+            {
+                if assessment.is_exit() {
+                    tracing::info!(
+                        "[{wallet_label}] sentinel says {}: {}",
+                        assessment.action,
+                        assessment.reasoning
+                    );
+                    exit_reason = Some(assessment.action.clone());
+                    break;
+                }
+            }
+
+            // Check for better opportunity
+            let scout_check = ScoutContext {
+                wallet_id: loop_key,
+                mode: "momentum".to_string(),
+                pools: pools.clone(),
+                chains: chains.clone(),
+            };
+            if let Ok(ScoutDecision::Opportunities(opps)) =
+                orch.scout.analyze(&scout_check).await
+            {
+                if let Some(alt) = opps
+                    .iter()
+                    .filter(|o| o.pool != position.token_address)
+                    .max_by(|a, b| {
+                        a.momentum_score
+                            .partial_cmp(&b.momentum_score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                {
+                    if alt.momentum_score > best.momentum_score + 0.1 {
+                        tracing::info!(
+                            "[{wallet_label}] better opportunity: {} score={:.2} vs {:.2}",
+                            alt.protocol,
+                            alt.momentum_score,
+                            best.momentum_score
+                        );
+                        exit_reason = Some("better_opportunity".into());
+                        break;
+                    }
+                }
+            }
+        }
+
+        // ── EXITING ──────────────────────────────────────────
+        if orch.is_killed() && exit_reason.is_none() {
+            break;
+        }
+        orch.set_loop_phase(&LoopPhase::Exiting).await;
+        let reason = exit_reason.unwrap_or_else(|| "unknown".into());
+        tracing::info!("[{wallet_label}] EXITING position — reason: {reason}");
+
+        position.status = PositionStatus::Exiting;
+        let _ = orch.update_position_in_redis(&position).await;
+
+        // Get exit quote TOKEN→ETH
+        let exit_amount_wei = format!("{:.0}", position.token_amount);
+        let exit_quote = orch
+            .quote_fetcher
+            .fetch_quote(&position.token_address, "WETH", &exit_amount_wei, chain_id)
+            .await
+            .unwrap_or_default();
+
+        // Execute exit swap
+        let exit_result = orch
+            .executor
+            .execute(
+                wallet_uuid,
+                &position.token_address,
+                "WETH",
+                &exit_amount_wei,
+                &chain,
+            )
+            .await;
+
+        let exit_price = orch
+            .price_oracle
+            .fetch(&position.token_address, &chain)
+            .await
+            .map(|p| p.price_usd)
+            .unwrap_or(0.0);
+
+        let exit_eth = exit_quote.amount_out_wei.parse::<f64>().unwrap_or(0.0) / 1e18;
+        let gas_cost = 0.002; // Estimate; actual comes from tx receipt
+        let net_gain = exit_eth - position.entry_eth - gas_cost;
+
+        position.status = match &exit_result {
+            Ok(r) if r.status == ExecutorStatus::Success => PositionStatus::Closed,
+            _ => PositionStatus::Failed,
+        };
+        position.exit_price_usd = Some(exit_price);
+        position.exit_eth = Some(exit_eth);
+        position.gas_cost_eth = Some(gas_cost);
+        position.net_gain_eth = Some(net_gain);
+        position.exit_reason = Some(reason.clone());
+        position.closed_at = Some(chrono::Utc::now().timestamp());
+
+        let _ = orch.update_position_in_redis(&position).await;
+        let _ = orch.clear_active_position().await;
+
+        tracing::info!(
+            "[{wallet_label}] position closed: entry={:.4} exit={:.4} net_gain={:.4} ETH reason={reason}",
+            position.entry_eth,
+            exit_eth,
+            net_gain
+        );
+
+        // ── COMPOUNDING ──────────────────────────────────────
+        orch.set_loop_phase(&LoopPhase::Compounding).await;
+        tracing::info!(
+            "[{wallet_label}] COMPOUNDING — P&L: {:.4} ETH ({:.2}%) — looping back in 30s",
+            net_gain,
+            if position.entry_eth > 0.0 {
+                (net_gain / position.entry_eth) * 100.0
+            } else {
+                0.0
+            }
+        );
+
+        if wait_or_cancel(&mut cancel_rx, 30).await {
+            break;
+        }
+    }
+
+    // Final cleanup
+    orch.set_loop_phase(&LoopPhase::Idle).await;
+    let mut loops = orch.active_loops.lock().await;
+    loops.remove(&loop_key);
+    tracing::info!("position loop ended for {wallet_label} on {chain}");
+}
+
+/// Wait for `secs` seconds or until cancel signal. Returns true if cancelled.
+async fn wait_or_cancel(cancel_rx: &mut watch::Receiver<bool>, secs: u64) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(std::time::Duration::from_secs(secs)) => false,
+        _ = cancel_rx.changed() => *cancel_rx.borrow(),
+    }
 }

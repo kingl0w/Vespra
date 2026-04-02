@@ -7,6 +7,8 @@ use uuid::Uuid;
 
 use super::AppState;
 
+// ─── Existing cycle-based routes ────────────────────────────────
+
 #[derive(Debug, Deserialize)]
 struct StartRequest {
     wallet_id: Uuid,
@@ -132,11 +134,111 @@ async fn read_history_from_redis(state: &AppState, key: &str) -> Json<serde_json
     }
 }
 
+// ─── VES-37: Position-based routes ──────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct PositionStartRequest {
+    wallet: String,
+    chain: String,
+}
+
+async fn start_position_loop(
+    State(state): State<AppState>,
+    Json(body): Json<PositionStartRequest>,
+) -> Json<serde_json::Value> {
+    match state
+        .trade_up_orchestrator
+        .start_position_loop(body.wallet.clone(), body.chain.clone())
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({
+            "status": "started",
+            "wallet": body.wallet,
+            "chain": body.chain,
+        })),
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "error": e.to_string(),
+        })),
+    }
+}
+
+async fn stop_position_loop(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    match state.trade_up_orchestrator.stop_all_loops().await {
+        Ok(()) => Json(serde_json::json!({
+            "status": "stopped",
+        })),
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "error": e.to_string(),
+        })),
+    }
+}
+
+async fn position_status(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let phase = state
+        .trade_up_orchestrator
+        .get_loop_phase()
+        .await
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "idle".into());
+
+    let active_position = state
+        .trade_up_orchestrator
+        .get_active_position()
+        .await
+        .ok()
+        .flatten();
+
+    let pnl = active_position.as_ref().map(|pos| {
+        serde_json::json!({
+            "entry_eth": pos.entry_eth,
+            "entry_price_usd": pos.entry_price_usd,
+            "token_symbol": pos.token_symbol,
+            "opened_at": pos.opened_at,
+        })
+    });
+
+    Json(serde_json::json!({
+        "loop_phase": phase,
+        "active_position": active_position,
+        "current_pnl": pnl,
+    }))
+}
+
+async fn position_history(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    match state.trade_up_orchestrator.get_all_positions().await {
+        Ok(positions) => Json(serde_json::json!({
+            "count": positions.len(),
+            "positions": positions,
+        })),
+        Err(e) => Json(serde_json::json!({
+            "count": 0,
+            "positions": [],
+            "error": e.to_string(),
+        })),
+    }
+}
+
+// ─── Router ─────────────────────────────────────────────────────
+
 pub fn router() -> Router<AppState> {
     Router::new()
+        // Existing cycle-based endpoints
         .route("/trade-up/start", post(start_trade_up))
         .route("/trade-up/stop/:wallet_id", post(stop_trade_up))
         .route("/trade-up/status/:wallet_id", get(trade_up_status))
         .route("/trade-up/history", get(trade_up_history))
         .route("/trade-up/history/:wallet_id", get(trade_up_wallet_history))
+        // VES-37: Position-based endpoints
+        .route("/trade-up/position/start", post(start_position_loop))
+        .route("/trade-up/position/stop", post(stop_position_loop))
+        .route("/trade-up/position/status", get(position_status))
+        .route("/trade-up/position/history", get(position_history))
 }

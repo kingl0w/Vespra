@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::agents::AgentClient;
-use crate::types::decisions::SentinelDecision;
+use crate::types::decisions::{SentinelAssessment, SentinelDecision};
+use crate::types::trade_up::TradePosition;
 use crate::types::wallet::WalletState;
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,6 +97,54 @@ impl SentinelAgent {
         }
 
         Ok(SentinelDecision::Healthy)
+    }
+
+    pub async fn monitor_position(
+        &self,
+        position: &TradePosition,
+        current_price: f64,
+    ) -> Result<SentinelAssessment> {
+        let gain_pct = if position.entry_price_usd > 0.0 {
+            ((current_price - position.entry_price_usd) / position.entry_price_usd) * 100.0
+        } else {
+            0.0
+        };
+
+        let system = "You are Sentinel, the portfolio watchdog of the Vespra DeFi swarm. \
+            You MUST respond with valid JSON only.\n\n\
+            Assess the open position and decide whether to hold, exit for gain, or cut loss.\n\n\
+            Output schema: { \"action\": \"hold\" | \"exit_gain\" | \"exit_loss\", \"reasoning\": \"<explanation>\" }\n\n\
+            Rules:\n\
+            - If gain >= 10% and momentum is fading → exit_gain\n\
+            - If loss >= 8% or risk is escalating → exit_loss\n\
+            - Otherwise → hold";
+
+        let task = format!(
+            "Monitor this open position: {} entered at {:.4} USD, current price {:.4} USD, \
+             gain/loss: {:.2}%. Should we hold, exit for gain, or cut loss?",
+            position.token_symbol, position.entry_price_usd, current_price, gain_pct,
+        );
+
+        let raw = self.llm.call(system, &task).await?;
+
+        #[derive(Deserialize)]
+        struct RawAssessment {
+            #[serde(default = "default_hold")]
+            action: String,
+            #[serde(default)]
+            reasoning: String,
+        }
+        fn default_hold() -> String { "hold".into() }
+
+        let parsed: RawAssessment = serde_json::from_str(&raw).unwrap_or(RawAssessment {
+            action: "hold".into(),
+            reasoning: format!("parse_error: {}", &raw[..raw.len().min(200)]),
+        });
+
+        Ok(SentinelAssessment {
+            action: parsed.action,
+            reasoning: parsed.reasoning,
+        })
     }
 
     pub async fn query(&self, question: &str) -> Result<String> {
