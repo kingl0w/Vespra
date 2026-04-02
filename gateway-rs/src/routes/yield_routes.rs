@@ -6,6 +6,7 @@ use serde::Deserialize;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
+use crate::data::aave;
 use super::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -246,9 +247,120 @@ async fn yield_pools(
     }
 }
 
+// ─── Aave V3 position data ───────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct PositionsQuery {
+    wallet: String,
+    chain: String,
+}
+
+async fn yield_positions(
+    State(state): State<AppState>,
+    Query(params): Query<PositionsQuery>,
+) -> Json<serde_json::Value> {
+    // Resolve wallet label/id to address via Keymaster
+    let address = match aave::resolve_wallet_address(
+        &reqwest::Client::new(),
+        &state.config.keymaster_url,
+        &state.config.keymaster_token,
+        &params.wallet,
+        &params.chain,
+    )
+    .await
+    {
+        Ok(addr) => addr,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "positions": [],
+                "error": format!("wallet resolution failed: {e}"),
+            }));
+        }
+    };
+
+    match state
+        .aave_fetcher
+        .fetch_positions_enriched(
+            &params.chain,
+            &address,
+            &state.config.keymaster_url,
+            &state.config.keymaster_token,
+            &reqwest::Client::new(),
+        )
+        .await
+    {
+        Ok(positions) => {
+            let count = positions.len();
+            Json(serde_json::json!({
+                "wallet": params.wallet,
+                "address": address,
+                "chain": params.chain,
+                "positions": positions,
+                "count": count,
+            }))
+        }
+        Err(e) => Json(serde_json::json!({
+            "positions": [],
+            "error": e.to_string(),
+        })),
+    }
+}
+
+// ─── Full yield analysis ─────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct AnalyzeRequest {
+    wallet: String,
+    chain: String,
+}
+
+async fn yield_analyze(
+    State(state): State<AppState>,
+    Json(body): Json<AnalyzeRequest>,
+) -> Json<serde_json::Value> {
+    // Resolve wallet label/id to address
+    let address = match aave::resolve_wallet_address(
+        &reqwest::Client::new(),
+        &state.config.keymaster_url,
+        &state.config.keymaster_token,
+        &body.wallet,
+        &body.chain,
+    )
+    .await
+    {
+        Ok(addr) => addr,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "status": "error",
+                "error": format!("wallet resolution failed: {e}"),
+            }));
+        }
+    };
+
+    match state
+        .yield_agent
+        .analyze_live(&body.chain, &address)
+        .await
+    {
+        Ok(analysis) => Json(serde_json::json!({
+            "status": "ok",
+            "wallet": body.wallet,
+            "address": address,
+            "chain": body.chain,
+            "analysis": analysis,
+        })),
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "error": e.to_string(),
+        })),
+    }
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/yield/pools", get(yield_pools))
+        .route("/yield/positions", get(yield_positions))
+        .route("/yield/analyze", post(yield_analyze))
         .route("/yield/protocols", get(yield_protocols))
         .route("/yield/start", post(yield_start))
         .route("/yield/stop/:wallet_id", post(yield_stop))

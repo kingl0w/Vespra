@@ -15,6 +15,7 @@ use gateway_rs::agents::yield_agent::YieldAgent;
 use gateway_rs::agents::LlmClient;
 use gateway_rs::chain::ChainRegistry;
 use gateway_rs::config::GatewayConfig;
+use gateway_rs::data::aave::AaveFetcher;
 use gateway_rs::data::pool::PoolFetcher;
 use gateway_rs::data::price::OracleRouter;
 use gateway_rs::data::protocol::ProtocolFetcher;
@@ -100,6 +101,12 @@ async fn main() -> anyhow::Result<()> {
         redis_client.clone(),
     ));
 
+    // 6c. Build Aave V3 fetcher
+    let aave_fetcher = Arc::new(AaveFetcher::new(
+        http_client.clone(),
+        redis_client.clone(),
+    ));
+
     // 7. Build price oracle via config-driven router
     let price_oracle: Arc<dyn gateway_rs::data::price::PriceOracle> =
         Arc::new(OracleRouter::from_config(
@@ -140,7 +147,10 @@ async fn main() -> anyhow::Result<()> {
         config.keymaster_token.clone(),
         http_client.clone(),
     ));
-    let yield_agent = Arc::new(YieldAgent::new(llm.clone()));
+    let yield_agent = Arc::new(
+        YieldAgent::new(llm.clone())
+            .with_live_data(aave_fetcher.clone(), yield_registry.clone(), config.clone()),
+    );
     let sniper_agent = Arc::new(SniperAgent::new(llm.clone()));
     let coordinator_agent = Arc::new(CoordinatorAgent::new(llm.clone()));
     let launcher_agent = Arc::new(LauncherAgent::new(llm.clone()));
@@ -252,6 +262,8 @@ async fn main() -> anyhow::Result<()> {
         kill_flag,
         webhook_rate_limiter,
         yield_registry,
+        aave_fetcher,
+        yield_agent: yield_agent.clone(),
     };
 
     let app = routes::router(state);

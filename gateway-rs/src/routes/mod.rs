@@ -21,8 +21,10 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+use crate::agents::yield_agent::YieldAgent;
 use crate::chain::ChainRegistry;
 use crate::config::GatewayConfig;
+use crate::data::aave::AaveFetcher;
 use crate::data::yield_provider::ProviderRegistry;
 use crate::orchestrator::command::CommandOrchestrator;
 use crate::orchestrator::launcher::LauncherOrchestrator;
@@ -47,6 +49,8 @@ pub struct AppState {
     pub kill_flag: Arc<AtomicBool>,
     pub webhook_rate_limiter: Arc<WebhookRateLimiter>,
     pub yield_registry: Arc<ProviderRegistry>,
+    pub aave_fetcher: Arc<AaveFetcher>,
+    pub yield_agent: Arc<YieldAgent>,
 }
 
 /// Middleware: Cloudflare Access check
