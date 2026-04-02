@@ -726,6 +726,26 @@ function extractJson(text) {
   return null;
 }
 
+function parseMarkdown(text) {
+  if (typeof text !== "string") return String(text);
+  let html = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g, "<em>$1</em>");
+  // List items
+  html = html.replace(/(^|\n)([-*] .+(?:\n[-*] .+)*)/g, (_, pre, block) => {
+    const items = block.split("\n").map((l) => `<li>${l.replace(/^[-*] /, "")}</li>`).join("");
+    return `${pre}<ul class="list-disc pl-4 my-1">${items}</ul>`;
+  });
+  // Headings
+  html = html.replace(/(^|\n)## (.+)/g, '$1<h3 class="font-bold text-base mt-2 mb-1">$2</h3>');
+  // Double newlines
+  html = html.replace(/\n\n/g, "<br><br>");
+  return html;
+}
+
 function AgentResponse({ content, agent }) {
   let parsed = typeof content === "string" ? extractJson(content) : content;
 
@@ -739,7 +759,7 @@ function AgentResponse({ content, agent }) {
         );
       } catch {}
     }
-    return <div class="text-sm text-vespra-text whitespace-pre-wrap">{content}</div>;
+    return <div class="text-sm text-vespra-text whitespace-pre-wrap" dangerouslySetInnerHTML={{ __html: parseMarkdown(content) }} />;
   }
 
   if (typeof parsed === "string") {
@@ -1098,7 +1118,13 @@ export function Agents() {
     try {
       const cmdText = `[${agent}] ${msg}`;
       const res = await api.swarmCommand(cmdText, null, { signal: controller.signal });
-      const content = res.reasoning || res.action_taken || res.response || JSON.stringify(res);
+      let content = res.reasoning || res.action_taken || res.response || JSON.stringify(res);
+      if (agent === 'sentinel') {
+        try {
+          const parsed = JSON.parse(content);
+          if (parsed.message) content = parsed.message;
+        } catch(e) {}
+      }
       setMessages((m) => ({
         ...m,
         [agent]: [...(m[agent] || updated), { role: "agent", content, ts: Date.now() }],

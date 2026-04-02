@@ -100,9 +100,6 @@ function WalletRow({ wallet, onSelect, balance, balanceLoading }) {
       <td class="py-2.5 px-3 text-sm text-vespra-muted">
         {wallet.strategy || "-"}
       </td>
-      <td class="py-2.5 px-3 text-sm text-right">
-        {wallet.cap_eth ? `${wallet.cap_eth} ETH` : "-"}
-      </td>
     </tr>
   );
 }
@@ -390,7 +387,6 @@ export function Wallets() {
                   <th class="py-2 px-3 font-medium text-right">Balance</th>
                   <th class="py-2 px-3 font-medium">Status</th>
                   <th class="py-2 px-3 font-medium">Strategy</th>
-                  <th class="py-2 px-3 font-medium text-right">Cap</th>
                 </tr>
               </thead>
               <tbody>
