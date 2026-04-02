@@ -26,6 +26,7 @@ use crate::chain::ChainRegistry;
 use crate::config::GatewayConfig;
 use crate::data::aave::AaveFetcher;
 use crate::data::yield_provider::ProviderRegistry;
+use crate::middleware::rate_limit::RouteLimiters;
 use crate::orchestrator::command::CommandOrchestrator;
 use crate::orchestrator::launcher::LauncherOrchestrator;
 use crate::orchestrator::portfolio::PortfolioOrchestrator;
@@ -51,6 +52,7 @@ pub struct AppState {
     pub yield_registry: Arc<ProviderRegistry>,
     pub aave_fetcher: Arc<AaveFetcher>,
     pub yield_agent: Arc<YieldAgent>,
+    pub route_limiters: RouteLimiters,
 }
 
 /// Middleware: Cloudflare Access check
@@ -108,6 +110,8 @@ pub fn router(state: AppState) -> Router {
             .max_age(std::time::Duration::from_secs(86400))
     };
 
+    let route_limiters = state.route_limiters.clone();
+
     Router::new()
         .merge(health::router())
         .merge(trade_up::router())
@@ -120,6 +124,10 @@ pub fn router(state: AppState) -> Router {
         .merge(portfolio::router())
         .merge(proxy::router())
         .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(
+            route_limiters,
+            crate::middleware::rate_limit::rate_limit_middleware,
+        ))
         .layer(middleware::from_fn_with_state(state.clone(), inject_extensions))
         .layer(middleware::from_fn(cf_access_middleware))
         .layer(cors)

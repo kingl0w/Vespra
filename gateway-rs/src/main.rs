@@ -240,12 +240,18 @@ async fn main() -> anyhow::Result<()> {
         kill_flag.clone(),
     ));
 
-    // 10. Build webhook rate limiter + app state
+    // 10. Build rate limiters + app state
     let webhook_rate_limiter = Arc::new(
         gateway_rs::routes::ratelimit::WebhookRateLimiter::new(config.rl_webhook_rpm),
     );
+    let route_limiters =
+        gateway_rs::middleware::rate_limit::RouteLimiters::from_config(&config);
     tracing::info!(
-        "webhook rate limit: {}/min  cors={} cf_access={}",
+        "rate limits: enabled={} agent={}rpm wallet_create={}rph tx_send={}rph | webhook={}rpm cors={} cf_access={}",
+        config.rate_limit_enabled,
+        config.rate_limit_agent_rpm,
+        config.rate_limit_wallet_create_rph,
+        config.rate_limit_tx_send_rph,
         config.rl_webhook_rpm, config.cors_origin, config.cf_access_required,
     );
 
@@ -264,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
         yield_registry,
         aave_fetcher,
         yield_agent: yield_agent.clone(),
+        route_limiters,
     };
 
     let app = routes::router(state);

@@ -33,6 +33,10 @@ fn default_launcher_initial_liquidity_eth() -> f64 { 0.05 }
 fn default_custody() -> String { "safe".into() }
 fn default_trader_max_slippage_pct() -> f64 { 1.0 }
 fn default_volatility_gate_threshold() -> f64 { 15.0 }
+fn default_rate_limit_enabled() -> bool { true }
+fn default_rate_limit_agent_rpm() -> u32 { 10 }
+fn default_rate_limit_wallet_create_rph() -> u32 { 5 }
+fn default_rate_limit_tx_send_rph() -> u32 { 20 }
 fn default_yield_providers() -> String { "defillama".into() }
 fn default_yield_min_tvl_usd() -> f64 { 500_000.0 }
 fn default_yield_min_apy() -> f64 { 1.0 }
@@ -136,6 +140,14 @@ pub struct GatewayConfig {
     pub yield_min_apy: f64,
     #[serde(default = "default_yield_top_n")]
     pub yield_top_n: usize,
+    #[serde(default = "default_rate_limit_enabled")]
+    pub rate_limit_enabled: bool,
+    #[serde(default = "default_rate_limit_agent_rpm")]
+    pub rate_limit_agent_rpm: u32,
+    #[serde(default = "default_rate_limit_wallet_create_rph")]
+    pub rate_limit_wallet_create_rph: u32,
+    #[serde(default = "default_rate_limit_tx_send_rph")]
+    pub rate_limit_tx_send_rph: u32,
     #[serde(default)]
     pub rpc_url_override: Option<String>,
     #[serde(default)]

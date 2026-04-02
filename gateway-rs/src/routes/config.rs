@@ -75,6 +75,12 @@ async fn patch_config(
     }
 }
 
+async fn get_rate_limits(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(state.route_limiters.config_json())
+}
+
 pub fn router() -> Router<AppState> {
-    Router::new().route("/config", get(get_config).patch(patch_config))
+    Router::new()
+        .route("/config", get(get_config).patch(patch_config))
+        .route("/api/rate-limits", get(get_rate_limits))
 }
