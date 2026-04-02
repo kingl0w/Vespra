@@ -1,4 +1,5 @@
 pub mod command;
+pub mod coordinator;
 pub mod launcher;
 pub mod portfolio;
 pub mod sentinel;

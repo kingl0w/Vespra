@@ -124,6 +124,18 @@ export const api = {
     fetch(`${BASE_GW}/trade-up/position/history`)
       .then(r => r.json()),
 
+  // Coordinator
+  orchestrate: (intent, wallet, chain) =>
+    fetch(`${BASE_GW}/coordinator/orchestrate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ intent, ...(wallet ? { wallet } : {}), ...(chain ? { chain } : {}) }),
+    }).then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
+
+  getSessionContext: () =>
+    fetch(`${BASE_GW}/coordinator/session`)
+      .then(r => r.json()),
+
   // Dispatch (generic)
   dispatch: (action, params) =>
     request("/dispatch", {

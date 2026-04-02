@@ -5,6 +5,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
+use crate::orchestrator::coordinator;
+
 use super::AppState;
 
 async fn swarm_kill(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -56,7 +58,17 @@ async fn swarm_command(
         .command_orchestrator
         .execute(body.command, body.wallet_id)
         .await;
-    Json(serde_json::to_value(&report).unwrap_or_default())
+
+    // Append agent result to coordinator session context
+    let result_value = serde_json::to_value(&report).unwrap_or_default();
+    let agent_result = coordinator::AgentResult {
+        agent: report.strategy.clone(),
+        output: result_value.clone(),
+        timestamp: chrono::Utc::now().timestamp(),
+    };
+    coordinator::append_to_session(&state.redis, agent_result).await;
+
+    Json(result_value)
 }
 
 async fn swarm_status(State(state): State<AppState>) -> Json<serde_json::Value> {

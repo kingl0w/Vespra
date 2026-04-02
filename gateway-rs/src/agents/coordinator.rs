@@ -19,7 +19,7 @@ pub struct SystemState {
     pub chains: Vec<String>,
 }
 
-const SYSTEM_PROMPT: &str = "You are Coordinator, the command interpreter of the Vespra DeFi agent swarm. \
+const COMMAND_PROMPT: &str = "You are Coordinator, the command interpreter of the Vespra DeFi agent swarm. \
 You MUST respond with valid JSON only. No prose, no markdown.\n\n\
 Parse the user's natural-language command into a structured action for the swarm.\n\n\
 Output schema: { \"strategy\": \"TradeUp\" | \"YieldRotate\" | \"Sniper\" | \"Kill\" | \"Resume\" | \"Status\" \
@@ -67,7 +67,7 @@ impl CoordinatorAgent {
             ctx.command
         );
 
-        let raw = self.llm.call(SYSTEM_PROMPT, &task).await?;
+        let raw = self.llm.call(COMMAND_PROMPT, &task).await?;
 
         let val: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
 

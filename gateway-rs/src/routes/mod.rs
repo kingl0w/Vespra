@@ -1,4 +1,5 @@
 pub mod config;
+pub mod coordinator;
 pub mod fees;
 pub mod health;
 pub mod launcher;
@@ -28,6 +29,7 @@ use crate::data::aave::AaveFetcher;
 use crate::data::yield_provider::ProviderRegistry;
 use crate::middleware::rate_limit::RouteLimiters;
 use crate::orchestrator::command::CommandOrchestrator;
+use crate::orchestrator::coordinator::CoordinatorOrchestrator;
 use crate::orchestrator::launcher::LauncherOrchestrator;
 use crate::orchestrator::portfolio::PortfolioOrchestrator;
 use crate::orchestrator::sniper::SniperOrchestrator;
@@ -53,6 +55,7 @@ pub struct AppState {
     pub aave_fetcher: Arc<AaveFetcher>,
     pub yield_agent: Arc<YieldAgent>,
     pub route_limiters: RouteLimiters,
+    pub coordinator_orchestrator: Arc<CoordinatorOrchestrator>,
 }
 
 /// Middleware: Cloudflare Access check
@@ -116,6 +119,7 @@ pub fn router(state: AppState) -> Router {
         .merge(health::router())
         .merge(trade_up::router())
         .merge(swarm::router())
+        .merge(coordinator::router())
         .merge(config::router())
         .merge(fees::router())
         .merge(yield_routes::router())

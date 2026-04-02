@@ -23,6 +23,7 @@ use gateway_rs::data::quote::QuoteFetcher;
 use gateway_rs::data::wallet::WalletFetcher;
 use gateway_rs::data::yield_provider::ProviderRegistry;
 use gateway_rs::orchestrator::command::CommandOrchestrator;
+use gateway_rs::orchestrator::coordinator::CoordinatorOrchestrator;
 use gateway_rs::orchestrator::launcher::LauncherOrchestrator;
 use gateway_rs::orchestrator::portfolio::PortfolioOrchestrator;
 use gateway_rs::orchestrator::sniper::SniperOrchestrator;
@@ -221,7 +222,15 @@ async fn main() -> anyhow::Result<()> {
         launcher_agent.clone(),
     ));
 
-    // 9e. Build launcher orchestrator
+    // 9e. Build coordinator orchestrator
+    let coordinator_orchestrator = Arc::new(CoordinatorOrchestrator::new(
+        llm.clone(),
+        redis_client.clone(),
+        config.clone(),
+        yield_registry.clone(),
+    ));
+
+    // 9f. Build launcher orchestrator
     let launcher_orchestrator = Arc::new(LauncherOrchestrator::new(
         launcher_agent,
         executor.clone(),
@@ -271,6 +280,7 @@ async fn main() -> anyhow::Result<()> {
         aave_fetcher,
         yield_agent: yield_agent.clone(),
         route_limiters,
+        coordinator_orchestrator,
     };
 
     let app = routes::router(state);
