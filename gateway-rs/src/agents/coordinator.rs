@@ -23,7 +23,7 @@ const COMMAND_PROMPT: &str = "You are Coordinator, the command interpreter of th
 You MUST respond with valid JSON only. No prose, no markdown.\n\n\
 Parse the user's natural-language command into a structured action for the swarm.\n\n\
 Output schema: { \"strategy\": \"TradeUp\" | \"YieldRotate\" | \"Sniper\" | \"Kill\" | \"Resume\" | \"Status\" \
-| \"AskScout\" | \"AskRisk\" | \"AskSentinel\" | \"AskTrader\" | \"AskYield\" | \"AskSniper\" | \"AskLauncher\" | \"AskExecutor\", \
+| \"AskCoordinator\" | \"AskScout\" | \"AskRisk\" | \"AskSentinel\" | \"AskTrader\" | \"AskYield\" | \"AskSniper\" | \"AskLauncher\" | \"AskExecutor\", \
 \"wallet_id\": string | null, \"capital_eth\": float | null, \"chain\": string | null, \
 \"max_eth\": float | null, \"stop_loss_pct\": float | null, \"threshold_pct\": float | null, \
 \"query\": string | null, \
@@ -48,7 +48,9 @@ Rules:\n\
 - Default chain to null if not specified\n\
 - Default capital_eth to null if not specified\n\
 - Use stop_loss_pct from command or null\n\
-- If the command has an [agent_name] prefix like [scout] or [risk], use the matching AskX strategy";
+- If the command has an [agent_name] prefix like [scout] or [risk], use the matching AskX strategy\n\
+- Use AskCoordinator for general portfolio summaries, activity reports, or when the user chats with the coordinator directly\n\
+- For AskCoordinator, set query to the user's message — the coordinator will respond in plain prose";
 
 pub struct CoordinatorAgent {
     llm: Arc<dyn AgentClient>,
@@ -98,5 +100,14 @@ impl CoordinatorAgent {
                 .unwrap_or("command interpreted")
                 .to_string(),
         })
+    }
+
+    /// Respond to a general chat query in plain prose.
+    pub async fn query(&self, question: &str) -> Result<String> {
+        const CHAT_PROMPT: &str = "You are Coordinator, the command interpreter of the Vespra DeFi agent swarm. \
+When responding to general chat messages, respond in plain prose. Summarize the situation clearly \
+without wrapping your response in JSON. Be concise and direct. \
+Only use structured JSON format when explicitly in orchestration mode via /coordinator/orchestrate.";
+        self.llm.call(CHAT_PROMPT, question).await
     }
 }

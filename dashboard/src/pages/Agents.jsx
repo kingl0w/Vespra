@@ -528,18 +528,20 @@ function ExecutorView({ data }) {
 }
 
 function YieldView({ data }) {
+  const action = data.recommended_action || data.action || null;
   return (
     <div class="bg-vespra-bg rounded border border-vespra-border p-3 text-xs space-y-2">
-      <div class="flex justify-between">
-        <span class="text-vespra-muted">Status</span>
-        <Badge variant={data.status === "ok" ? "green" : data.status === "critical" ? "red" : "yellow"}>
-          {data.status || "?"}
-        </Badge>
-      </div>
-      {data.action && (
-        <div class="flex justify-between">
-          <span class="text-vespra-muted">Action</span>
-          <span class="font-medium">{data.action}</span>
+      {action && (
+        <div class="space-y-1">
+          <div class="flex justify-between">
+            <span class="text-vespra-muted">Action</span>
+            <Badge variant={action === "hold" ? "yellow" : action === "deposit" || action === "rebalance" ? "green" : "default"}>
+              {action}
+            </Badge>
+          </div>
+          {data.reasoning && (
+            <div class="text-vespra-muted text-xs">{data.reasoning}</div>
+          )}
         </div>
       )}
       {data.protocol && (
@@ -780,6 +782,21 @@ function AgentResponse({ content, agent }) {
     return <SentinelView data={parsed} />;
   if (agent === "trader" && (parsed?.swap || parsed?.status === "ready" || parsed?.status === "no_route"))
     return <TraderView data={parsed} />;
+  if (agent === "trader" && parsed?.action && (parsed?.token_in || parsed?.reasoning)) {
+    return (
+      <div class="text-sm space-y-1">
+        <div class="flex gap-2 items-center">
+          <span class="font-mono text-vespra-accent font-bold uppercase">{parsed.action}</span>
+          {parsed.expected_gain_pct > 0 && (
+            <span class="text-green-400 text-xs">+{parsed.expected_gain_pct}%</span>
+          )}
+        </div>
+        {parsed.reasoning && (
+          <div class="text-vespra-muted text-xs mt-1">{parsed.reasoning}</div>
+        )}
+      </div>
+    );
+  }
   if (agent === "executor" && (parsed?.keymaster_results || parsed?.keymaster_calls))
     return <ExecutorView data={parsed} />;
   if (agent === "yield" && (parsed?.position || parsed?.protocol || parsed?.action))
@@ -1136,10 +1153,16 @@ export function Agents() {
       const cmdText = `[${agent}] ${enrichedMsg}`;
       const res = await api.swarmCommand(cmdText, null, { signal: controller.signal });
       let content = res.reasoning || res.action_taken || res.response || JSON.stringify(res);
-      if (agent === 'sentinel') {
+      if (agent === 'sentinel' || agent === 'coordinator') {
         try {
           const parsed = JSON.parse(content);
           if (parsed.message) content = parsed.message;
+        } catch(e) {}
+      }
+      if (agent === 'executor') {
+        try {
+          const parsed = JSON.parse(content);
+          if (parsed.note) content = parsed.note;
         } catch(e) {}
       }
       setMessages((m) => ({

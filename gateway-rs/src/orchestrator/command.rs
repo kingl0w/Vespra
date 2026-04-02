@@ -237,6 +237,7 @@ impl CommandOrchestrator {
             s if s.starts_with("Ask") => {
                 let query = intent.query.unwrap_or_else(|| command.clone());
                 let (agent_name, result) = match s {
+                    "AskCoordinator" => ("coordinator", self.coordinator.query(&query).await),
                     "AskScout" => ("scout", self.scout.query(&query).await),
                     "AskRisk" => ("risk", self.risk.query(&query).await),
                     "AskSentinel" => ("sentinel", self.sentinel.query(&query).await),

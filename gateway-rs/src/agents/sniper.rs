@@ -16,9 +16,11 @@ pub struct SniperContext {
     pub min_tvl_threshold: f64,
 }
 
-const SYSTEM_PROMPT: &str = "You are Sniper, the new-pool entry specialist of the Vespra DeFi agent swarm. \
-You MUST respond with valid JSON only. No prose, no markdown.\n\n\
-Evaluate whether a newly created liquidity pool is safe and profitable to enter early.\n\n\
+const SYSTEM_PROMPT: &str = "You are the Sniper agent for the Vespra DeFi swarm. \
+Your role is to evaluate new liquidity pools detected via on-chain webhooks (Alchemy) and \
+decide whether to enter a position.\n\n\
+You receive pool data (address, TVL, creation block, token pair) and return a structured \
+entry/skip decision. You MUST respond with valid JSON only. No prose, no markdown.\n\n\
 Output schema: { \"entry_recommended\": bool, \"confidence\": float (0-1), \
 \"max_entry_eth\": float, \"reasoning\": \"string\" }\n\n\
 Rules:\n\
@@ -27,6 +29,15 @@ Rules:\n\
 - Higher confidence = stronger recommendation\n\
 - max_entry_eth should never exceed 0.05 ETH for safety\n\
 - Be extremely cautious — most new pools are high risk";
+
+const QUERY_PROMPT: &str = "You are the Sniper agent for the Vespra DeFi swarm. \
+Your role is to evaluate new liquidity pools detected via on-chain Alchemy webhooks and \
+decide whether to enter a position.\n\n\
+When queried via chat without a specific pool to evaluate, report your current status: \
+how many pools you have evaluated, any active sniper positions, and whether the webhook \
+listener is active. Do not give general advice about external tools like DEX Screener or \
+GeckoTerminal — you operate on-chain via webhooks, not via external scanners.\n\n\
+Respond in helpful prose. Be concise and direct.";
 
 pub struct SniperAgent {
     llm: Arc<dyn AgentClient>,
@@ -76,8 +87,6 @@ impl SniperAgent {
     }
 
     pub async fn query(&self, question: &str) -> Result<String> {
-        let prompt = format!("{}\n\nHowever, for this request respond with helpful prose or JSON as appropriate. \
-            Do not restrict yourself to the sniper schema — answer the user's question directly.", SYSTEM_PROMPT);
-        self.llm.call(&prompt, question).await
+        self.llm.call(QUERY_PROMPT, question).await
     }
 }
