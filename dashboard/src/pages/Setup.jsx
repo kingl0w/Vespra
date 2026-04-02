@@ -18,11 +18,11 @@ const COMPLETE_KEY = "vespra-setup-complete";
 
 function StepIndicator({ step }) {
   return (
-    <div class="flex items-center gap-2 mb-6">
+    <div class="flex items-center gap-1.5 sm:gap-2 mb-6" role="progressbar" aria-valuenow={step} aria-valuemin={1} aria-valuemax={5} aria-label={`Step ${step} of 5`}>
       {[1, 2, 3, 4, 5].map((s) => (
-        <div key={s} class="flex items-center gap-2">
+        <div key={s} class="flex items-center gap-1.5 sm:gap-2">
           <div
-            class={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
+            class={`w-7 h-7 sm:w-8 sm:h-8 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold shrink-0 ${
               s === step
                 ? "bg-vespra-accent text-black"
                 : s < step
@@ -32,10 +32,10 @@ function StepIndicator({ step }) {
           >
             {s < step ? "\u2713" : s}
           </div>
-          {s < 5 && <div class={`w-8 h-0.5 ${s < step ? "bg-vespra-green/40" : "bg-vespra-border"}`} />}
+          {s < 5 && <div class={`w-4 sm:w-8 h-0.5 ${s < step ? "bg-vespra-green/40" : "bg-vespra-border"}`} />}
         </div>
       ))}
-      <span class="ml-3 text-sm text-vespra-muted">Step {step} of 5</span>
+      <span class="ml-2 sm:ml-3 text-xs sm:text-sm text-vespra-muted whitespace-nowrap">Step {step} of 5</span>
     </div>
   );
 }
@@ -51,7 +51,7 @@ function Toggle({ checked, onChange, label }) {
         class={`relative w-10 h-5 rounded-full transition-colors ${checked ? "bg-vespra-accent" : "bg-vespra-border"}`}
       >
         <span
-          class={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${checked ? "translate-x-5" : ""}`}
+          class={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-vespra-text transition-transform ${checked ? "translate-x-5" : ""}`}
         />
       </button>
       <span class="text-sm text-vespra-text">{label}</span>
@@ -72,7 +72,7 @@ function TextInput({ value, onChange, placeholder, type = "text", step, min }) {
       placeholder={placeholder}
       step={step}
       min={min}
-      class="bg-vespra-bg border border-vespra-border rounded px-3 py-1.5 text-sm text-vespra-text placeholder:text-vespra-muted focus:outline-none focus:border-vespra-accent w-full"
+      class="bg-vespra-bg border border-vespra-border rounded px-3 py-2.5 min-h-[44px] text-sm text-vespra-text placeholder:text-vespra-muted focus:border-vespra-accent w-full"
     />
   );
 }
@@ -401,7 +401,7 @@ export function Setup() {
                 <select
                   value={config.price_oracle}
                   onChange={(e) => update("price_oracle", e.target.value)}
-                  class="bg-vespra-bg border border-vespra-border rounded px-3 py-1.5 text-sm text-vespra-text focus:outline-none focus:border-vespra-accent w-full"
+                  class="bg-vespra-bg border border-vespra-border rounded px-3 py-2.5 min-h-[44px] text-sm text-vespra-text focus:border-vespra-accent w-full"
                 >
                   {ORACLES.map((o) => (
                     <option key={o} value={o}>{o}</option>
@@ -413,7 +413,7 @@ export function Setup() {
                 <select
                   value={config.price_oracle_fallback}
                   onChange={(e) => update("price_oracle_fallback", e.target.value)}
-                  class="bg-vespra-bg border border-vespra-border rounded px-3 py-1.5 text-sm text-vespra-text focus:outline-none focus:border-vespra-accent w-full"
+                  class="bg-vespra-bg border border-vespra-border rounded px-3 py-2.5 min-h-[44px] text-sm text-vespra-text focus:border-vespra-accent w-full"
                 >
                   {ORACLES.map((o) => (
                     <option key={o} value={o}>{o}</option>
@@ -440,9 +440,9 @@ export function Setup() {
                   <table class="w-full text-sm">
                     <thead>
                       <tr class="text-left text-xs text-vespra-muted border-b border-vespra-border">
-                        <th class="py-2 px-3 font-medium">Field</th>
-                        <th class="py-2 px-3 font-medium">Current</th>
-                        <th class="py-2 px-3 font-medium">New</th>
+                        <th scope="col" class="py-2 px-3 font-medium">Field</th>
+                        <th scope="col" class="py-2 px-3 font-medium">Current</th>
+                        <th scope="col" class="py-2 px-3 font-medium">New</th>
                       </tr>
                     </thead>
                     <tbody>

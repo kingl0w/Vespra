@@ -79,7 +79,7 @@ export function KillSwitch() {
       <h2 class="text-xl font-bold text-vespra-red">Kill Switch</h2>
 
       <Card title="Swarm Control" className="border-vespra-red/30">
-        <div class="flex items-center justify-between py-3">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-3">
           <div class="flex items-center gap-3">
             <span class="text-sm text-vespra-muted">Swarm status:</span>
             <Badge variant={swarmStatus?.kill_flag ? "red" : "green"}>
@@ -122,7 +122,7 @@ export function KillSwitch() {
                   type="checkbox"
                   checked={armed}
                   onChange={(e) => setArmed(e.target.checked)}
-                  class="w-4 h-4 accent-red-500"
+                  class="w-4 h-4 accent-vespra-red"
                 />
                 <span class="text-sm text-vespra-red">Arm kill switch</span>
               </label>

@@ -1,4 +1,4 @@
-import { useState } from "preact/hooks";
+import { useState, useEffect } from "preact/hooks";
 import { usePolling } from "../hooks/useApi.js";
 import { api } from "../lib/api.js";
 import { Card, Button, Badge, Loader } from "../components/Card.jsx";
@@ -106,6 +106,43 @@ const PRESETS = {
   },
 };
 
+function Toast({ toast, onDone }) {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    if (!toast) return;
+    // Trigger fade-in on next frame
+    const frameId = requestAnimationFrame(() => setVisible(true));
+    const timer = setTimeout(() => setVisible(false), 3000);
+    const cleanup = setTimeout(onDone, 3300);
+    return () => {
+      cancelAnimationFrame(frameId);
+      clearTimeout(timer);
+      clearTimeout(cleanup);
+    };
+  }, [toast]);
+
+  if (!toast) return null;
+
+  const runId = toast.runId || "";
+  const truncated = runId.length > 8 ? runId.slice(0, 8) + "..." : runId;
+
+  return (
+    <div
+      class="fixed bottom-4 right-4 z-50 transition-opacity duration-300"
+      style={{ opacity: visible ? 1 : 0 }}
+      role="status"
+    >
+      <div class="bg-vespra-surface border border-vespra-green/30 rounded-lg px-4 py-3 shadow-lg flex items-center gap-3">
+        <span class="text-sm text-vespra-green font-medium">Pipeline submitted</span>
+        {truncated && (
+          <span class="font-mono text-xs bg-vespra-surface px-2 py-0.5 rounded border border-vespra-border text-vespra-muted">{truncated}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function StepBadge({ status }) {
   const variants = {
     completed: "green",
@@ -140,18 +177,19 @@ function RunCard({ run }) {
 
 export function Pipelines() {
   const [submitting, setSubmitting] = useState(null);
-  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  const [toast, setToast] = useState(null);
   const { data: runs, loading, refresh } = usePolling(() => api.dagList().catch(() => []), 8000);
 
   const submit = async (key) => {
     setSubmitting(key);
-    setResult(null);
+    setError(null);
     try {
       const res = await api.dagSubmit(PRESETS[key].dag);
-      setResult({ ok: true, msg: `Submitted: ${res.run_id || res.id || "OK"}` });
+      setToast({ runId: res.run_id || res.id || "" });
       refresh();
     } catch (err) {
-      setResult({ ok: false, msg: err.error || JSON.stringify(err) });
+      setError(err.error || JSON.stringify(err));
     } finally {
       setSubmitting(null);
     }
@@ -162,7 +200,7 @@ export function Pipelines() {
       <h2 class="text-xl font-bold">Pipeline Control</h2>
 
       <Card title="Launch Pipeline">
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
           {Object.entries(PRESETS).map(([key, preset]) => (
             <Button
               key={key}
@@ -175,12 +213,12 @@ export function Pipelines() {
             </Button>
           ))}
         </div>
-        {result && (
-          <div class={`mt-3 text-sm ${result.ok ? "text-vespra-green" : "text-vespra-red"}`}>
-            {result.msg}
-          </div>
+        {error && (
+          <div class="mt-3 text-sm text-vespra-red">{error}</div>
         )}
       </Card>
+
+      <Toast toast={toast} onDone={() => setToast(null)} />
 
       <Card title="DAG Runs" actions={<Button variant="ghost" onClick={refresh}>Refresh</Button>}>
         {(() => {
@@ -192,9 +230,9 @@ export function Pipelines() {
               <table class="w-full text-sm">
                 <thead>
                   <tr class="text-left text-xs text-vespra-muted border-b border-vespra-border">
-                    <th class="py-2 px-3 font-medium">ID</th>
-                    <th class="py-2 px-3 font-medium">Status</th>
-                    <th class="py-2 px-3 font-medium">Created</th>
+                    <th scope="col" class="py-2 px-3 font-medium">ID</th>
+                    <th scope="col" class="py-2 px-3 font-medium">Status</th>
+                    <th scope="col" class="py-2 px-3 font-medium">Created</th>
                   </tr>
                 </thead>
                 <tbody>

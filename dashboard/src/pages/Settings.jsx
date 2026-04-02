@@ -104,13 +104,13 @@ export function Settings() {
         </p>
         <div class="space-y-3">
           {CHAIN_IDS.map((chain) => (
-            <div key={chain} class="flex items-center gap-3">
-              <label class="text-sm text-vespra-muted w-36 shrink-0">{chain}</label>
+            <div key={chain} class="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-3">
+              <label class="text-sm text-vespra-muted sm:w-36 shrink-0">{chain}</label>
               <input
                 value={safes[chain] || ""}
                 onInput={(e) => updateSafe(chain, e.target.value)}
                 placeholder="0x..."
-                class="flex-1 bg-vespra-bg border border-vespra-border rounded px-3 py-1.5 text-sm font-mono text-vespra-text placeholder:text-vespra-muted/40 focus:outline-none focus:border-vespra-accent"
+                class="flex-1 bg-vespra-bg border border-vespra-border rounded px-3 py-2.5 min-h-[44px] text-sm font-mono text-vespra-text placeholder:text-vespra-muted/40 focus:border-vespra-accent"
               />
             </div>
           ))}

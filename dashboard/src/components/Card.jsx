@@ -19,7 +19,9 @@ export function StatusDot({ status }) {
       : status === "degraded" || status === "warning"
       ? "bg-vespra-yellow"
       : "bg-vespra-red";
-  return <span class={`inline-block w-2 h-2 rounded-full ${color}`} />;
+  return (
+    <span class={`inline-block w-2 h-2 rounded-full ${color}`} role="img" aria-label={status || "unknown"} />
+  );
 }
 
 export function Badge({ children, variant = "default" }) {
@@ -29,7 +31,7 @@ export function Badge({ children, variant = "default" }) {
     green: "bg-vespra-green/15 text-vespra-green",
     red: "bg-vespra-red/15 text-vespra-red",
     yellow: "bg-vespra-yellow/15 text-vespra-yellow",
-    orange: "bg-orange-500/15 text-orange-400",
+    orange: "bg-vespra-orange/15 text-vespra-orange",
   };
   return (
     <span class={`inline-block px-2 py-0.5 rounded text-xs font-medium ${styles[variant] || styles.default}`}>
@@ -49,7 +51,7 @@ export function Button({ children, onClick, variant = "default", disabled, class
     <button
       onClick={onClick}
       disabled={disabled}
-      class={`px-3 py-1.5 rounded text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${styles[variant]} ${className}`}
+      class={`px-4 py-2.5 min-h-[44px] rounded text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${styles[variant]} ${className}`}
     >
       {children}
     </button>
@@ -58,8 +60,9 @@ export function Button({ children, onClick, variant = "default", disabled, class
 
 export function Loader() {
   return (
-    <div class="flex items-center justify-center py-12">
+    <div class="flex items-center justify-center py-12" role="status">
       <div class="w-6 h-6 border-2 border-vespra-accent border-t-transparent rounded-full animate-spin" />
+      <span class="sr-only">Loading...</span>
     </div>
   );
 }

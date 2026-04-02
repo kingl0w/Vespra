@@ -76,9 +76,9 @@ export function TxLog() {
                 onInput={(e) => setWalletId(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && search()}
                 placeholder="Enter wallet ID or select below"
-                class="flex-1 bg-vespra-bg border border-vespra-border rounded px-3 py-1.5 text-sm text-vespra-text placeholder:text-vespra-muted focus:outline-none focus:border-vespra-accent"
+                class="flex-1 min-w-0 bg-vespra-bg border border-vespra-border rounded px-3 py-2.5 min-h-[44px] text-sm text-vespra-text placeholder:text-vespra-muted focus:border-vespra-accent"
               />
-              <Button variant="accent" onClick={search}>Search</Button>
+              <Button variant="accent" onClick={search} className="shrink-0">Search</Button>
             </div>
           </div>
         </div>
@@ -88,7 +88,7 @@ export function TxLog() {
               <button
                 key={w.wallet_id}
                 onClick={() => { setWalletId(w.wallet_id); setSearchId(w.wallet_id); }}
-                class={`px-2 py-1 rounded text-xs transition-colors ${
+                class={`px-3 py-2 min-h-[44px] rounded text-xs transition-colors ${
                   searchId === w.wallet_id
                     ? "bg-vespra-accent/15 text-vespra-accent"
                     : "bg-vespra-border text-vespra-muted hover:text-vespra-text"
@@ -115,13 +115,13 @@ export function TxLog() {
               <table class="w-full">
                 <thead>
                   <tr class="text-left text-xs text-vespra-muted border-b border-vespra-border">
-                    <th class="py-2 px-3 font-medium">Time</th>
-                    <th class="py-2 px-3 font-medium">Chain</th>
-                    <th class="py-2 px-3 font-medium">Wallet</th>
-                    <th class="py-2 px-3 font-medium">To</th>
-                    <th class="py-2 px-3 font-medium text-right">Amount</th>
-                    <th class="py-2 px-3 font-medium">TX Hash</th>
-                    <th class="py-2 px-3 font-medium">Status</th>
+                    <th scope="col" class="py-2 px-3 font-medium">Time</th>
+                    <th scope="col" class="py-2 px-3 font-medium">Chain</th>
+                    <th scope="col" class="py-2 px-3 font-medium">Wallet</th>
+                    <th scope="col" class="py-2 px-3 font-medium">To</th>
+                    <th scope="col" class="py-2 px-3 font-medium text-right">Amount</th>
+                    <th scope="col" class="py-2 px-3 font-medium">TX Hash</th>
+                    <th scope="col" class="py-2 px-3 font-medium">Status</th>
                   </tr>
                 </thead>
                 <tbody>

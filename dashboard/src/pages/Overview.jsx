@@ -68,7 +68,7 @@ export function Overview() {
             {dagData.version && (
               <div class="flex justify-between">
                 <span class="text-vespra-muted">Version</span>
-                <span class="text-vespra-muted">{dagData.version}</span>
+                <span class="font-mono text-vespra-text">{dagData.version}</span>
               </div>
             )}
           </div>
@@ -77,13 +77,13 @@ export function Overview() {
 
       <Card title="Quick Actions">
         <div class="flex flex-wrap gap-2 text-sm">
-          <a href="/agents" class="px-3 py-2 bg-vespra-border rounded hover:bg-vespra-muted/30 transition-colors">
+          <a href="/agents" class="px-4 py-2.5 min-h-[44px] inline-flex items-center bg-vespra-border rounded hover:bg-vespra-muted/30 transition-colors">
             Chat with Agent
           </a>
-          <a href="/pipelines" class="px-3 py-2 bg-vespra-border rounded hover:bg-vespra-muted/30 transition-colors">
+          <a href="/pipelines" class="px-4 py-2.5 min-h-[44px] inline-flex items-center bg-vespra-border rounded hover:bg-vespra-muted/30 transition-colors">
             Launch Pipeline
           </a>
-          <a href="/wallets" class="px-3 py-2 bg-vespra-border rounded hover:bg-vespra-muted/30 transition-colors">
+          <a href="/wallets" class="px-4 py-2.5 min-h-[44px] inline-flex items-center bg-vespra-border rounded hover:bg-vespra-muted/30 transition-colors">
             View Wallets
           </a>
         </div>

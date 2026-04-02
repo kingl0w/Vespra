@@ -440,10 +440,10 @@ function ExecutorWalletTable({ wallets }) {
     <table class="w-full text-xs mt-1">
       <thead>
         <tr class="text-left text-vespra-muted border-b border-vespra-border/50">
-          <th class="py-1 pr-2 font-medium">Label</th>
-          <th class="py-1 pr-2 font-medium">Chain</th>
-          <th class="py-1 pr-2 font-medium">Address</th>
-          <th class="py-1 font-medium">Status</th>
+          <th scope="col" class="py-1 pr-2 font-medium">Label</th>
+          <th scope="col" class="py-1 pr-2 font-medium">Chain</th>
+          <th scope="col" class="py-1 pr-2 font-medium">Address</th>
+          <th scope="col" class="py-1 font-medium">Status</th>
         </tr>
       </thead>
       <tbody>
@@ -1019,7 +1019,7 @@ function AgentConfigPanel({ agent }) {
                   step={f.step}
                   min={f.min}
                   max={f.max}
-                  class="bg-vespra-bg border border-vespra-border rounded px-3 py-1.5 text-sm text-vespra-text focus:outline-none focus:border-vespra-accent w-full"
+                  class="bg-vespra-bg border border-vespra-border rounded px-3 py-2.5 min-h-[44px] text-sm text-vespra-text focus:border-vespra-accent w-full"
                 />
               )}
               {f.type === "text" && (
@@ -1028,14 +1028,14 @@ function AgentConfigPanel({ agent }) {
                   value={values[f.key] ?? ""}
                   onInput={(e) => updateField(f.key, e.target.value)}
                   placeholder="comma-separated"
-                  class="bg-vespra-bg border border-vespra-border rounded px-3 py-1.5 text-sm text-vespra-text placeholder:text-vespra-muted focus:outline-none focus:border-vespra-accent w-full"
+                  class="bg-vespra-bg border border-vespra-border rounded px-3 py-2.5 min-h-[44px] text-sm text-vespra-text placeholder:text-vespra-muted focus:border-vespra-accent w-full"
                 />
               )}
               {f.type === "select" && (
                 <select
                   value={values[f.key] ?? ""}
                   onChange={(e) => updateField(f.key, e.target.value)}
-                  class="bg-vespra-bg border border-vespra-border rounded px-3 py-1.5 text-sm text-vespra-text focus:outline-none focus:border-vespra-accent w-full"
+                  class="bg-vespra-bg border border-vespra-border rounded px-3 py-2.5 min-h-[44px] text-sm text-vespra-text focus:border-vespra-accent w-full"
                 >
                   <option value="">--</option>
                   {f.options.map((o) => (
@@ -1116,7 +1116,24 @@ export function Agents() {
     abortRef.current[agent] = controller;
 
     try {
-      const cmdText = `[${agent}] ${msg}`;
+      let enrichedMsg = msg;
+      if (agent === "sentinel") {
+        try {
+          const wallets = await api.walletList();
+          const active = (Array.isArray(wallets) ? wallets : []).filter((w) => w.active && w.chain && w.address);
+          const balEntries = await Promise.all(
+            active.map((w) =>
+              api.balance(w.chain, w.address)
+                .then((r) => `${w.label || w.wallet_id}(${w.chain}): ${r.balance_eth ?? r.balance ?? "?"} ETH`)
+                .catch(() => `${w.label || w.wallet_id}(${w.chain}): ? ETH`)
+            )
+          );
+          if (balEntries.length > 0) {
+            enrichedMsg = `Wallet balances: ${balEntries.join(", ")}\n\n${msg}`;
+          }
+        } catch {}
+      }
+      const cmdText = `[${agent}] ${enrichedMsg}`;
       const res = await api.swarmCommand(cmdText, null, { signal: controller.signal });
       let content = res.reasoning || res.action_taken || res.response || JSON.stringify(res);
       if (agent === 'sentinel') {
@@ -1180,14 +1197,34 @@ export function Agents() {
     <div class="space-y-4">
       <h2 class="text-xl font-bold">Agent Chat</h2>
 
+      {/* Mobile agent selector */}
+      <div class="flex gap-2 overflow-x-auto pb-2 md:hidden -mx-1 px-1">
+        {AGENTS.map((a) => (
+          <button
+            key={a}
+            onClick={() => setSelected(a)}
+            class={`shrink-0 px-3 py-2.5 min-h-[44px] rounded text-sm transition-colors ${
+              selected === a
+                ? "bg-vespra-accent/15 text-vespra-accent border border-vespra-accent/30"
+                : "text-vespra-muted bg-vespra-surface border border-vespra-border"
+            }`}
+          >
+            <span class="capitalize">{a}</span>
+            {(messages[a]?.length || 0) > 0 && (
+              <span class="ml-1.5 text-xs opacity-60">{messages[a].length}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
       <div class="flex gap-4">
-        {/* Agent list */}
-        <div class="w-48 shrink-0 space-y-1">
+        {/* Desktop agent list */}
+        <div class="hidden md:block w-48 shrink-0 space-y-1">
           {AGENTS.map((a) => (
             <button
               key={a}
               onClick={() => setSelected(a)}
-              class={`w-full text-left px-3 py-2 rounded text-sm transition-colors ${
+              class={`w-full text-left px-3 py-2.5 min-h-[44px] rounded text-sm transition-colors ${
                 selected === a
                   ? "bg-vespra-accent/15 text-vespra-accent"
                   : "text-vespra-muted hover:text-vespra-text hover:bg-vespra-border/50"
@@ -1204,7 +1241,7 @@ export function Agents() {
         </div>
 
         {/* Chat area */}
-        <div class="flex-1">
+        <div class="flex-1 min-w-0">
           <Card
             title={selected}
             actions={
@@ -1212,7 +1249,7 @@ export function Agents() {
                 <button
                   onClick={clearChat}
                   title="Clear chat and history"
-                  class="px-2 py-1 text-vespra-muted hover:text-vespra-red hover:bg-vespra-red/10 rounded transition-colors text-xs"
+                  class="px-3 py-1.5 min-h-[36px] text-vespra-muted hover:text-vespra-red hover:bg-vespra-red/10 rounded transition-colors text-xs"
                 >
                   Clear
                 </button>
@@ -1229,7 +1266,7 @@ export function Agents() {
 
             {/* Messages */}
             {chat.length > 0 && (
-              <div ref={scrollRef} class="space-y-3 mb-4 max-h-[70vh] overflow-y-auto">
+              <div ref={scrollRef} class="space-y-3 mb-4 max-h-[70vh] overflow-y-auto" aria-live="polite" aria-relevant="additions">
                 {chat.map((msg, i) => (
                   <Message key={i} msg={msg} agent={selected} />
                 ))}
@@ -1245,7 +1282,7 @@ export function Agents() {
                     key={action}
                     onClick={() => sendMessage(action)}
                     disabled={sending}
-                    class="px-3 py-1.5 text-xs bg-vespra-border hover:bg-vespra-accent/15 hover:text-vespra-accent text-vespra-muted rounded border border-vespra-border hover:border-vespra-accent/30 transition-colors disabled:opacity-40"
+                    class="px-3 py-2.5 min-h-[44px] text-xs bg-vespra-border hover:bg-vespra-accent/15 hover:text-vespra-accent text-vespra-muted rounded border border-vespra-border hover:border-vespra-accent/30 transition-colors disabled:opacity-40"
                   >
                     {action}
                   </button>
@@ -1268,17 +1305,17 @@ export function Agents() {
                 onKeyDown={onKeyDown}
                 placeholder={`Message ${selected}...`}
                 rows={1}
-                class="flex-1 bg-vespra-bg border border-vespra-border rounded px-3 py-2 text-sm text-vespra-text placeholder:text-vespra-muted resize-none focus:outline-none focus:border-vespra-accent"
+                class="flex-1 min-w-0 bg-vespra-bg border border-vespra-border rounded px-3 py-2.5 min-h-[44px] text-sm text-vespra-text placeholder:text-vespra-muted resize-none focus:border-vespra-accent"
               />
               {sending ? (
                 <button
                   onClick={cancelRequest}
-                  class="px-3 py-1.5 rounded text-sm font-medium transition-colors bg-vespra-red/20 hover:bg-vespra-red/30 text-vespra-red border border-vespra-red/30"
+                  class="px-4 py-2.5 min-h-[44px] shrink-0 rounded text-sm font-medium transition-colors bg-vespra-red/20 hover:bg-vespra-red/30 text-vespra-red border border-vespra-red/30"
                 >
                   Cancel
                 </button>
               ) : (
-                <Button variant="accent" onClick={send} disabled={!input.trim()}>
+                <Button variant="accent" onClick={send} disabled={!input.trim()} className="shrink-0">
                   Send
                 </Button>
               )}

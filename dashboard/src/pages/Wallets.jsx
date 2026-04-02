@@ -17,7 +17,8 @@ function CopyButton({ text }) {
   return (
     <button
       onClick={copy}
-      class="px-2 py-1 text-xs bg-vespra-border hover:bg-vespra-accent/15 hover:text-vespra-accent text-vespra-muted rounded transition-colors"
+      aria-label={copied ? "Copied to clipboard" : "Copy to clipboard"}
+      class="px-3 py-1.5 min-h-[36px] text-xs bg-vespra-border hover:bg-vespra-accent/15 hover:text-vespra-accent text-vespra-muted rounded transition-colors"
     >
       {copied ? "Copied" : "Copy"}
     </button>
@@ -196,13 +197,13 @@ function CreateWalletForm({ onCreated }) {
 
   return (
     <div class="space-y-4">
-      <div class="flex items-end gap-3">
+      <div class="flex flex-col sm:flex-row items-stretch sm:items-end gap-3">
         <div>
           <label class="text-xs text-vespra-muted block mb-1">Chain</label>
           <select
             value={chain}
             onChange={(e) => setChain(e.target.value)}
-            class="bg-vespra-bg border border-vespra-border rounded px-3 py-1.5 text-sm text-vespra-text focus:outline-none focus:border-vespra-accent"
+            class="bg-vespra-bg border border-vespra-border rounded px-3 py-2.5 min-h-[44px] text-sm text-vespra-text focus:border-vespra-accent w-full"
           >
             {CHAINS.map((c) => (
               <option key={c} value={c}>{c}</option>
@@ -215,7 +216,7 @@ function CreateWalletForm({ onCreated }) {
             value={label}
             onInput={(e) => setLabel(e.target.value)}
             placeholder="optional"
-            class="bg-vespra-bg border border-vespra-border rounded px-3 py-1.5 text-sm text-vespra-text placeholder:text-vespra-muted focus:outline-none focus:border-vespra-accent w-40"
+            class="bg-vespra-bg border border-vespra-border rounded px-3 py-2.5 min-h-[44px] text-sm text-vespra-text placeholder:text-vespra-muted focus:border-vespra-accent w-full sm:w-40"
           />
         </div>
         <Button variant="accent" onClick={create} disabled={creating}>
@@ -302,8 +303,8 @@ function WalletDetail({ wallet, onClose, onBalanceUpdate }) {
             <button
               onClick={refreshBalance}
               disabled={balLoading}
-              class="text-vespra-muted hover:text-vespra-accent transition-colors disabled:opacity-40 p-0.5"
-              title="Refresh balance"
+              class="text-vespra-muted hover:text-vespra-accent transition-colors disabled:opacity-40 p-2 -m-1.5 rounded"
+              aria-label="Refresh balance"
             >
               <svg class={`w-3.5 h-3.5 ${balLoading ? "animate-spin" : ""}`} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M14 8A6 6 0 1 1 10 2.5" stroke-linecap="round" />
@@ -381,12 +382,12 @@ export function Wallets() {
             <table class="w-full">
               <thead>
                 <tr class="text-left text-xs text-vespra-muted border-b border-vespra-border">
-                  <th class="py-2 px-3 font-medium">Wallet</th>
-                  <th class="py-2 px-3 font-medium">Chain</th>
-                  <th class="py-2 px-3 font-medium">Address</th>
-                  <th class="py-2 px-3 font-medium text-right">Balance</th>
-                  <th class="py-2 px-3 font-medium">Status</th>
-                  <th class="py-2 px-3 font-medium">Strategy</th>
+                  <th scope="col" class="py-2 px-3 font-medium">Wallet</th>
+                  <th scope="col" class="py-2 px-3 font-medium">Chain</th>
+                  <th scope="col" class="py-2 px-3 font-medium">Address</th>
+                  <th scope="col" class="py-2 px-3 font-medium text-right">Balance</th>
+                  <th scope="col" class="py-2 px-3 font-medium">Status</th>
+                  <th scope="col" class="py-2 px-3 font-medium">Strategy</th>
                 </tr>
               </thead>
               <tbody>
