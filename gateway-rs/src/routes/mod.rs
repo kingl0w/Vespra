@@ -23,6 +23,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::chain::ChainRegistry;
 use crate::config::GatewayConfig;
+use crate::data::yield_provider::ProviderRegistry;
 use crate::orchestrator::command::CommandOrchestrator;
 use crate::orchestrator::launcher::LauncherOrchestrator;
 use crate::orchestrator::portfolio::PortfolioOrchestrator;
@@ -45,6 +46,7 @@ pub struct AppState {
     pub portfolio_orchestrator: Arc<PortfolioOrchestrator>,
     pub kill_flag: Arc<AtomicBool>,
     pub webhook_rate_limiter: Arc<WebhookRateLimiter>,
+    pub yield_registry: Arc<ProviderRegistry>,
 }
 
 /// Middleware: Cloudflare Access check

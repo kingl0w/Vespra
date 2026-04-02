@@ -201,8 +201,54 @@ async fn yield_history(
     }
 }
 
+// ─── Raw yield pool data (debug / dashboard) ───────────────────
+
+#[derive(Debug, Deserialize)]
+struct YieldPoolsQuery {
+    chain: Option<String>,
+    min_apy: Option<f64>,
+    min_tvl: Option<f64>,
+    limit: Option<usize>,
+}
+
+async fn yield_pools(
+    State(state): State<AppState>,
+    Query(params): Query<YieldPoolsQuery>,
+) -> Json<serde_json::Value> {
+    let min_tvl = params.min_tvl.unwrap_or(state.config.yield_min_tvl_usd);
+    let min_apy = params.min_apy.unwrap_or(state.config.yield_min_apy);
+    let limit = params.limit.unwrap_or(state.config.yield_top_n);
+
+    match state
+        .yield_registry
+        .fetch_pools(params.chain.as_deref(), min_tvl, min_apy)
+        .await
+    {
+        Ok(mut pools) => {
+            pools.truncate(limit);
+            let count = pools.len();
+            Json(serde_json::json!({
+                "pools": pools,
+                "count": count,
+                "filters": {
+                    "chain": params.chain.as_deref().unwrap_or("all"),
+                    "min_apy": min_apy,
+                    "min_tvl_usd": min_tvl,
+                    "limit": limit,
+                },
+            }))
+        }
+        Err(e) => Json(serde_json::json!({
+            "pools": [],
+            "count": 0,
+            "error": e.to_string(),
+        })),
+    }
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/yield/pools", get(yield_pools))
         .route("/yield/protocols", get(yield_protocols))
         .route("/yield/start", post(yield_start))
         .route("/yield/stop/:wallet_id", post(yield_stop))

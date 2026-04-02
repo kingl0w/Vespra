@@ -20,6 +20,7 @@ use gateway_rs::data::price::OracleRouter;
 use gateway_rs::data::protocol::ProtocolFetcher;
 use gateway_rs::data::quote::QuoteFetcher;
 use gateway_rs::data::wallet::WalletFetcher;
+use gateway_rs::data::yield_provider::ProviderRegistry;
 use gateway_rs::orchestrator::command::CommandOrchestrator;
 use gateway_rs::orchestrator::launcher::LauncherOrchestrator;
 use gateway_rs::orchestrator::portfolio::PortfolioOrchestrator;
@@ -92,6 +93,13 @@ async fn main() -> anyhow::Result<()> {
         http_client.clone(),
     ));
 
+    // 6b. Build yield provider registry
+    let yield_registry = Arc::new(ProviderRegistry::from_config(
+        &config,
+        http_client.clone(),
+        redis_client.clone(),
+    ));
+
     // 7. Build price oracle via config-driven router
     let price_oracle: Arc<dyn gateway_rs::data::price::PriceOracle> =
         Arc::new(OracleRouter::from_config(
@@ -120,7 +128,10 @@ async fn main() -> anyhow::Result<()> {
         config.llm_model.clone(),
     ));
 
-    let scout = Arc::new(ScoutAgent::new(llm.clone()));
+    let scout = Arc::new(
+        ScoutAgent::new(llm.clone())
+            .with_yield_registry(yield_registry.clone(), config.clone()),
+    );
     let risk = Arc::new(RiskAgent::new(llm.clone()));
     let trader = Arc::new(TraderAgent::new(llm.clone()));
     let sentinel = Arc::new(SentinelAgent::new(
@@ -240,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
         portfolio_orchestrator,
         kill_flag,
         webhook_rate_limiter,
+        yield_registry,
     };
 
     let app = routes::router(state);
