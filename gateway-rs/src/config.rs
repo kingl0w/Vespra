@@ -110,6 +110,8 @@ pub struct GatewayConfig {
     pub auto_execute_max_eth: f64,
     #[serde(default)]
     pub oneinch_api_key: Option<String>,
+    #[serde(default)]
+    pub paraswap_mode: bool,
     #[serde(default = "default_cors_origin")]
     pub cors_origin: String,
     #[serde(default)]
