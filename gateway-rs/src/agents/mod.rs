@@ -1,3 +1,4 @@
+pub mod chat;
 pub mod coordinator;
 pub mod executor;
 pub mod launcher;
