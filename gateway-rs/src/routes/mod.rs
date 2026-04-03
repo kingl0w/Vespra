@@ -1,3 +1,4 @@
+pub mod agent_config;
 pub mod boot;
 pub mod execution;
 pub mod config;
@@ -150,6 +151,7 @@ pub fn router(state: AppState) -> Router {
         .merge(execution::router())
         .merge(yield_scheduler::router())
         .merge(boot::router())
+        .merge(agent_config::router())
         .merge(proxy::router())
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
