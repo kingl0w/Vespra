@@ -5,6 +5,7 @@ const LINKS = [
   { href: "/", label: "Overview" },
   { href: "/agents", label: "Agents" },
   { href: "/pipelines", label: "Pipelines" },
+  { href: "/goals", label: "Goals" },
   { href: "/wallets", label: "Wallets" },
   { href: "/txlog", label: "TX Log" },
   { href: "/killswitch", label: "Kill Switch" },
