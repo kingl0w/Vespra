@@ -5,7 +5,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use crate::orchestrator::coordinator;
+use crate::agents::chat::ChatHandler;
+use crate::routes::goals::list_goals_by_status;
+use crate::types::goals::GoalStatus;
 
 use super::AppState;
 
@@ -46,7 +48,9 @@ async fn swarm_resume(State(state): State<AppState>) -> Json<serde_json::Value> 
 
 #[derive(Debug, Deserialize)]
 struct CommandRequest {
-    command: String,
+    command: Option<String>,
+    message: Option<String>,
+    #[allow(dead_code)]
     wallet_id: Option<String>,
 }
 
@@ -54,21 +58,92 @@ async fn swarm_command(
     State(state): State<AppState>,
     Json(body): Json<CommandRequest>,
 ) -> Json<serde_json::Value> {
-    let report = state
-        .command_orchestrator
-        .execute(body.command, body.wallet_id)
-        .await;
+    let user_msg = body.command
+        .or(body.message)
+        .unwrap_or_default();
 
-    // Append agent result to coordinator session context
-    let result_value = serde_json::to_value(&report).unwrap_or_default();
-    let agent_result = coordinator::AgentResult {
-        agent: report.strategy.clone(),
-        output: result_value.clone(),
-        timestamp: chrono::Utc::now().timestamp(),
-    };
-    coordinator::append_to_session(&state.redis, agent_result).await;
+    if user_msg.trim().is_empty() {
+        return Json(serde_json::json!({
+            "message": "Please send a message."
+        }));
+    }
 
-    Json(result_value)
+    // Build live context from system state
+    let live_context = build_live_context(&state).await;
+
+    // Use ChatHandler for natural language responses
+    let chat = ChatHandler::new(state.llm.clone());
+    match chat.respond(&user_msg, &live_context).await {
+        Ok(response) => Json(serde_json::json!({
+            "message": response,
+        })),
+        Err(e) => {
+            tracing::warn!("[chat] LLM call failed: {e}");
+            Json(serde_json::json!({
+                "message": "I'm having trouble connecting to my language model right now. Try again in a moment.",
+            }))
+        }
+    }
+}
+
+/// Gather live system state so the chat agent can answer "what are you doing?" accurately.
+async fn build_live_context(state: &AppState) -> String {
+    let mut lines = Vec::new();
+
+    // Active goals
+    if let Ok(running) = list_goals_by_status(&state.redis, GoalStatus::Running).await {
+        if running.is_empty() {
+            lines.push("No goals currently running.".into());
+        } else {
+            lines.push(format!("{} goal(s) running:", running.len()));
+            for g in &running {
+                lines.push(format!(
+                    "  - Goal {}: strategy={:?}, step={}, capital={:.4} ETH, P&L={:+.4} ETH ({:+.1}%)",
+                    &g.id.to_string()[..8], g.strategy, g.current_step,
+                    g.capital_eth, g.pnl_eth, g.pnl_pct
+                ));
+            }
+        }
+    }
+
+    // Paused goals
+    if let Ok(paused) = list_goals_by_status(&state.redis, GoalStatus::Paused).await {
+        if !paused.is_empty() {
+            lines.push(format!("{} goal(s) paused.", paused.len()));
+        }
+    }
+
+    // Sentinel status
+    {
+        let sentinel = state.sentinel_monitor.status.read().await;
+        let last_run = sentinel.last_run
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_else(|| "never".into());
+        lines.push(format!(
+            "Sentinel monitor: running={}, last_run={}, goals_monitored={}",
+            sentinel.running, last_run, sentinel.goals_monitored
+        ));
+    }
+
+    // Yield scheduler status
+    {
+        let ys = state.yield_scheduler_status.read().await;
+        let last_run = ys.last_run
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_else(|| "never".into());
+        lines.push(format!(
+            "Yield scheduler: running={}, last_run={}, positions_monitored={}",
+            ys.running, last_run, ys.positions_monitored
+        ));
+    }
+
+    // Kill flag
+    let killed = state.kill_flag.load(Ordering::SeqCst);
+    if killed {
+        lines.push("WARNING: Kill switch is ACTIVE. All loops halted.".into());
+    }
+
+    lines.join("\n")
 }
 
 async fn swarm_status(State(state): State<AppState>) -> Json<serde_json::Value> {
