@@ -339,6 +339,33 @@ pub async fn run_goal(
         };
 
         let mut exit_signal = false;
+
+        // Subscribe to SentinelMonitor pub/sub for fast exit signals.
+        // We spawn a helper task that forwards matching signals into an mpsc channel,
+        // so the main monitoring select! loop stays simple.
+        let (sentinel_tx, mut sentinel_rx) = tokio::sync::mpsc::channel::<SentinelSignal>(8);
+        let _pubsub_task = {
+            let redis_clone = deps.redis.clone();
+            let tx = sentinel_tx.clone();
+            tokio::spawn(async move {
+                let Ok(mut ps) = redis_clone.get_async_pubsub().await else { return };
+                if ps.subscribe(SENTINEL_CHANNEL).await.is_err() { return; }
+                use futures::StreamExt;
+                let mut stream = ps.on_message();
+                while let Some(msg) = stream.next().await {
+                    if let Ok(payload) = msg.get_payload::<String>() {
+                        if let Ok(signal) = serde_json::from_str::<SentinelSignal>(&payload) {
+                            if signal.goal_id == goal_id {
+                                let _ = tx.send(signal).await;
+                            }
+                        }
+                    }
+                }
+            })
+        };
+        // Drop our copy so the channel closes when the task ends
+        drop(sentinel_tx);
+
         loop {
             if *cancel_rx.borrow() { break; }
 
@@ -388,11 +415,26 @@ pub async fn run_goal(
                 }
             }
 
+            // Wait for next interval, cancellation, or a sentinel pub/sub exit signal
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(MONITOR_INTERVAL_SECS)) => {}
                 _ = cancel_rx.changed() => {}
+                signal = sentinel_rx.recv() => {
+                    if let Some(signal) = signal {
+                        tracing::info!(
+                            "[goal {goal_id}] sentinel pub/sub exit: {} — {}",
+                            signal.signal,
+                            signal.reason
+                        );
+                        exit_signal = true;
+                        break;
+                    }
+                }
             }
         }
+
+        // Clean up the pub/sub helper task
+        _pubsub_task.abort();
 
         if *cancel_rx.borrow() {
             tracing::info!("[goal {goal_id}] cancelled during monitoring — not exiting position");

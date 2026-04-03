@@ -30,6 +30,7 @@ use gateway_rs::orchestrator::sniper::SniperOrchestrator;
 use gateway_rs::orchestrator::trade_up::TradeUpOrchestrator;
 use gateway_rs::orchestrator::yield_rot::YieldOrchestrator;
 use gateway_rs::routes::{self, AppState};
+use gateway_rs::sentinel_monitor::SentinelMonitor;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -310,7 +311,17 @@ async fn main() -> anyhow::Result<()> {
         goal_runners: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         goal_cancel_txs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         goal_runner_deps,
+        sentinel_monitor: Arc::new(SentinelMonitor::new()),
+        yield_scheduler_status: gateway_rs::yield_scheduler::default_status(),
     };
+
+    // 10b. Spawn SentinelMonitor background task
+    tokio::spawn(SentinelMonitor::run(
+        state.sentinel_monitor.clone(),
+        state.redis.clone(),
+        sentinel.clone(),
+        state.goal_runner_deps.price_oracle.clone(),
+    ));
 
     let app = routes::router(state);
 
