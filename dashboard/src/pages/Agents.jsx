@@ -778,28 +778,54 @@ function AgentResponse({ content, agent }) {
     if (Array.isArray(riskData?.factors) && riskData.factors.length > 0)
       return <RiskView data={riskData} />;
   }
+  if ((agent === "coordinator" || agent === "sentinel") && parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const prose = parsed.message || parsed.note;
+    if (prose && typeof prose === "string") {
+      return <div class="text-sm text-vespra-text whitespace-pre-wrap" dangerouslySetInnerHTML={{ __html: parseMarkdown(prose) }} />;
+    }
+  }
+  if (agent === "executor" && parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const prose = parsed.note || parsed.message;
+    if (prose && typeof prose === "string") {
+      return <div class="text-sm text-vespra-text whitespace-pre-wrap" dangerouslySetInnerHTML={{ __html: parseMarkdown(prose) }} />;
+    }
+  }
   if (agent === "sentinel" && parsed?.severity && parsed?.alert_type)
     return <SentinelView data={parsed} />;
   if (agent === "trader" && (parsed?.swap || parsed?.status === "ready" || parsed?.status === "no_route"))
     return <TraderView data={parsed} />;
-  if (agent === "trader" && parsed?.action && (parsed?.token_in || parsed?.reasoning)) {
+  if (agent === "trader" && parsed?.action && (parsed?.action_type || parsed?.token_pair || parsed?.token_in || parsed?.amount || parsed?.reasoning)) {
+    const actionUpper = (parsed.action || "").toUpperCase();
+    const actionColor = actionUpper === "BUY" ? "text-vespra-green" : actionUpper === "SELL" ? "text-vespra-red" : "text-vespra-yellow";
     return (
-      <div class="text-sm space-y-1">
-        <div class="flex gap-2 items-center">
-          <span class="font-mono text-vespra-accent font-bold uppercase">{parsed.action}</span>
+      <div class="bg-vespra-bg rounded border border-vespra-border p-3 text-xs space-y-2">
+        <div class="flex items-center justify-between">
+          <span class={`font-mono font-bold text-base uppercase ${actionColor}`}>{actionUpper}</span>
           {parsed.expected_gain_pct > 0 && (
-            <span class="text-green-400 text-xs">+{parsed.expected_gain_pct}%</span>
+            <span class="text-vespra-green text-xs">+{parsed.expected_gain_pct}%</span>
           )}
         </div>
+        {(parsed.token_pair || parsed.token_in) && (
+          <div class="flex justify-between">
+            <span class="text-vespra-muted">Pair</span>
+            <span class="font-mono text-vespra-text">{parsed.token_pair || `${parsed.token_in}${parsed.token_out ? ` → ${parsed.token_out}` : ""}`}</span>
+          </div>
+        )}
+        {parsed.amount && (
+          <div class="flex justify-between">
+            <span class="text-vespra-muted">Amount</span>
+            <span class="font-mono text-vespra-text">{parsed.amount}</span>
+          </div>
+        )}
         {parsed.reasoning && (
-          <div class="text-vespra-muted text-xs mt-1">{parsed.reasoning}</div>
+          <div class="text-vespra-muted border-t border-vespra-border pt-2 mt-1">{parsed.reasoning}</div>
         )}
       </div>
     );
   }
   if (agent === "executor" && (parsed?.keymaster_results || parsed?.keymaster_calls))
     return <ExecutorView data={parsed} />;
-  if (agent === "yield" && (parsed?.position || parsed?.protocol || parsed?.action))
+  if (agent === "yield" && (parsed?.position || parsed?.protocol || parsed?.action || parsed?.recommended_action))
     return <YieldView data={parsed} />;
   if (agent === "sniper" && (parsed?.pool || parsed?.risk_assessment))
     return <SniperView data={parsed} />;
@@ -1157,12 +1183,14 @@ export function Agents() {
         try {
           const parsed = JSON.parse(content);
           if (parsed.message) content = parsed.message;
+          else if (parsed.note) content = parsed.note;
         } catch(e) {}
       }
       if (agent === 'executor') {
         try {
           const parsed = JSON.parse(content);
           if (parsed.note) content = parsed.note;
+          else if (parsed.message) content = parsed.message;
         } catch(e) {}
       }
       setMessages((m) => ({
