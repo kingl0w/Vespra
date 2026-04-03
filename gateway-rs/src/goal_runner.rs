@@ -472,6 +472,22 @@ pub async fn run_goal_with_resume(
             }
         }
 
+        // Collect exit fee (only on confirmed/dry-run sells with profit)
+        if matches!(sell_tx_status, TxStatus::Confirmed { .. } | TxStatus::DryRun { .. }) {
+            crate::fees::collect_exit_fee(
+                goal_id,
+                goal.entry_eth,
+                goal.current_eth,
+                &goal.chain,
+                &deps.executor,
+                &deps.config,
+                &deps.chain_registry,
+                &deps.redis,
+                deps.dry_run,
+            )
+            .await;
+        }
+
         if *cancel_rx.borrow() { continue; }
 
         // ═════════════════════════════════════════════════════════

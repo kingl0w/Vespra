@@ -19,6 +19,7 @@ function ServiceCard({ name, data }) {
 export function Overview() {
   const { data, loading } = usePolling(() => api.health(), 10000);
   const { data: goalsData } = usePolling(() => api.fetchGoals().catch(() => []), 10000);
+  const { data: portfolio } = usePolling(() => api.fetchPortfolio().catch(() => null), 10000);
 
   if (loading && !data) return <Loader />;
 
@@ -95,6 +96,25 @@ export function Overview() {
             )}
           </div>
         </Card>
+
+        {portfolio && (
+          <Card title="Portfolio">
+            <div class="space-y-2 text-sm">
+              <div class="flex justify-between items-center">
+                <span class="text-vespra-muted">Total Capital</span>
+                <span class="font-mono text-vespra-text">{portfolio.total_capital_eth != null ? `${portfolio.total_capital_eth} ETH` : "--"}</span>
+              </div>
+              <div class="flex justify-between items-center">
+                <span class="text-vespra-muted">Total P&L</span>
+                <span class={`font-mono ${(portfolio.total_pnl_eth ?? 0) >= 0 ? "text-vespra-green" : "text-vespra-red"}`}>
+                  {portfolio.total_pnl_eth != null
+                    ? `${portfolio.total_pnl_eth >= 0 ? "+" : ""}${portfolio.total_pnl_eth} ETH`
+                    : "--"}
+                </span>
+              </div>
+            </div>
+          </Card>
+        )}
       </div>
 
       <Card title="Quick Actions">
