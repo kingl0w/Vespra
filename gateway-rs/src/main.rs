@@ -31,6 +31,7 @@ use gateway_rs::orchestrator::trade_up::TradeUpOrchestrator;
 use gateway_rs::orchestrator::yield_rot::YieldOrchestrator;
 use gateway_rs::routes::{self, AppState};
 use gateway_rs::sentinel_monitor::SentinelMonitor;
+use gateway_rs::yield_scheduler::YieldScheduler;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -321,6 +322,15 @@ async fn main() -> anyhow::Result<()> {
         state.redis.clone(),
         sentinel.clone(),
         state.goal_runner_deps.price_oracle.clone(),
+    ));
+
+    // 10c. Spawn YieldRotationScheduler background task
+    let yield_sched = Arc::new(YieldScheduler::new(state.yield_scheduler_status.clone()));
+    tokio::spawn(YieldScheduler::run(
+        yield_sched,
+        state.redis.clone(),
+        state.aave_fetcher.clone(),
+        state.yield_registry.clone(),
     ));
 
     let app = routes::router(state);

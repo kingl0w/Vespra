@@ -10,4 +10,6 @@ pub mod guards;
 pub mod middleware;
 pub mod orchestrator;
 pub mod routes;
+pub mod sentinel_monitor;
 pub mod types;
+pub mod yield_scheduler;
