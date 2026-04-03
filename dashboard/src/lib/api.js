@@ -170,6 +170,10 @@ export const api = {
       headers: { "Content-Type": "application/json" },
     }).then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
 
+  fetchPortfolio: () =>
+    fetch(`${BASE_GW}/goals/portfolio`)
+      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
+
   // Dispatch (generic)
   dispatch: (action, params) =>
     request("/dispatch", {
