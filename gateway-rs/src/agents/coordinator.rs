@@ -19,16 +19,22 @@ pub struct SystemState {
     pub chains: Vec<String>,
 }
 
-const COMMAND_PROMPT: &str = "You are Coordinator, the command interpreter of the Vespra DeFi agent swarm. \
-You MUST respond with valid JSON only. No prose, no markdown.\n\n\
-Parse the user's natural-language command into a structured action for the swarm.\n\n\
-Output schema: { \"strategy\": \"TradeUp\" | \"YieldRotate\" | \"Sniper\" | \"Kill\" | \"Resume\" | \"Status\" \
+const BASE_PROMPT: &str = "You are Coordinator, the command interpreter and orchestrator of the Vespra DeFi agent swarm.\n\n\
+Your behaviour depends on the MODE field in the prompt context.\n\n\
+── MODE: chat (/swarm/command) ──────────────────────────────\n\
+Respond in plain conversational prose ONLY. No JSON. No markdown code fences.\n\
+Parse the user's natural-language command, execute the appropriate strategy internally, \
+and report the result conversationally.\n\n\
+── MODE: orchestrate (/coordinator/orchestrate) ─────────────\n\
+Respond with valid JSON ONLY matching the OrchestrationResult schema. \
+No prose preamble, no markdown.\n\n\
+Output schema (orchestrate mode): { \"strategy\": \"TradeUp\" | \"YieldRotate\" | \"Sniper\" | \"Kill\" | \"Resume\" | \"Status\" \
 | \"AskCoordinator\" | \"AskScout\" | \"AskRisk\" | \"AskSentinel\" | \"AskTrader\" | \"AskYield\" | \"AskSniper\" | \"AskLauncher\" | \"AskExecutor\", \
 \"wallet_id\": string | null, \"capital_eth\": float | null, \"chain\": string | null, \
 \"max_eth\": float | null, \"stop_loss_pct\": float | null, \"threshold_pct\": float | null, \
 \"query\": string | null, \
 \"reasoning\": \"string\" }\n\n\
-Rules:\n\
+Strategy routing rules (both modes):\n\
 - Extract wallet_id, capital amount, chain name, and strategy parameters from the command\n\
 - If the command mentions 'stop' or 'kill', use strategy=Kill\n\
 - If the command mentions 'resume' without specifying a strategy, use strategy=Resume\n\
@@ -64,12 +70,13 @@ impl CoordinatorAgent {
     pub async fn interpret(&self, ctx: &CoordinatorContext) -> Result<CommandIntent> {
         let state_json = serde_json::to_string(&ctx.system_state)?;
         let task = format!(
-            "SYSTEM_STATE: {state_json}\n\n\
+            "MODE: orchestrate\n\n\
+             SYSTEM_STATE: {state_json}\n\n\
              [COMMAND] {}",
             ctx.command
         );
 
-        let raw = self.llm.call(COMMAND_PROMPT, &task).await?;
+        let raw = self.llm.call(BASE_PROMPT, &task).await?;
 
         let val: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
 
@@ -104,10 +111,7 @@ impl CoordinatorAgent {
 
     /// Respond to a general chat query in plain prose.
     pub async fn query(&self, question: &str) -> Result<String> {
-        const CHAT_PROMPT: &str = "You are Coordinator, the command interpreter of the Vespra DeFi agent swarm. \
-When responding to general chat messages, respond in plain prose. Summarize the situation clearly \
-without wrapping your response in JSON. Be concise and direct. \
-Only use structured JSON format when explicitly in orchestration mode via /coordinator/orchestrate.";
-        self.llm.call(CHAT_PROMPT, question).await
+        let task = format!("MODE: chat\n\n[QUERY] {question}");
+        self.llm.call(BASE_PROMPT, &task).await
     }
 }
