@@ -55,7 +55,7 @@ pub struct SniperResult {
 
 pub struct SniperOrchestrator {
     risk: Arc<RiskAgent>,
-    sniper: Arc<SniperAgent>,
+    pub sniper: Arc<SniperAgent>,
     executor: Arc<ExecutorAgent>,
     protocol_fetcher: Arc<ProtocolFetcher>,
     quote_fetcher: Arc<QuoteFetcher>,
