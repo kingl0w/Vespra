@@ -17,13 +17,16 @@ use crate::data::protocol::ProtocolFetcher;
 use crate::data::quote::QuoteFetcher;
 use crate::data::wallet::WalletFetcher;
 use crate::routes::goals::{get_goal, save_goal, update_goal_pnl, update_goal_step};
-use crate::types::decisions::{ExecutorStatus, ScoutDecision, TraderDecision};
+use crate::execution_gate;
+use crate::types::decisions::{ScoutDecision, TraderDecision};
 use crate::types::goals::GoalStatus;
 use crate::types::trade_up::TradePosition;
+use crate::types::tx::TxStatus;
 
 use crate::agents::risk::RiskContext;
 use crate::agents::scout::ScoutContext;
 use crate::agents::trader::TraderContext;
+use crate::sentinel_monitor::{SentinelSignal, SENTINEL_CHANNEL};
 
 const MAX_RETRIES: u32 = 3;
 const RETRY_BACKOFF_SECS: u64 = 10;
@@ -212,6 +215,11 @@ pub async fn run_goal(
                     .fetch_quote("WETH", &best.pool, &amount_wei, chain_id)
                     .await
                     .unwrap_or_default();
+                tracing::info!(
+                    "[exec-trace] quote: {} -> {} amount_in={} amount_out={} slippage={:.4}%",
+                    quote.token_in, quote.token_out, quote.amount_in_wei,
+                    quote.amount_out_wei, quote.price_impact
+                );
                 let trader_ctx = TraderContext {
                     opportunity: best,
                     quote,
@@ -239,19 +247,25 @@ pub async fn run_goal(
         // ═════════════════════════════════════════════════════════
         let (token_in, token_out, swap_amount_wei, expected_gain_pct) = match trader_decision {
             TraderDecision::Swap {
-                token_in,
-                token_out,
-                amount_in_wei,
+                ref token_in,
+                ref token_out,
+                ref amount_in_wei,
                 expected_gain_pct,
-                ..
-            } => (token_in, token_out, amount_in_wei, expected_gain_pct),
+                ref reasoning,
+            } => {
+                tracing::info!(
+                    "[exec-trace] trader decision: SWAP {} -> {} amount={} gain={:.4}% reason={}",
+                    token_in, token_out, amount_in_wei, expected_gain_pct, reasoning
+                );
+                (token_in.clone(), token_out.clone(), amount_in_wei.clone(), expected_gain_pct)
+            }
             TraderDecision::Hold { reason } => {
-                tracing::info!("[goal {goal_id}] trader says HOLD: {reason}");
+                tracing::info!("[exec-trace] trader decision: HOLD reason={reason}");
                 sleep_interruptible(&mut cancel_rx, 60).await;
                 continue;
             }
             TraderDecision::Exit { reason } => {
-                tracing::info!("[goal {goal_id}] trader says EXIT: {reason}");
+                tracing::info!("[exec-trace] trader decision: EXIT reason=: {reason}");
                 sleep_interruptible(&mut cancel_rx, 60).await;
                 continue;
             }
@@ -262,36 +276,38 @@ pub async fn run_goal(
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
         }
 
-        if deps.dry_run {
-            tracing::info!(
-                "[DRY RUN] would call Keymaster with: wallet={} token_in={} token_out={} amount={} chain={}",
-                goal.wallet_label, token_in, token_out, swap_amount_wei, goal.chain
-            );
-        } else {
-            let exec_result = match deps
-                .executor
-                .execute(goal_id, &token_in, &token_out, &swap_amount_wei, &goal.chain)
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    fail_goal(&deps.redis, goal_id, &format!("EXECUTING failed: {e}")).await;
-                    break;
-                }
-            };
+        let buy_tx_status = execution_gate::execute_traced(
+            &deps.executor,
+            &deps.config,
+            &deps.chain_registry,
+            goal_id,
+            &token_in,
+            &token_out,
+            &swap_amount_wei,
+            &goal.chain,
+            deps.dry_run,
+        )
+        .await;
 
-            if exec_result.status != ExecutorStatus::Success {
-                let err = exec_result
-                    .error
-                    .unwrap_or_else(|| "executor returned non-success".into());
-                fail_goal(&deps.redis, goal_id, &format!("EXECUTING failed: {err}")).await;
+        match &buy_tx_status {
+            TxStatus::Confirmed { tx_hash, .. } => {
+                tracing::info!("[goal {goal_id}] BUY confirmed, tx={tx_hash}");
+            }
+            TxStatus::DryRun { .. } => {
+                tracing::info!("[goal {goal_id}] BUY dry-run complete");
+            }
+            TxStatus::Reverted { tx_hash, .. } => {
+                fail_goal(&deps.redis, goal_id, &format!("BUY tx reverted: {tx_hash}")).await;
                 break;
             }
-
-            tracing::info!(
-                "[goal {goal_id}] BUY executed, tx={}",
-                exec_result.tx_hash.as_deref().unwrap_or("none")
-            );
+            TxStatus::Timeout { tx_hash, .. } => {
+                fail_goal(&deps.redis, goal_id, &format!("BUY tx timeout: {tx_hash}")).await;
+                break;
+            }
+            TxStatus::Failed { error } => {
+                fail_goal(&deps.redis, goal_id, &format!("BUY failed: {error}")).await;
+                break;
+            }
         }
 
         if *cancel_rx.borrow() { continue; }
@@ -396,32 +412,29 @@ pub async fn run_goal(
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
         }
 
-        if deps.dry_run {
-            tracing::info!(
-                "[DRY RUN] would call Keymaster SELL: wallet={} token={} chain={}",
-                goal.wallet_label, token_out, goal.chain
-            );
-        } else {
-            // Sell back to WETH
-            let sell_amount = format!("{:.0}", goal.capital_eth * 1e18);
-            match deps
-                .executor
-                .execute(goal_id, &token_out, "WETH", &sell_amount, &goal.chain)
-                .await
-            {
-                Ok(r) if r.status == ExecutorStatus::Success => {
-                    tracing::info!(
-                        "[goal {goal_id}] SELL executed, tx={}",
-                        r.tx_hash.as_deref().unwrap_or("none")
-                    );
-                }
-                Ok(r) => {
-                    let err = r.error.unwrap_or_else(|| "sell failed".into());
-                    tracing::error!("[goal {goal_id}] SELL failed: {err}");
-                }
-                Err(e) => {
-                    tracing::error!("[goal {goal_id}] SELL executor error: {e}");
-                }
+        let sell_amount = format!("{:.0}", goal.capital_eth * 1e18);
+        let sell_tx_status = execution_gate::execute_traced(
+            &deps.executor,
+            &deps.config,
+            &deps.chain_registry,
+            goal_id,
+            &token_out,
+            "WETH",
+            &sell_amount,
+            &goal.chain,
+            deps.dry_run,
+        )
+        .await;
+
+        match &sell_tx_status {
+            TxStatus::Confirmed { tx_hash, .. } => {
+                tracing::info!("[goal {goal_id}] SELL confirmed, tx={tx_hash}");
+            }
+            TxStatus::DryRun { .. } => {
+                tracing::info!("[goal {goal_id}] SELL dry-run complete");
+            }
+            other => {
+                tracing::error!("[goal {goal_id}] SELL failed: {:?}", other);
             }
         }
 

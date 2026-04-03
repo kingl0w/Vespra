@@ -85,6 +85,15 @@ pub async fn update_goal_pnl(redis: &redis::Client, id: Uuid, current_eth: f64) 
     save_goal(redis, &goal).await
 }
 
+/// List goals filtered by status.
+pub async fn list_goals_by_status(
+    redis: &redis::Client,
+    status: GoalStatus,
+) -> anyhow::Result<Vec<GoalSpec>> {
+    let all = list_goals(redis).await?;
+    Ok(all.into_iter().filter(|g| g.status == status).collect())
+}
+
 // ── Coordinator LLM parsing ─────────────────────────────────────
 
 const GOAL_PARSE_PROMPT: &str = "\
