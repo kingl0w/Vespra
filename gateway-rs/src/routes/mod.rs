@@ -1,6 +1,7 @@
 pub mod config;
 pub mod coordinator;
 pub mod fees;
+pub mod goals;
 pub mod health;
 pub mod launcher;
 pub mod portfolio;
@@ -22,6 +23,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+use crate::agents::AgentClient;
 use crate::agents::yield_agent::YieldAgent;
 use crate::chain::ChainRegistry;
 use crate::config::GatewayConfig;
@@ -43,6 +45,7 @@ pub struct AppState {
     pub config: Arc<GatewayConfig>,
     pub chain_registry: Arc<ChainRegistry>,
     pub redis: Arc<redis::Client>,
+    pub llm: Arc<dyn AgentClient>,
     pub trade_up_orchestrator: Arc<TradeUpOrchestrator>,
     pub yield_orchestrator: Arc<YieldOrchestrator>,
     pub sniper_orchestrator: Arc<SniperOrchestrator>,
@@ -126,6 +129,7 @@ pub fn router(state: AppState) -> Router {
         .merge(sniper::router())
         .merge(launcher::router())
         .merge(portfolio::router())
+        .merge(goals::router())
         .merge(proxy::router())
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
