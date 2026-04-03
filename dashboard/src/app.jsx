@@ -7,6 +7,7 @@ import { Overview } from "./pages/Overview.jsx";
 
 const Agents = lazy(() => import("./pages/Agents.jsx").then(m => ({ default: m.Agents })));
 const Pipelines = lazy(() => import("./pages/Pipelines.jsx").then(m => ({ default: m.Pipelines })));
+const Goals = lazy(() => import("./pages/Goals.jsx").then(m => ({ default: m.Goals })));
 const Wallets = lazy(() => import("./pages/Wallets.jsx").then(m => ({ default: m.Wallets })));
 const TxLog = lazy(() => import("./pages/TxLog.jsx").then(m => ({ default: m.TxLog })));
 const KillSwitch = lazy(() => import("./pages/KillSwitch.jsx").then(m => ({ default: m.KillSwitch })));
@@ -49,6 +50,7 @@ export function App() {
               <Overview path="/" />
               <Agents path="/agents" />
               <Pipelines path="/pipelines" />
+              <Goals path="/goals" />
               <Wallets path="/wallets" />
               <TxLog path="/txlog" />
               <KillSwitch path="/killswitch" />

@@ -18,12 +18,16 @@ function ServiceCard({ name, data }) {
 
 export function Overview() {
   const { data, loading } = usePolling(() => api.health(), 10000);
+  const { data: goalsData } = usePolling(() => api.fetchGoals().catch(() => []), 10000);
 
   if (loading && !data) return <Loader />;
 
   const services = data?.services || {};
   const agentList = services.gateway?.data?.agents || [];
   const dagData = services.boiler?.data || {};
+  const goalsList = Array.isArray(goalsData) ? goalsData : goalsData?.goals || [];
+  const activeGoals = goalsList.filter((g) => g.status === "Running");
+  const latestRunning = activeGoals.sort((a, b) => (b.updated_at || b.created_at || "").localeCompare(a.updated_at || a.created_at || ""))[0];
 
   return (
     <div class="space-y-6">
@@ -70,6 +74,24 @@ export function Overview() {
                 <span class="text-vespra-muted">Version</span>
                 <span class="font-mono text-vespra-text">{dagData.version}</span>
               </div>
+            )}
+          </div>
+        </Card>
+
+        <Card title="Goals">
+          <div class="space-y-2 text-sm">
+            <div class="flex justify-between items-center">
+              <span class="text-vespra-muted">Active Goals</span>
+              <span class="text-lg font-bold text-vespra-accent">{activeGoals.length}</span>
+            </div>
+            <div class="flex justify-between items-center">
+              <span class="text-vespra-muted">Current Step</span>
+              <span class="font-mono text-vespra-text">{latestRunning?.current_step || "--"}</span>
+            </div>
+            {goalsList.length > 0 && (
+              <a href="/goals" class="block text-xs text-vespra-accent hover:underline pt-1">
+                View all goals &rarr;
+              </a>
             )}
           </div>
         </Card>

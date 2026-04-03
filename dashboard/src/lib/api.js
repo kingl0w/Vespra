@@ -136,6 +136,40 @@ export const api = {
     fetch(`${BASE_GW}/coordinator/session`)
       .then(r => r.json()),
 
+  // Goals (VES-87)
+  fetchGoals: () =>
+    fetch(`${BASE_GW}/goals`)
+      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
+
+  fetchGoal: (id) =>
+    fetch(`${BASE_GW}/goals/${id}`)
+      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
+
+  createGoal: (payload) =>
+    fetch(`${BASE_GW}/goals`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
+
+  cancelGoal: (id) =>
+    fetch(`${BASE_GW}/goals/${id}/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }).then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
+
+  pauseGoal: (id) =>
+    fetch(`${BASE_GW}/goals/${id}/pause`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }).then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
+
+  resumeGoal: (id) =>
+    fetch(`${BASE_GW}/goals/${id}/resume`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }).then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
+
   // Dispatch (generic)
   dispatch: (action, params) =>
     request("/dispatch", {
