@@ -269,6 +269,7 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
         chain_registry,
         redis: redis_client,
+        llm: llm.clone(),
         trade_up_orchestrator,
         yield_orchestrator,
         sniper_orchestrator,
