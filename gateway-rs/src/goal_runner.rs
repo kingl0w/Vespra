@@ -26,7 +26,6 @@ use crate::types::tx::TxStatus;
 use crate::agents::risk::RiskContext;
 use crate::agents::scout::ScoutContext;
 use crate::agents::trader::TraderContext;
-use crate::sentinel_monitor::{SentinelSignal, SENTINEL_CHANNEL};
 
 const MAX_RETRIES: u32 = 3;
 const RETRY_BACKOFF_SECS: u64 = 10;

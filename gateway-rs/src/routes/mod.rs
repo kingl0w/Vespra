@@ -8,7 +8,6 @@ pub mod launcher;
 pub mod portfolio;
 pub mod proxy;
 pub mod ratelimit;
-pub mod sentinel;
 pub mod sniper;
 pub mod swarm;
 pub mod trade_up;
@@ -33,8 +32,6 @@ use crate::agents::AgentClient;
 use crate::agents::yield_agent::YieldAgent;
 use crate::chain::ChainRegistry;
 use crate::goal_runner::GoalRunnerDeps;
-use crate::sentinel_monitor::SentinelMonitor;
-use crate::yield_scheduler::SharedSchedulerStatus;
 use crate::config::GatewayConfig;
 use crate::data::aave::AaveFetcher;
 use crate::data::yield_provider::ProviderRegistry;
@@ -71,8 +68,6 @@ pub struct AppState {
     pub goal_runners: Arc<Mutex<HashMap<Uuid, tokio::task::JoinHandle<()>>>>,
     pub goal_cancel_txs: Arc<Mutex<HashMap<Uuid, tokio::sync::watch::Sender<bool>>>>,
     pub goal_runner_deps: GoalRunnerDeps,
-    pub sentinel_monitor: Arc<SentinelMonitor>,
-    pub yield_scheduler_status: SharedSchedulerStatus,
 }
 
 /// Middleware: Cloudflare Access check
@@ -144,7 +139,6 @@ pub fn router(state: AppState) -> Router {
         .merge(launcher::router())
         .merge(portfolio::router())
         .merge(goals::router())
-        .merge(sentinel::router())
         .merge(execution::router())
         .merge(proxy::router())
         .with_state(state.clone())

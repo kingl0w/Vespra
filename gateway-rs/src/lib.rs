@@ -11,5 +11,3 @@ pub mod middleware;
 pub mod orchestrator;
 pub mod routes;
 pub mod types;
-pub mod sentinel_monitor;
-pub mod yield_scheduler;
