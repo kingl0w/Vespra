@@ -29,6 +29,8 @@ fn default_yield_cycle_interval_secs() -> u64 { 3600 }
 fn default_sniper_max_entry_eth() -> f64 { 0.05 }
 fn default_sniper_min_tvl() -> f64 { 50000.0 }
 fn default_sniper_exit_tvl_drop_pct() -> f64 { 30.0 }
+fn default_sniper_target_gain_pct() -> f64 { 15.0 }
+fn default_sniper_stop_loss_pct() -> f64 { 8.0 }
 fn default_launcher_initial_liquidity_eth() -> f64 { 0.05 }
 fn default_custody() -> String { "safe".into() }
 fn default_trader_max_slippage_pct() -> f64 { 1.0 }
@@ -104,6 +106,10 @@ pub struct GatewayConfig {
     pub sniper_min_tvl: f64,
     #[serde(default = "default_sniper_exit_tvl_drop_pct")]
     pub sniper_exit_tvl_drop_pct: f64,
+    #[serde(default = "default_sniper_target_gain_pct")]
+    pub sniper_target_gain_pct: f64,
+    #[serde(default = "default_sniper_stop_loss_pct")]
+    pub sniper_stop_loss_pct: f64,
     #[serde(default)]
     pub alchemy_webhook_secret: String,
     #[serde(default)]
