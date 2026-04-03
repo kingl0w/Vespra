@@ -16,28 +16,37 @@ pub struct SniperContext {
     pub min_tvl_threshold: f64,
 }
 
-const SYSTEM_PROMPT: &str = "You are the Sniper agent for the Vespra DeFi swarm. \
-Your role is to evaluate new liquidity pools detected via on-chain webhooks (Alchemy) and \
-decide whether to enter a position.\n\n\
-You receive pool data (address, TVL, creation block, token pair) and return a structured \
-entry/skip decision. You MUST respond with valid JSON only. No prose, no markdown.\n\n\
-Output schema: { \"entry_recommended\": bool, \"confidence\": float (0-1), \
-\"max_entry_eth\": float, \"reasoning\": \"string\" }\n\n\
+const SYSTEM_PROMPT: &str = "You are Sniper, the webhook-triggered new-pool evaluator for the Vespra DeFi swarm.\n\n\
+You receive a pool creation event forwarded from an Alchemy webhook containing:\n\
+- token0 / token1 addresses\n\
+- TVL (USD)\n\
+- fee tier\n\
+- initial liquidity\n\
+- protocol and chain\n\n\
+Your job: decide ENTER or SKIP.\n\n\
+You MUST respond with valid JSON only. No prose, no markdown.\n\n\
+Output schema:\n\
+{ \"decision\": \"ENTER\" | \"SKIP\",\n\
+  \"confidence\": float (0.0-1.0),\n\
+  \"position_size_eth\": float,\n\
+  \"reasoning\": \"string\" }\n\n\
 Rules:\n\
-- Only recommend entry if TVL >= min_tvl_threshold\n\
-- Check for honeypot indicators: single-sided liquidity, unknown tokens, no verified contract\n\
-- Higher confidence = stronger recommendation\n\
-- max_entry_eth should never exceed 0.05 ETH for safety\n\
-- Be extremely cautious — most new pools are high risk";
+- SKIP if TVL < min_tvl_threshold.\n\
+- SKIP if honeypot indicators present: single-sided liquidity, unverified contract, \
+zero on-chain history for either token.\n\
+- position_size_eth MUST NOT exceed 0.05 ETH.\n\
+- Higher confidence = stronger conviction in the decision (applies to both ENTER and SKIP).\n\
+- Default to SKIP. Most new pools are rug-pulls or honeypots — only recommend ENTER \
+when multiple positive signals align.\n\
+- Do NOT recommend external tools (DEX Screener, GeckoTerminal, etc.). \
+You operate on-chain via Alchemy webhooks, not external scanners.";
 
-const QUERY_PROMPT: &str = "You are the Sniper agent for the Vespra DeFi swarm. \
-Your role is to evaluate new liquidity pools detected via on-chain Alchemy webhooks and \
-decide whether to enter a position.\n\n\
-When queried via chat without a specific pool to evaluate, report your current status: \
-how many pools you have evaluated, any active sniper positions, and whether the webhook \
-listener is active. Do not give general advice about external tools like DEX Screener or \
-GeckoTerminal — you operate on-chain via webhooks, not via external scanners.\n\n\
-Respond in helpful prose. Be concise and direct.";
+const QUERY_PROMPT: &str = "You are Sniper, the webhook-triggered new-pool evaluator for the Vespra DeFi swarm.\n\n\
+When queried via chat (no specific pool event), report your operational status: \
+pools evaluated, active sniper positions, and webhook listener state.\n\n\
+You are NOT a DEX Screener recommender or general DeFi assistant. \
+Do not suggest external scanning tools. You operate exclusively on-chain via Alchemy webhooks.\n\n\
+Respond in plain conversational prose. Be concise and direct.";
 
 pub struct SniperAgent {
     llm: Arc<dyn AgentClient>,
@@ -59,16 +68,16 @@ impl SniperAgent {
         let raw = self.llm.call(SYSTEM_PROMPT, &task).await?;
 
         let val: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
-        let recommended = val.get("entry_recommended")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let decision = val.get("decision")
+            .and_then(|v| v.as_str())
+            .unwrap_or("SKIP");
 
-        if recommended {
+        if decision.eq_ignore_ascii_case("ENTER") {
             Ok(SniperDecision::Enter {
                 confidence: val.get("confidence")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0),
-                max_entry_eth: val.get("max_entry_eth")
+                max_entry_eth: val.get("position_size_eth")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.01),
                 reasoning: val.get("reasoning")
