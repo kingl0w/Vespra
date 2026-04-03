@@ -22,7 +22,7 @@ const GOALS_INDEX_KEY: &str = "vespra:goals:index";
 
 // ── Redis storage ───────────────────────────────────────────────
 
-async fn save_goal(redis: &redis::Client, goal: &GoalSpec) -> anyhow::Result<()> {
+pub async fn save_goal(redis: &redis::Client, goal: &GoalSpec) -> anyhow::Result<()> {
     let mut conn = redis.get_multiplexed_async_connection().await?;
     let json = serde_json::to_string(goal)?;
     conn.set::<_, _, ()>(goal_key(&goal.id), &json).await?;
@@ -30,7 +30,7 @@ async fn save_goal(redis: &redis::Client, goal: &GoalSpec) -> anyhow::Result<()>
     Ok(())
 }
 
-async fn get_goal(redis: &redis::Client, id: Uuid) -> anyhow::Result<GoalSpec> {
+pub async fn get_goal(redis: &redis::Client, id: Uuid) -> anyhow::Result<GoalSpec> {
     let mut conn = redis.get_multiplexed_async_connection().await?;
     let raw: Option<String> = conn.get(goal_key(&id)).await?;
     let raw = raw.ok_or_else(|| anyhow::anyhow!("goal not found: {id}"))?;
@@ -65,16 +65,14 @@ async fn update_goal_status(
     Ok(goal)
 }
 
-#[allow(dead_code)]
-async fn update_goal_step(redis: &redis::Client, id: Uuid, step: &str) -> anyhow::Result<()> {
+pub async fn update_goal_step(redis: &redis::Client, id: Uuid, step: &str) -> anyhow::Result<()> {
     let mut goal = get_goal(redis, id).await?;
     goal.current_step = step.to_string();
     goal.updated_at = Utc::now();
     save_goal(redis, &goal).await
 }
 
-#[allow(dead_code)]
-async fn update_goal_pnl(redis: &redis::Client, id: Uuid, current_eth: f64) -> anyhow::Result<()> {
+pub async fn update_goal_pnl(redis: &redis::Client, id: Uuid, current_eth: f64) -> anyhow::Result<()> {
     let mut goal = get_goal(redis, id).await?;
     goal.current_eth = current_eth;
     goal.pnl_eth = current_eth - goal.entry_eth;
@@ -219,8 +217,37 @@ async fn create_goal(
         );
     }
 
+    // Set status to Running and spawn the GoalRunner
+    let mut goal = goal;
+    goal.status = GoalStatus::Running;
+    if let Err(e) = save_goal(&state.redis, &goal).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": format!("Failed to update goal status: {e}")
+            })),
+        );
+    }
+
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let goal_id = goal.id;
+    let deps = state.goal_runner_deps.clone();
+    let handle = tokio::spawn(async move {
+        crate::goal_runner::run_goal(goal_id, cancel_rx, deps).await;
+    });
+
+    {
+        let mut runners = state.goal_runners.lock().await;
+        runners.insert(goal_id, handle);
+    }
+    {
+        let mut txs = state.goal_cancel_txs.lock().await;
+        txs.insert(goal_id, cancel_tx);
+    }
+
     tracing::info!(
-        "goal created id={} strategy={:?} capital={}",
+        "goal created and runner spawned id={} strategy={:?} capital={}",
         goal.id,
         goal.strategy,
         goal.capital_eth
@@ -256,6 +283,14 @@ async fn cancel_goal(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    // Send cancel signal to runner
+    {
+        let txs = state.goal_cancel_txs.lock().await;
+        if let Some(tx) = txs.get(&id) {
+            let _ = tx.send(true);
+        }
+    }
+
     match update_goal_status(&state.redis, id, GoalStatus::Cancelled).await {
         Ok(goal) => (
             StatusCode::OK,

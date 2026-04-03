@@ -12,8 +12,12 @@ pub mod swarm;
 pub mod trade_up;
 pub mod yield_routes;
 
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+
+use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -26,6 +30,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use crate::agents::AgentClient;
 use crate::agents::yield_agent::YieldAgent;
 use crate::chain::ChainRegistry;
+use crate::goal_runner::GoalRunnerDeps;
 use crate::config::GatewayConfig;
 use crate::data::aave::AaveFetcher;
 use crate::data::yield_provider::ProviderRegistry;
@@ -59,6 +64,9 @@ pub struct AppState {
     pub yield_agent: Arc<YieldAgent>,
     pub route_limiters: RouteLimiters,
     pub coordinator_orchestrator: Arc<CoordinatorOrchestrator>,
+    pub goal_runners: Arc<Mutex<HashMap<Uuid, tokio::task::JoinHandle<()>>>>,
+    pub goal_cancel_txs: Arc<Mutex<HashMap<Uuid, tokio::sync::watch::Sender<bool>>>>,
+    pub goal_runner_deps: GoalRunnerDeps,
 }
 
 /// Middleware: Cloudflare Access check

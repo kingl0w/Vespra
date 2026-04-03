@@ -4,6 +4,7 @@ pub mod config;
 pub mod data;
 pub mod error;
 pub mod fee;
+pub mod goal_runner;
 pub mod guards;
 pub mod middleware;
 pub mod orchestrator;

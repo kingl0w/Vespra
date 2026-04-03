@@ -163,6 +163,30 @@ async fn main() -> anyhow::Result<()> {
         config.clone(),
     ));
 
+    // 8b. Build GoalRunner dependencies (before orchestrators consume Arcs)
+    let dry_run = std::env::var("VESPRA_DRY_RUN")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if dry_run {
+        tracing::info!("VESPRA_DRY_RUN=true — GoalRunner will skip Keymaster calls");
+    }
+    let goal_runner_deps = gateway_rs::goal_runner::GoalRunnerDeps {
+        pool_fetcher: pool_fetcher.clone(),
+        protocol_fetcher: protocol_fetcher.clone(),
+        price_oracle: price_oracle.clone(),
+        wallet_fetcher: wallet_fetcher.clone(),
+        quote_fetcher: quote_fetcher.clone(),
+        scout: scout.clone(),
+        risk: risk.clone(),
+        trader: trader.clone(),
+        sentinel: sentinel.clone(),
+        executor: executor.clone(),
+        config: config.clone(),
+        chain_registry: chain_registry.clone(),
+        redis: redis_client.clone(),
+        dry_run,
+    };
+
     // 9. Build shared kill flag + orchestrator
     let kill_flag = Arc::new(AtomicBool::new(false));
     let trade_up_orchestrator = Arc::new(TradeUpOrchestrator::new(
@@ -283,6 +307,9 @@ async fn main() -> anyhow::Result<()> {
         yield_agent: yield_agent.clone(),
         route_limiters,
         coordinator_orchestrator,
+        goal_runners: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        goal_cancel_txs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        goal_runner_deps,
     };
 
     let app = routes::router(state);
