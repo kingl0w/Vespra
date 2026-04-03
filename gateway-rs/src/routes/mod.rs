@@ -1,3 +1,4 @@
+pub mod boot;
 pub mod execution;
 pub mod config;
 pub mod coordinator;
@@ -148,6 +149,7 @@ pub fn router(state: AppState) -> Router {
         .merge(sentinel::router())
         .merge(execution::router())
         .merge(yield_scheduler::router())
+        .merge(boot::router())
         .merge(proxy::router())
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
