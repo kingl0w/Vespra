@@ -37,6 +37,11 @@ pub async fn get_goal(redis: &redis::Client, id: Uuid) -> anyhow::Result<GoalSpe
     Ok(serde_json::from_str(&raw)?)
 }
 
+/// Public alias for use from main.rs boot resume.
+pub async fn list_goals_all(redis: &redis::Client) -> anyhow::Result<Vec<GoalSpec>> {
+    list_goals(redis).await
+}
+
 async fn list_goals(redis: &redis::Client) -> anyhow::Result<Vec<GoalSpec>> {
     let mut conn = redis.get_multiplexed_async_connection().await?;
     let ids: Vec<String> = conn.smembers(GOALS_INDEX_KEY).await?;

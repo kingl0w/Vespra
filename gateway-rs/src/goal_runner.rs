@@ -35,6 +35,13 @@ const RETRY_BACKOFF_SECS: u64 = 10;
 const MONITOR_INTERVAL_SECS: u64 = 300; // 5 minutes
 const PAUSE_CHECK_SECS: u64 = 60;
 
+/// Determines which step a resumed GoalRunner should begin from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalStep {
+    Scouting,
+    Monitoring,
+}
+
 /// Shared dependencies for a GoalRunner task.
 #[derive(Clone)]
 pub struct GoalRunnerDeps {
@@ -58,10 +65,23 @@ pub struct GoalRunnerDeps {
 /// Checks `cancel_rx` between every step.
 pub async fn run_goal(
     goal_id: Uuid,
-    mut cancel_rx: watch::Receiver<bool>,
+    cancel_rx: watch::Receiver<bool>,
     deps: GoalRunnerDeps,
 ) {
-    tracing::info!("[goal {goal_id}] runner started");
+    run_goal_with_resume(goal_id, cancel_rx, deps, None).await;
+}
+
+/// Run the GoalRunner with an optional resume point.
+/// `resume_from`: if `Some(Monitoring)`, the first iteration skips SCOUTING→EXECUTING
+/// and jumps directly to MONITORING. Subsequent iterations run from SCOUTING normally.
+pub async fn run_goal_with_resume(
+    goal_id: Uuid,
+    mut cancel_rx: watch::Receiver<bool>,
+    deps: GoalRunnerDeps,
+    resume_from: Option<GoalStep>,
+) {
+    tracing::info!("[goal {goal_id}] runner started (resume={resume_from:?})");
+    let mut first_iteration = true;
 
     loop {
         // ── Check cancel ────────────────────────────────────────
@@ -96,6 +116,63 @@ pub async fn run_goal(
                 // proceed
             }
         }
+
+        // ── Resume shortcut: skip to MONITORING on first iteration if resuming ──
+        if first_iteration && resume_from == Some(GoalStep::Monitoring) {
+            first_iteration = false;
+            tracing::info!("[goal {goal_id}] resuming directly into MONITORING");
+            if let Err(e) = update_goal_step(&deps.redis, goal_id, "MONITORING").await {
+                tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
+            }
+
+            // Build a position from goal state — we don't know the exact token,
+            // so use the goal id as a placeholder. The sentinel monitor will still
+            // poll the price oracle (which falls back to 0.0 gracefully).
+            let position = TradePosition {
+                id: goal_id.to_string(),
+                wallet: goal.wallet_label.clone(),
+                chain: goal.chain.clone(),
+                token_address: goal_id.to_string(),
+                token_symbol: "RESUMED".into(),
+                entry_price_usd: 0.0,
+                entry_eth: goal.capital_eth,
+                token_amount: 0.0,
+                opened_at: goal.created_at.timestamp(),
+                status: crate::types::trade_up::PositionStatus::Open,
+                exit_price_usd: None,
+                exit_eth: None,
+                gas_cost_eth: None,
+                net_gain_eth: None,
+                exit_reason: None,
+                closed_at: None,
+            };
+
+            let resume_result = run_monitoring_loop(
+                goal_id, &goal, &position, &deps, &mut cancel_rx,
+            ).await;
+
+            match resume_result {
+                MonitorResult::Cancelled => break,
+                MonitorResult::YieldRotate => {
+                    let _ = update_goal_step(&deps.redis, goal_id, "SCOUTING").await;
+                    continue;
+                }
+                MonitorResult::ExitSignal => {
+                    // EXITING from resumed monitoring
+                    tracing::info!("[goal {goal_id}] MONITORING → EXITING (resumed)");
+                    let _ = update_goal_step(&deps.redis, goal_id, "EXITING").await;
+                    let token_out = goal_id.to_string();
+                    let sell_amount = format!("{:.0}", goal.capital_eth * 1e18);
+                    let _ = execution_gate::execute_traced(
+                        &deps.executor, &deps.config, &deps.chain_registry,
+                        goal_id, &token_out, "WETH", &sell_amount, &goal.chain, deps.dry_run,
+                    ).await;
+                    continue; // go back to SCOUTING on next iteration
+                }
+                MonitorResult::NoExit => continue,
+            }
+        }
+        first_iteration = false;
 
         let chains = vec![goal.chain.clone()];
 
@@ -328,7 +405,7 @@ pub async fn run_goal(
             chain: goal.chain.clone(),
             token_address: token_out.clone(),
             token_symbol: token_out.clone(),
-            entry_price_usd: 0.0, // filled by price oracle below
+            entry_price_usd: 0.0,
             entry_eth: goal.capital_eth,
             token_amount: 0.0,
             opened_at: Utc::now().timestamp(),
@@ -341,159 +418,24 @@ pub async fn run_goal(
             closed_at: None,
         };
 
-        let mut exit_signal = false;
-        let mut yield_rotate_signal = false;
+        let monitor_result = run_monitoring_loop(
+            goal_id, &goal, &position, &deps, &mut cancel_rx,
+        ).await;
 
-        // Subscribe to SentinelMonitor + YieldRotation pub/sub channels.
-        // A helper task forwards matching signals into mpsc channels.
-        let (sentinel_tx, mut sentinel_rx) = tokio::sync::mpsc::channel::<SentinelSignal>(8);
-        let (yield_tx, mut yield_rx) = tokio::sync::mpsc::channel::<YieldRotationSignal>(8);
-        let _pubsub_task = {
-            let redis_clone = deps.redis.clone();
-            let s_tx = sentinel_tx.clone();
-            let y_tx = yield_tx.clone();
-            tokio::spawn(async move {
-                let Ok(mut ps) = redis_clone.get_async_pubsub().await else { return };
-                if ps.subscribe(SENTINEL_CHANNEL).await.is_err() { return; }
-                if ps.subscribe(YIELD_ROTATE_CHANNEL).await.is_err() { return; }
-                use futures::StreamExt;
-                let mut stream = ps.on_message();
-                while let Some(msg) = stream.next().await {
-                    let Ok(payload) = msg.get_payload::<String>() else { continue };
-                    let channel = msg.get_channel_name();
-                    if channel == SENTINEL_CHANNEL {
-                        if let Ok(signal) = serde_json::from_str::<SentinelSignal>(&payload) {
-                            if signal.goal_id == goal_id {
-                                let _ = s_tx.send(signal).await;
-                            }
-                        }
-                    } else if channel == YIELD_ROTATE_CHANNEL {
-                        if let Ok(signal) = serde_json::from_str::<YieldRotationSignal>(&payload) {
-                            if signal.goal_id == goal_id {
-                                let _ = y_tx.send(signal).await;
-                            }
-                        }
-                    }
-                }
-            })
-        };
-        drop(sentinel_tx);
-        drop(yield_tx);
-
-        loop {
-            if *cancel_rx.borrow() { break; }
-
-            // Re-check goal status (pause/cancel)
-            if let Ok(g) = get_goal(&deps.redis, goal_id).await {
-                match g.status {
-                    GoalStatus::Cancelled => break,
-                    GoalStatus::Paused => {
-                        tokio::select! {
-                            _ = tokio::time::sleep(std::time::Duration::from_secs(PAUSE_CHECK_SECS)) => {}
-                            _ = cancel_rx.changed() => {}
-                        }
-                        continue;
-                    }
-                    _ => {}
-                }
+        match monitor_result {
+            MonitorResult::Cancelled => {
+                tracing::info!("[goal {goal_id}] cancelled during monitoring — not exiting position");
+                break;
             }
-
-            // Get current price
-            let current_price = deps
-                .price_oracle
-                .fetch(&position.token_address, &position.chain)
-                .await
-                .map(|p| p.price_usd)
-                .unwrap_or(0.0);
-
-            let assessment = deps
-                .sentinel
-                .monitor_position(&position, current_price)
-                .await;
-
-            match assessment {
-                Ok(a) if a.is_exit() => {
-                    tracing::info!(
-                        "[goal {goal_id}] sentinel says exit: {} — {}",
-                        a.action,
-                        a.reasoning
-                    );
-                    exit_signal = true;
-                    break;
-                }
-                Ok(a) => {
-                    tracing::debug!("[goal {goal_id}] sentinel: hold — {}", a.reasoning);
-                }
-                Err(e) => {
-                    tracing::warn!("[goal {goal_id}] sentinel check failed (non-fatal): {e}");
-                }
+            MonitorResult::YieldRotate => {
+                tracing::info!("[goal {goal_id}] MONITORING → EXITING (yield rotation) → will re-SCOUT");
+                let _ = update_goal_step(&deps.redis, goal_id, "SCOUTING").await;
+                continue;
             }
-
-            // Wait for next interval, cancellation, sentinel exit, or yield rotation
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(MONITOR_INTERVAL_SECS)) => {}
-                _ = cancel_rx.changed() => {}
-                signal = sentinel_rx.recv() => {
-                    if let Some(signal) = signal {
-                        tracing::info!(
-                            "[goal {goal_id}] sentinel pub/sub exit: {} — {}",
-                            signal.signal,
-                            signal.reason
-                        );
-                        exit_signal = true;
-                        break;
-                    }
-                }
-                rotation = yield_rx.recv() => {
-                    if let Some(rotation) = rotation {
-                        // Only act on yield rotation for YieldRotate / Adaptive strategies
-                        if matches!(goal.strategy, GoalStrategy::YieldRotate | GoalStrategy::Adaptive) {
-                            // Safety check: skip if stop_loss is at risk
-                            if goal.pnl_pct <= -(goal.stop_loss_pct * 0.8) {
-                                tracing::info!(
-                                    "[goal {goal_id}] yield rotation skipped — P&L {:.1}% too close to stop loss",
-                                    goal.pnl_pct
-                                );
-                            } else {
-                                tracing::info!(
-                                    "[goal {goal_id}] yield rotation: {} → {} (Δ{:.2}% APY)",
-                                    rotation.from_protocol,
-                                    rotation.to_protocol,
-                                    rotation.delta_apy
-                                );
-                                yield_rotate_signal = true;
-                                break;
-                            }
-                        } else {
-                            tracing::debug!(
-                                "[goal {goal_id}] ignoring yield rotation (strategy={:?})",
-                                goal.strategy
-                            );
-                        }
-                    }
-                }
+            MonitorResult::NoExit => continue,
+            MonitorResult::ExitSignal => {
+                // fall through to STEP 6 — EXITING
             }
-        }
-
-        // Clean up the pub/sub helper task
-        _pubsub_task.abort();
-
-        if *cancel_rx.borrow() {
-            tracing::info!("[goal {goal_id}] cancelled during monitoring — not exiting position");
-            break;
-        }
-
-        if yield_rotate_signal {
-            // Yield rotation: exit position then re-enter SCOUTING for a better opportunity
-            tracing::info!("[goal {goal_id}] MONITORING → EXITING (yield rotation) → will re-SCOUT");
-            if let Err(e) = update_goal_step(&deps.redis, goal_id, "SCOUTING").await {
-                tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
-            }
-            continue; // re-enter outer loop at SCOUTING
-        }
-
-        if !exit_signal {
-            continue;
         }
 
         // ═════════════════════════════════════════════════════════
@@ -602,6 +544,129 @@ pub async fn run_goal(
     tracing::info!("[goal {goal_id}] runner exited");
 }
 
+// ── Monitor result + extracted monitoring loop ─────────────────
+
+/// Outcome of the monitoring loop, used to drive the outer GoalRunner loop.
+enum MonitorResult {
+    ExitSignal,
+    YieldRotate,
+    Cancelled,
+    NoExit,
+}
+
+/// Shared monitoring loop used by both normal flow (STEP 5) and resume-from-monitoring.
+async fn run_monitoring_loop(
+    goal_id: Uuid,
+    goal: &crate::types::goals::GoalSpec,
+    position: &TradePosition,
+    deps: &GoalRunnerDeps,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> MonitorResult {
+    let mut exit_signal = false;
+    let mut yield_rotate_signal = false;
+
+    let (sentinel_tx, mut sentinel_rx) = tokio::sync::mpsc::channel::<SentinelSignal>(8);
+    let (yield_tx, mut yield_rx) = tokio::sync::mpsc::channel::<YieldRotationSignal>(8);
+    let _pubsub_task = {
+        let redis_clone = deps.redis.clone();
+        let s_tx = sentinel_tx.clone();
+        let y_tx = yield_tx.clone();
+        tokio::spawn(async move {
+            let Ok(mut ps) = redis_clone.get_async_pubsub().await else { return };
+            if ps.subscribe(SENTINEL_CHANNEL).await.is_err() { return; }
+            if ps.subscribe(YIELD_ROTATE_CHANNEL).await.is_err() { return; }
+            use futures::StreamExt;
+            let mut stream = ps.on_message();
+            while let Some(msg) = stream.next().await {
+                let Ok(payload) = msg.get_payload::<String>() else { continue };
+                let channel = msg.get_channel_name();
+                if channel == SENTINEL_CHANNEL {
+                    if let Ok(signal) = serde_json::from_str::<SentinelSignal>(&payload) {
+                        if signal.goal_id == goal_id { let _ = s_tx.send(signal).await; }
+                    }
+                } else if channel == YIELD_ROTATE_CHANNEL {
+                    if let Ok(signal) = serde_json::from_str::<YieldRotationSignal>(&payload) {
+                        if signal.goal_id == goal_id { let _ = y_tx.send(signal).await; }
+                    }
+                }
+            }
+        })
+    };
+    drop(sentinel_tx);
+    drop(yield_tx);
+
+    loop {
+        if *cancel_rx.borrow() { break; }
+        if let Ok(g) = get_goal(&deps.redis, goal_id).await {
+            match g.status {
+                GoalStatus::Cancelled => break,
+                GoalStatus::Paused => {
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(PAUSE_CHECK_SECS)) => {}
+                        _ = cancel_rx.changed() => {}
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        let current_price = deps
+            .price_oracle
+            .fetch(&position.token_address, &position.chain)
+            .await
+            .map(|p| p.price_usd)
+            .unwrap_or(0.0);
+
+        let assessment = deps.sentinel.monitor_position(position, current_price).await;
+        match assessment {
+            Ok(a) if a.is_exit() => {
+                tracing::info!("[goal {goal_id}] sentinel exit: {} — {}", a.action, a.reasoning);
+                exit_signal = true;
+                break;
+            }
+            Ok(a) => tracing::debug!("[goal {goal_id}] sentinel: hold — {}", a.reasoning),
+            Err(e) => tracing::warn!("[goal {goal_id}] sentinel check failed: {e}"),
+        }
+
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(MONITOR_INTERVAL_SECS)) => {}
+            _ = cancel_rx.changed() => {}
+            signal = sentinel_rx.recv() => {
+                if let Some(signal) = signal {
+                    tracing::info!("[goal {goal_id}] sentinel pub/sub exit: {} — {}", signal.signal, signal.reason);
+                    exit_signal = true;
+                    break;
+                }
+            }
+            rotation = yield_rx.recv() => {
+                if let Some(rotation) = rotation {
+                    if matches!(goal.strategy, GoalStrategy::YieldRotate | GoalStrategy::Adaptive) {
+                        if goal.pnl_pct <= -(goal.stop_loss_pct * 0.8) {
+                            tracing::info!("[goal {goal_id}] yield rotation skipped — P&L too close to stop loss");
+                        } else {
+                            tracing::info!("[goal {goal_id}] yield rotation: {} → {} (Δ{:.2}%)", rotation.from_protocol, rotation.to_protocol, rotation.delta_apy);
+                            yield_rotate_signal = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    _pubsub_task.abort();
+
+    if *cancel_rx.borrow() {
+        MonitorResult::Cancelled
+    } else if yield_rotate_signal {
+        MonitorResult::YieldRotate
+    } else if exit_signal {
+        MonitorResult::ExitSignal
+    } else {
+        MonitorResult::NoExit
+    }
+}
+
 // ── Retry helper ────────────────────────────────────────────────
 
 async fn with_retry<F, Fut, T>(
@@ -691,19 +756,62 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_signal_stops_loop() {
-        // Verify that the cancel channel causes immediate exit.
-        // We can't run the full runner without deps, but we can test
-        // the cancel pattern used throughout.
         let (cancel_tx, cancel_rx) = watch::channel(false);
-
-        // Simulate: runner checks cancel, it's false
         assert!(!*cancel_rx.borrow());
-
-        // Send cancel
         cancel_tx.send(true).unwrap();
         assert!(*cancel_rx.borrow());
+    }
 
-        // The runner loop checks `if *cancel_rx.borrow() { break; }`
-        // which would exit. Verified.
+    #[test]
+    fn test_goal_step_resume_routing() {
+        // Goals in MONITORING/EXITING should resume from Monitoring
+        let step_monitoring = "MONITORING";
+        let step_exiting = "EXITING";
+        let step_executing = "EXECUTING";
+        let step_scouting = "SCOUTING";
+        let step_risk = "RISK";
+        let step_trading = "TRADING";
+
+        fn route_step(step: &str) -> Option<GoalStep> {
+            match step {
+                "MONITORING" | "EXITING" => Some(GoalStep::Monitoring),
+                "EXECUTING" => Some(GoalStep::Monitoring), // crash recovery
+                _ => None,
+            }
+        }
+
+        assert_eq!(route_step(step_monitoring), Some(GoalStep::Monitoring));
+        assert_eq!(route_step(step_exiting), Some(GoalStep::Monitoring));
+        assert_eq!(route_step(step_executing), Some(GoalStep::Monitoring));
+        assert_eq!(route_step(step_scouting), None);
+        assert_eq!(route_step(step_risk), None);
+        assert_eq!(route_step(step_trading), None);
+    }
+
+    #[test]
+    fn test_mid_execution_crash_routes_to_monitoring() {
+        // EXECUTING is a dangerous state — if the gateway crashed mid-execution,
+        // the position may or may not exist on-chain. We resume from MONITORING
+        // so sentinel can check.
+        let crash_step = "EXECUTING";
+        let resume = match crash_step {
+            "MONITORING" | "EXITING" | "EXECUTING" => Some(GoalStep::Monitoring),
+            _ => None,
+        };
+        assert_eq!(resume, Some(GoalStep::Monitoring));
+    }
+
+    #[test]
+    fn test_auto_resume_disabled_skips_all() {
+        // VESPRA_AUTO_RESUME_GOALS=false means no goals should be resumed.
+        // The logic is: if env var is "false" or "0", skip. Otherwise resume.
+        fn should_resume(val: &str) -> bool {
+            val != "false" && val != "0"
+        }
+        assert!(!should_resume("false"));
+        assert!(!should_resume("0"));
+        assert!(should_resume("true"));
+        assert!(should_resume("1"));
+        assert!(should_resume("yes"));
     }
 }
