@@ -7,10 +7,20 @@ use chrono::Utc;
 use redis::AsyncCommands;
 use uuid::Uuid;
 
+use std::collections::HashMap;
+
 use crate::agents::AgentClient;
 use crate::types::goals::{CreateGoalRequest, GoalSpec, GoalStatus, GoalStrategy};
 
 use super::AppState;
+
+/// Default max concurrent running goals. Override with VESPRA_MAX_CONCURRENT_GOALS.
+fn max_concurrent_goals() -> usize {
+    std::env::var("VESPRA_MAX_CONCURRENT_GOALS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5)
+}
 
 // ── Redis key helpers ───────────────────────────────────────────
 
@@ -202,6 +212,36 @@ async fn create_goal(
         );
     }
 
+    // ── Constraint: one active goal per wallet ────────────────────
+    if let Ok(running) = list_goals_by_status(&state.redis, GoalStatus::Running).await {
+        if let Some(existing) = running.iter().find(|g| g.wallet_label == body.wallet_label) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!(
+                        "Wallet {} already has an active goal: {}. Cancel or pause it first.",
+                        body.wallet_label, existing.id
+                    )
+                })),
+            );
+        }
+
+        // ── Constraint: max concurrent goals ────────────────────────
+        let max = max_concurrent_goals();
+        if running.len() >= max {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!(
+                        "Maximum concurrent goals ({max}) reached. Cancel or complete a goal first."
+                    )
+                })),
+            );
+        }
+    }
+
     let goal = match parse_goal_via_llm(
         state.llm.as_ref(),
         &body.raw_goal,
@@ -349,9 +389,52 @@ async fn resume_goal(
     }
 }
 
+async fn portfolio(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let goals = list_goals(&state.redis).await.unwrap_or_default();
+
+    let mut by_status: HashMap<String, u32> = HashMap::new();
+    let mut by_strategy: HashMap<String, u32> = HashMap::new();
+    let mut total_capital = 0.0_f64;
+    let mut total_current = 0.0_f64;
+    let mut running_count = 0u32;
+
+    for g in &goals {
+        *by_status
+            .entry(format!("{:?}", g.status))
+            .or_default() += 1;
+        *by_strategy
+            .entry(format!("{:?}", g.strategy))
+            .or_default() += 1;
+
+        if g.status == GoalStatus::Running {
+            running_count += 1;
+            total_capital += g.entry_eth;
+            total_current += g.current_eth;
+        }
+    }
+
+    let total_pnl = total_current - total_capital;
+    let total_pnl_pct = if total_capital > 0.0 {
+        (total_pnl / total_capital) * 100.0
+    } else {
+        0.0
+    };
+
+    Json(serde_json::json!({
+        "total_goals_running": running_count,
+        "total_capital_eth": total_capital,
+        "total_current_eth": total_current,
+        "total_pnl_eth": total_pnl,
+        "total_pnl_pct": total_pnl_pct,
+        "goals_by_strategy": by_strategy,
+        "goals_by_status": by_status,
+    }))
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/goals", post(create_goal).get(list_goals_handler))
+        .route("/goals/portfolio", get(portfolio))
         .route("/goals/{id}", get(get_goal_handler))
         .route("/goals/{id}/cancel", post(cancel_goal))
         .route("/goals/{id}/pause", post(pause_goal))
@@ -361,6 +444,104 @@ pub fn router() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_goal(wallet: &str, status: GoalStatus, strategy: GoalStrategy, capital: f64, current: f64) -> GoalSpec {
+        let now = Utc::now();
+        GoalSpec {
+            id: Uuid::new_v4(),
+            raw_goal: "test goal".into(),
+            wallet_label: wallet.into(),
+            chain: "base".into(),
+            capital_eth: capital,
+            target_gain_pct: 10.0,
+            stop_loss_pct: 5.0,
+            strategy,
+            status,
+            cycles: 0,
+            current_step: "MONITORING".into(),
+            entry_eth: capital,
+            current_eth: current,
+            pnl_eth: current - capital,
+            pnl_pct: if capital > 0.0 { ((current - capital) / capital) * 100.0 } else { 0.0 },
+            created_at: now,
+            updated_at: now,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn test_wallet_uniqueness_gate() {
+        // Simulate: two running goals, check if wallet "safe" has an active goal
+        let goals = vec![
+            make_goal("safe", GoalStatus::Running, GoalStrategy::Adaptive, 0.1, 0.1),
+            make_goal("hot", GoalStatus::Completed, GoalStrategy::Snipe, 0.05, 0.06),
+        ];
+
+        let running: Vec<_> = goals.iter().filter(|g| g.status == GoalStatus::Running).collect();
+
+        // "safe" wallet has a running goal — should be rejected
+        let conflict = running.iter().find(|g| g.wallet_label == "safe");
+        assert!(conflict.is_some(), "should find active goal for wallet 'safe'");
+
+        // "hot" wallet has no running goal — should be allowed
+        let no_conflict = running.iter().find(|g| g.wallet_label == "hot");
+        assert!(no_conflict.is_none(), "wallet 'hot' has no running goal");
+
+        // "new" wallet has no goals at all — should be allowed
+        let new_wallet = running.iter().find(|g| g.wallet_label == "new");
+        assert!(new_wallet.is_none());
+    }
+
+    #[test]
+    fn test_max_concurrent_limit() {
+        let mut goals = Vec::new();
+        for i in 0..5 {
+            goals.push(make_goal(
+                &format!("wallet-{i}"),
+                GoalStatus::Running,
+                GoalStrategy::Adaptive,
+                0.1,
+                0.1,
+            ));
+        }
+
+        let running_count = goals.iter().filter(|g| g.status == GoalStatus::Running).count();
+        let max = 5;
+
+        // At max — should reject
+        assert!(running_count >= max, "should be at max capacity");
+
+        // Below max — should allow
+        goals[4].status = GoalStatus::Completed;
+        let running_count = goals.iter().filter(|g| g.status == GoalStatus::Running).count();
+        assert!(running_count < max, "should have room after completing one");
+    }
+
+    #[test]
+    fn test_portfolio_pnl_weighted_average() {
+        let goals = vec![
+            make_goal("w1", GoalStatus::Running, GoalStrategy::Compound, 1.0, 1.1),   // +10%
+            make_goal("w2", GoalStatus::Running, GoalStrategy::YieldRotate, 2.0, 1.8), // -10%
+            make_goal("w3", GoalStatus::Completed, GoalStrategy::Snipe, 0.5, 0.6),     // not counted
+        ];
+
+        let running: Vec<_> = goals.iter().filter(|g| g.status == GoalStatus::Running).collect();
+        let total_capital: f64 = running.iter().map(|g| g.entry_eth).sum();
+        let total_current: f64 = running.iter().map(|g| g.current_eth).sum();
+        let total_pnl = total_current - total_capital;
+        let total_pnl_pct = if total_capital > 0.0 {
+            (total_pnl / total_capital) * 100.0
+        } else {
+            0.0
+        };
+
+        // capital = 1.0 + 2.0 = 3.0, current = 1.1 + 1.8 = 2.9
+        // pnl = -0.1, pnl_pct = -0.1/3.0 * 100 = -3.33%
+        assert!((total_capital - 3.0).abs() < 1e-10);
+        assert!((total_current - 2.9).abs() < 1e-10);
+        assert!((total_pnl - (-0.1)).abs() < 1e-10);
+        assert!((total_pnl_pct - (-100.0 / 30.0)).abs() < 0.01);
+    }
 
     #[tokio::test]
     async fn test_redis_save_get_list() {
