@@ -15,6 +15,15 @@ pub struct TraderContext {
     pub risk_score: RiskScore,
     pub min_gain_pct: f64,
     pub max_eth: f64,
+    /// Chain the goal is targeting. Used to apply testnet-vs-mainnet trade rules.
+    /// Defaults to the opportunity's chain if not set explicitly by the caller.
+    #[serde(default)]
+    pub chain: String,
+}
+
+fn is_testnet_chain(chain: &str) -> bool {
+    let c = chain.to_lowercase();
+    c.contains("sepolia") || c.contains("testnet") || c.contains("goerli")
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,10 +50,16 @@ Output strict JSON only: {\"action\": \"swap\"|\"hold\"|\"exit\", \
 \"token_in\": \"<address>\", \"token_out\": \"<address>\", \
 \"amount_in_wei\": \"<wei>\", \"expected_gain_pct\": <float>, \
 \"reasoning\": \"<one line>\"}\n\n\
-Rules:\n\
-- Only swap if momentum_score >= 0.6\n\
-- If risk_score is HIGH: output action=\"hold\"\n\
-- If stop_loss_triggered: output action=\"exit\"";
+MOMENTUM RULES (depend on chain type — the task message tells you whether the chain is TESTNET or MAINNET):\n\
+• MAINNET chains: only swap if momentum_score >= 0.6.\n\
+• TESTNET chains (anything containing 'sepolia', 'testnet', or 'goerli'): \
+testnet pools have no real price history so momentum_score is meaningless. \
+SKIP the momentum check entirely — treat the threshold as 0.0 and swap if risk allows. \
+The goal here is to validate execution, not to police entry timing.\n\n\
+Other rules (apply on all chains):\n\
+- If risk_score is HIGH or CRITICAL: output action=\"hold\"\n\
+- If stop_loss_triggered: output action=\"exit\"\n\
+- When you swap, fill token_in/token_out/amount_in_wei from the provided quote.";
 
 pub struct TraderAgent {
     llm: Arc<dyn AgentClient>,
@@ -56,7 +71,20 @@ impl TraderAgent {
     }
 
     pub async fn evaluate(&self, ctx: &TraderContext) -> Result<TraderDecision> {
-        let task = serde_json::to_string(ctx)?;
+        let effective_chain = if ctx.chain.is_empty() {
+            ctx.opportunity.chain.clone()
+        } else {
+            ctx.chain.clone()
+        };
+        let testnet = is_testnet_chain(&effective_chain);
+        let chain_label = if testnet { "TESTNET" } else { "MAINNET" };
+
+        let ctx_json = serde_json::to_string(ctx)?;
+        let task = format!(
+            "[CHAIN_TYPE] {chain_label} (chain={effective_chain})\n\n\
+             [CONTEXT] {ctx_json}\n\n\
+             [TASK] Decide swap/hold/exit per the {chain_label} momentum rules in the system prompt.",
+        );
         let raw = self.llm.call(SYSTEM_PROMPT, &task).await?;
 
         let parsed: TraderRaw = match serde_json::from_str(&raw) {
@@ -71,8 +99,37 @@ impl TraderAgent {
         let action = parsed.action.as_deref().unwrap_or("hold").to_lowercase();
         let reasoning = parsed
             .reasoning
-            .or(parsed.reason)
+            .clone()
+            .or(parsed.reason.clone())
             .unwrap_or_else(|| "no reasoning provided".into());
+
+        // Deterministic override: on testnet, if the LLM held due to momentum
+        // (despite the prompt instructing it to skip the gate), promote to a swap
+        // using the quote we already fetched. Risk-based holds are still respected.
+        if testnet
+            && action == "hold"
+            && !matches!(ctx.risk_score, RiskScore::High | RiskScore::Critical)
+            && reasoning.to_lowercase().contains("momentum")
+            && !ctx.quote.token_in.is_empty()
+            && !ctx.quote.token_out.is_empty()
+            && !ctx.quote.amount_in_wei.is_empty()
+        {
+            tracing::info!(
+                "[trader] testnet override: HOLD(momentum) → SWAP using quote ({} → {} amount={})",
+                ctx.quote.token_in,
+                ctx.quote.token_out,
+                ctx.quote.amount_in_wei
+            );
+            return Ok(TraderDecision::Swap {
+                token_in: ctx.quote.token_in.clone(),
+                token_out: ctx.quote.token_out.clone(),
+                amount_in_wei: ctx.quote.amount_in_wei.clone(),
+                expected_gain_pct: 0.0,
+                reasoning: format!(
+                    "[testnet override] momentum gate skipped on {effective_chain}; original LLM reason: {reasoning}"
+                ),
+            });
+        }
 
         match action.as_str() {
             "swap" => Ok(TraderDecision::Swap {

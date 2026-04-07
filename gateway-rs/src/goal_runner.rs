@@ -284,6 +284,7 @@ pub async fn run_goal_with_resume(
             .unwrap_or(8453);
         let amount_wei = format!("{:.0}", goal.capital_eth * 1e18);
 
+        let trader_chain = goal.chain.clone();
         let trader_decision = match with_retry(goal_id, "TRADING", &deps, &cancel_rx, || {
             let deps = deps.clone();
             let best = best.clone();
@@ -291,6 +292,7 @@ pub async fn run_goal_with_resume(
             let risk_score = risk_decision.score().clone();
             let goal_capital = goal.capital_eth;
             let goal_target = goal.target_gain_pct;
+            let trader_chain = trader_chain.clone();
             async move {
                 let quote = deps
                     .quote_fetcher
@@ -303,6 +305,7 @@ pub async fn run_goal_with_resume(
                     quote.amount_out_wei, quote.price_impact
                 );
                 let trader_ctx = TraderContext {
+                    chain: trader_chain,
                     opportunity: best,
                     quote,
                     capital_eth: goal_capital,

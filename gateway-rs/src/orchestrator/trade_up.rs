@@ -413,6 +413,7 @@ impl TradeUpOrchestrator {
 
         // 10. Trader decision
         let trader_ctx = TraderContext {
+            chain: best.chain.clone(),
             opportunity: best.clone(),
             quote: quote.clone(),
             capital_eth,
@@ -1087,6 +1088,7 @@ async fn run_position_loop(
 
         // Execute entry swap via trader + executor
         let trader_ctx = TraderContext {
+            chain: best.chain.clone(),
             opportunity: best.clone(),
             quote: quote.clone(),
             capital_eth: position_eth,
