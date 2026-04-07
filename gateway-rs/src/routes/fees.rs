@@ -10,7 +10,7 @@ use super::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/fees/summary", get(fee_summary))
-        .route("/fees/goal/{id}", get(fee_by_goal))
+        .route("/fees/goal/:id", get(fee_by_goal))
 }
 
 async fn fee_summary(State(state): State<AppState>) -> Json<serde_json::Value> {

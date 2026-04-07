@@ -500,10 +500,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/goals", post(create_goal).get(list_goals_handler))
         .route("/goals/portfolio", get(portfolio))
-        .route("/goals/{id}", get(get_goal_handler))
-        .route("/goals/{id}/cancel", post(cancel_goal))
-        .route("/goals/{id}/pause", post(pause_goal))
-        .route("/goals/{id}/resume", post(resume_goal))
+        .route("/goals/:id", get(get_goal_handler))
+        .route("/goals/:id/cancel", post(cancel_goal))
+        .route("/goals/:id/pause", post(pause_goal))
+        .route("/goals/:id/resume", post(resume_goal))
 }
 
 #[cfg(test)]
