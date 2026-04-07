@@ -364,6 +364,38 @@ pub async fn run_goal_with_resume(
             }
         };
 
+        // Resolve symbol → address before handing off to executor.
+        // Scout often emits pool symbols ("USDC-WETH", "LIQTEST-WETH") rather
+        // than ERC-20 addresses. Testnet pools sometimes contain fake tokens
+        // (LIQTEST, VELVET, VFY) with no real contract — skip them and
+        // re-SCOUT instead of submitting a broken swap to Keymaster.
+        let token_in = match resolve_swap_token(&token_in, &goal.chain) {
+            Some(a) => a,
+            None => {
+                tracing::warn!(
+                    "[goal {goal_id}] skipping pool: unresolvable token_in symbol '{}' on chain '{}' — re-scouting",
+                    token_in, goal.chain
+                );
+                sleep_interruptible(&mut cancel_rx, 30).await;
+                continue;
+            }
+        };
+        let token_out = match resolve_swap_token(&token_out, &goal.chain) {
+            Some(a) => a,
+            None => {
+                tracing::warn!(
+                    "[goal {goal_id}] skipping pool: unresolvable token_out symbol '{}' on chain '{}' — re-scouting",
+                    token_out, goal.chain
+                );
+                sleep_interruptible(&mut cancel_rx, 30).await;
+                continue;
+            }
+        };
+        tracing::info!(
+            "[goal {goal_id}] resolved swap addresses: in={} out={}",
+            token_in, token_out
+        );
+
         tracing::info!("[goal {goal_id}] TRADING → EXECUTING");
         if let Err(e) = update_goal_step(&deps.redis, goal_id, "EXECUTING").await {
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
@@ -479,13 +511,27 @@ pub async fn run_goal_with_resume(
                 break;
             }
         };
+        // token_out is already a resolved address (set during BUY handoff above).
+        // Resolve "WETH" symbol to the chain's WETH address for the sell side.
+        let weth_addr = match known_token_address("WETH", &goal.chain) {
+            Some(a) => a,
+            None => {
+                fail_goal(
+                    &deps.redis,
+                    goal_id,
+                    &format!("no known WETH address for chain '{}'", goal.chain),
+                )
+                .await;
+                break;
+            }
+        };
         let sell_tx_status = execution_gate::execute_traced(
             &deps.executor,
             &deps.config,
             &deps.chain_registry,
             sell_wallet_uuid,
             &token_out,
-            "WETH",
+            &weth_addr,
             &sell_amount,
             &goal.chain,
             deps.dry_run,
@@ -753,6 +799,53 @@ where
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
+
+/// Look up a known token symbol → ERC-20 address for the given chain.
+/// Returns `None` for unknown symbols or unsupported chains. Used to filter
+/// out fake testnet tokens (e.g. LIQTEST, VELVET, VFY) before submitting a
+/// swap to Keymaster, which would otherwise reject calldata built from a
+/// non-address string.
+fn known_token_address(symbol: &str, chain: &str) -> Option<String> {
+    let s = symbol.trim().to_uppercase();
+    let chain_lower = chain.to_lowercase();
+    // Base + Base Sepolia share these canonical addresses for the bridged
+    // tokens we care about. Extend per-chain when other chains come online.
+    if !chain_lower.contains("base") {
+        return None;
+    }
+    match s.as_str() {
+        "WETH" | "ETH" => Some("0x4200000000000000000000000000000000000006".to_string()),
+        "USDC" => Some("0x036CbD53842c5426634e7929541eC2318f3dCF7e".to_string()),
+        "USDBC" => Some("0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA".to_string()),
+        _ => None,
+    }
+}
+
+/// Resolve a token field that may be a plain symbol ("WETH"), a pool pair
+/// symbol ("USDC-WETH", "LIQTEST-WETH", "USDC-VFY"), or already a hex address.
+/// For pool pair symbols, prefers the non-WETH side; if neither side is WETH,
+/// returns whichever half is found in the known-token map. Returns `None`
+/// when no half resolves.
+fn resolve_swap_token(field: &str, chain: &str) -> Option<String> {
+    let trimmed = field.trim();
+    if trimmed.starts_with("0x") && trimmed.len() == 42 {
+        return Some(trimmed.to_string());
+    }
+    if let Some((a, b)) = trimmed.split_once('-') {
+        let a_upper = a.to_uppercase();
+        let b_upper = b.to_uppercase();
+        // Prefer the non-WETH side first.
+        let (first, second) = if a_upper == "WETH" || a_upper == "ETH" {
+            (b, a)
+        } else if b_upper == "WETH" || b_upper == "ETH" {
+            (a, b)
+        } else {
+            (a, b)
+        };
+        return known_token_address(first, chain).or_else(|| known_token_address(second, chain));
+    }
+    known_token_address(trimmed, chain)
+}
 
 /// Parse the goal's resolved Keymaster wallet UUID. Returns `Err` if the goal
 /// has no `wallet_id` (legacy goal created before this field existed) or the
