@@ -250,7 +250,13 @@ pub async fn run_validation_checks(
 
     // 4. Wallet has balance > 0
     checks.push(
-        check_wallet_balance(&client, &config.keymaster_url, &config.keymaster_token).await,
+        check_wallet_balance(
+            &client,
+            &config.keymaster_url,
+            &config.keymaster_token,
+            chain_registry,
+        )
+        .await,
     );
 
     // 5. Gas estimate succeeds
@@ -365,54 +371,135 @@ async fn check_wallet_balance(
     client: &reqwest::Client,
     keymaster_url: &str,
     keymaster_token: &str,
+    chain_registry: &ChainRegistry,
 ) -> ValidationCheck {
     let name = "wallet_has_balance".to_string();
 
-    match client
+    // Best-effort: ask Keymaster to refresh its cached balances first.
+    // We do not block on this — the actual check queries the RPC directly below.
+    let _ = client
+        .get(format!("{}/balances/refresh", keymaster_url))
+        .header("Authorization", format!("Bearer {keymaster_token}"))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await;
+
+    let resp = match client
         .get(format!("{}/wallets", keymaster_url))
         .header("Authorization", format!("Bearer {keymaster_token}"))
         .send()
         .await
     {
-        Ok(r) => {
-            let data: serde_json::Value = r.json().await.unwrap_or_default();
-            let wallets = data.as_array().or_else(|| data["wallets"].as_array());
-            match wallets {
-                Some(ws) => {
-                    let has_balance = ws.iter().any(|w| {
-                        w["balance_eth"]
-                            .as_f64()
-                            .or_else(|| w["balance"].as_f64())
-                            .unwrap_or(0.0)
-                            > 0.0
-                    });
-                    ValidationCheck {
-                        name,
-                        ok: has_balance,
-                        detail: format!(
-                            "{} wallets, {}",
-                            ws.len(),
-                            if has_balance {
-                                "at least one has balance > 0"
-                            } else {
-                                "none have balance > 0"
-                            }
-                        ),
-                    }
-                }
-                None => ValidationCheck {
+        Ok(r) => r,
+        Err(e) => {
+            return ValidationCheck {
+                name,
+                ok: false,
+                detail: format!("Keymaster wallets unreachable: {e}"),
+            };
+        }
+    };
+
+    let data: serde_json::Value = resp.json().await.unwrap_or_default();
+    let wallets = data.as_array().or_else(|| data["wallets"].as_array());
+    let wallets = match wallets {
+        Some(ws) => ws,
+        None => {
+            return ValidationCheck {
+                name,
+                ok: false,
+                detail: "Could not parse wallet list from Keymaster".into(),
+            };
+        }
+    };
+
+    let total = wallets.len();
+
+    // Pick a fallback RPC URL for wallets whose chain isn't directly configured
+    // (e.g. wallet.chain = "base_sepolia" but only `base` has an RPC URL set in env).
+    let fallback_rpc = chain_registry
+        .available()
+        .into_iter()
+        .next()
+        .map(|c| c.rpc_url.clone());
+
+    for w in wallets {
+        let address = match w["address"].as_str() {
+            Some(a) if !a.is_empty() => a,
+            _ => continue,
+        };
+
+        let wallet_chain = w["chain"].as_str().unwrap_or("");
+        let rpc_url = chain_registry
+            .get(wallet_chain)
+            .map(|c| c.rpc_url.clone())
+            .filter(|u| !u.is_empty())
+            .or_else(|| fallback_rpc.clone());
+
+        let rpc_url = match rpc_url {
+            Some(u) => u,
+            None => continue,
+        };
+
+        match fetch_eth_balance(client, &rpc_url, address).await {
+            Ok(wei) if wei > 0 => {
+                return ValidationCheck {
                     name,
-                    ok: false,
-                    detail: "Could not parse wallet list from Keymaster".into(),
-                },
+                    ok: true,
+                    detail: format!(
+                        "{} wallets, {} has balance {} wei (chain={})",
+                        total, address, wei, wallet_chain
+                    ),
+                };
+            }
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::debug!(
+                    "[validate] eth_getBalance failed for {} on {}: {}",
+                    address,
+                    wallet_chain,
+                    e
+                );
+                continue;
             }
         }
-        Err(e) => ValidationCheck {
-            name,
-            ok: false,
-            detail: format!("Keymaster wallets unreachable: {e}"),
-        },
     }
+
+    ValidationCheck {
+        name,
+        ok: false,
+        detail: format!("{} wallets, none have balance > 0 (queried RPC directly)", total),
+    }
+}
+
+async fn fetch_eth_balance(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    address: &str,
+) -> anyhow::Result<u128> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_getBalance",
+        "params": [address, "latest"],
+        "id": 1
+    });
+
+    let resp = client
+        .post(rpc_url)
+        .json(&body)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
+
+    let data: serde_json::Value = resp.json().await?;
+    if let Some(err) = data.get("error") {
+        anyhow::bail!("rpc error: {}", err);
+    }
+    let hex = data["result"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing result"))?;
+    let wei = u128::from_str_radix(hex.trim_start_matches("0x"), 16)?;
+    Ok(wei)
 }
 
 async fn check_gas_estimate(
