@@ -347,6 +347,7 @@ impl TradeUpOrchestrator {
 
         // 7. Risk decision
         let risk_ctx = RiskContext {
+            chain: best.chain.clone(),
             opportunity: best.clone(),
             protocol_data: protocol_data.clone(),
         };
@@ -1025,6 +1026,7 @@ async fn run_position_loop(
             .unwrap_or_default();
 
         let risk_ctx = RiskContext {
+            chain: best.chain.clone(),
             opportunity: best.clone(),
             protocol_data,
         };

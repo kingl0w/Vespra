@@ -11,6 +11,15 @@ use crate::types::opportunity::Opportunity;
 pub struct RiskContext {
     pub opportunity: Opportunity,
     pub protocol_data: ProtocolData,
+    /// Chain the goal is targeting. Used to apply testnet-vs-mainnet gate rules.
+    /// Defaults to the opportunity's chain if not set explicitly by the caller.
+    #[serde(default)]
+    pub chain: String,
+}
+
+fn is_testnet_chain(chain: &str) -> bool {
+    let c = chain.to_lowercase();
+    c.contains("sepolia") || c.contains("testnet") || c.contains("goerli")
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,8 +39,15 @@ You MUST respond with valid JSON only.\n\n\
 Output schema: { \"protocol\": \"string\", \"chain\": \"string\", \
 \"score\": \"LOW|MEDIUM|HIGH|CRITICAL\", \"factors\": [...], \
 \"gate_pass\": true|false, \"recommendation\": \"string\" }\n\n\
-gate_pass = true ONLY when score is LOW or MEDIUM AND honeypot_risk is not HIGH.\n\
-Be conservative. When in doubt, rate higher risk.";
+GATE RULES (depend on chain type — the task message tells you whether the chain is TESTNET or MAINNET):\n\
+• MAINNET chains: gate_pass = true ONLY when score is LOW AND honeypot_risk is not HIGH. \
+Be conservative — when in doubt, rate higher risk.\n\
+• TESTNET chains (anything containing 'sepolia', 'testnet', or 'goerli'): \
+the goal here is to validate execution, not to police liquidity. \
+gate_pass = true for LOW or MEDIUM risk. \
+gate_pass = true for HIGH risk UNLESS the pool has zero TVL or is clearly a honeypot. \
+gate_pass = false only for CRITICAL risk or confirmed honeypots.\n\n\
+Always score risk honestly — only the gate_pass threshold differs between testnet and mainnet.";
 
 pub struct RiskAgent {
     llm: Arc<dyn AgentClient>,
@@ -44,10 +60,22 @@ impl RiskAgent {
 
     pub async fn assess(&self, ctx: &RiskContext) -> Result<RiskDecision> {
         let protocol_json = serde_json::to_string(&ctx.protocol_data)?;
+
+        // Prefer the goal's chain (set by the runner); fall back to the opportunity's.
+        let effective_chain = if ctx.chain.is_empty() {
+            ctx.opportunity.chain.clone()
+        } else {
+            ctx.chain.clone()
+        };
+        let testnet = is_testnet_chain(&effective_chain);
+        let chain_label = if testnet { "TESTNET" } else { "MAINNET" };
+
         let task = format!(
             "LIVE_PROTOCOL_DATA: {protocol_json}\n\n\
-             [TASK] Analyze risk for protocol {} pool {} on {}",
-            ctx.opportunity.protocol, ctx.opportunity.pool, ctx.opportunity.chain
+             [CHAIN_TYPE] {chain_label} (chain={effective_chain})\n\n\
+             [TASK] Analyze risk for protocol {} pool {} on {}. \
+             Apply the {chain_label} gate rules from the system prompt.",
+            ctx.opportunity.protocol, ctx.opportunity.pool, effective_chain
         );
 
         let raw = self.llm.call(SYSTEM_PROMPT, &task).await?;
@@ -60,7 +88,21 @@ impl RiskAgent {
         });
 
         let score = parse_risk_score(parsed.score.as_deref().unwrap_or("HIGH"));
-        let gate_pass = parse_gate_pass(&parsed.gate_pass);
+        let llm_gate_pass = parse_gate_pass(&parsed.gate_pass);
+
+        // Deterministic gate override per chain type. The LLM scores risk; we
+        // decide gate_pass from that score so testnet runs aren't stalled by an
+        // overly cautious LLM. Scoring logic itself is unchanged.
+        let gate_pass = if testnet {
+            match score {
+                RiskScore::Low | RiskScore::Medium => true,
+                RiskScore::High => ctx.opportunity.tvl_usd > 0,
+                RiskScore::Critical => false,
+            }
+        } else {
+            // Mainnet: strict LOW-only gate.
+            matches!(score, RiskScore::Low) && llm_gate_pass
+        };
 
         if gate_pass {
             Ok(RiskDecision::GatePass { score })
@@ -68,7 +110,9 @@ impl RiskAgent {
             let reason = parsed
                 .reason
                 .or(parsed.recommendation)
-                .unwrap_or_else(|| "gate_pass=false".into());
+                .unwrap_or_else(|| {
+                    format!("gate_pass=false ({chain_label}, score={score:?})")
+                });
             Ok(RiskDecision::GateBlock { score, reason })
         }
     }

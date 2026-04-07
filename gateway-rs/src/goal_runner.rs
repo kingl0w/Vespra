@@ -234,9 +234,11 @@ pub async fn run_goal_with_resume(
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
         }
 
+        let goal_chain = goal.chain.clone();
         let risk_decision = match with_retry(goal_id, "RISK", &deps, &cancel_rx, || {
             let deps = deps.clone();
             let best = best.clone();
+            let goal_chain = goal_chain.clone();
             async move {
                 let protocol_data = deps
                     .protocol_fetcher
@@ -244,6 +246,7 @@ pub async fn run_goal_with_resume(
                     .await
                     .unwrap_or_default();
                 let risk_ctx = RiskContext {
+                    chain: goal_chain,
                     opportunity: best,
                     protocol_data,
                 };

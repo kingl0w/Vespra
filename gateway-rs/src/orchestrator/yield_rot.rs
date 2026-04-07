@@ -181,6 +181,7 @@ impl YieldOrchestrator {
             .await
             .unwrap_or_default();
         let risk_ctx = RiskContext {
+            chain: best.chain.clone(),
             opportunity: crate::types::opportunity::Opportunity {
                 protocol: best.protocol.clone(),
                 pool: best.pool_id.clone(),
