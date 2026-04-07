@@ -832,6 +832,22 @@ function AgentResponse({ content, agent }) {
   if (agent === "launcher" && (parsed?.token_config || parsed?.deployment))
     return <LauncherView data={parsed} />;
 
+  // Universal fallback: any agent response that's just a {message: "..."} or
+  // {note: "..."} wrapper should render as prose, not raw JSON. The
+  // coordinator/sentinel/executor branches above handle the same case earlier
+  // so they keep their existing precedence; this catches every other agent.
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const prose = parsed.message || parsed.note;
+    if (prose && typeof prose === "string") {
+      return (
+        <div
+          class="text-sm text-vespra-text whitespace-pre-wrap"
+          dangerouslySetInnerHTML={{ __html: parseMarkdown(prose) }}
+        />
+      );
+    }
+  }
+
   return <GenericJsonView data={parsed} />;
 }
 
@@ -1179,20 +1195,16 @@ export function Agents() {
       const cmdText = `[${agent}] ${enrichedMsg}`;
       const res = await api.swarmCommand(cmdText, null, { signal: controller.signal });
       let content = res.reasoning || res.action_taken || res.response || JSON.stringify(res);
-      if (agent === 'sentinel' || agent === 'coordinator') {
-        try {
-          const parsed = JSON.parse(content);
-          if (parsed.message) content = parsed.message;
-          else if (parsed.note) content = parsed.note;
-        } catch(e) {}
-      }
-      if (agent === 'executor') {
-        try {
-          const parsed = JSON.parse(content);
-          if (parsed.note) content = parsed.note;
-          else if (parsed.message) content = parsed.message;
-        } catch(e) {}
-      }
+      // Unwrap {message|note: "..."} for every agent. The render layer
+      // (AgentResponse) does this too, but normalizing at write time keeps
+      // localStorage history clean and devtools inspection readable.
+      try {
+        const parsed = JSON.parse(content);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          const prose = parsed.message || parsed.note;
+          if (typeof prose === "string") content = prose;
+        }
+      } catch (_) { /* not JSON — leave content as-is */ }
       setMessages((m) => ({
         ...m,
         [agent]: [...(m[agent] || updated), { role: "agent", content, ts: Date.now() }],
