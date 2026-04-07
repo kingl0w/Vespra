@@ -39,6 +39,12 @@ pub struct GoalSpec {
     pub id: Uuid,
     pub raw_goal: String,
     pub wallet_label: String,
+    /// Resolved Keymaster wallet UUID. Set at goal creation by looking up
+    /// `wallet_label` against Keymaster's `/wallets` endpoint. `None` only on
+    /// goals created before this field existed; the runner will fail such
+    /// goals at execution time rather than guess.
+    #[serde(default)]
+    pub wallet_id: Option<String>,
     pub chain: String,
     #[serde(default)]
     pub capital_eth: f64,
@@ -88,6 +94,7 @@ mod tests {
             id: Uuid::new_v4(),
             raw_goal: "Grow 0.05 ETH on base_sepolia".to_string(),
             wallet_label: "base-test-1".to_string(),
+            wallet_id: Some("11111111-2222-3333-4444-555555555555".to_string()),
             chain: "base_sepolia".to_string(),
             capital_eth: 0.05,
             target_gain_pct: 10.0,

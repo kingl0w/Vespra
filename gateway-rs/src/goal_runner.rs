@@ -163,10 +163,18 @@ pub async fn run_goal_with_resume(
                     let _ = update_goal_step(&deps.redis, goal_id, "EXITING").await;
                     let token_out = goal_id.to_string();
                     let sell_amount = format!("{:.0}", goal.capital_eth * 1e18);
-                    let _ = execution_gate::execute_traced(
-                        &deps.executor, &deps.config, &deps.chain_registry,
-                        goal_id, &token_out, "WETH", &sell_amount, &goal.chain, deps.dry_run,
-                    ).await;
+                    match resolve_goal_wallet_uuid(&goal) {
+                        Ok(wallet_uuid) => {
+                            let _ = execution_gate::execute_traced(
+                                &deps.executor, &deps.config, &deps.chain_registry,
+                                wallet_uuid, &token_out, "WETH", &sell_amount, &goal.chain, deps.dry_run,
+                            ).await;
+                        }
+                        Err(e) => {
+                            fail_goal(&deps.redis, goal_id, &e).await;
+                            break;
+                        }
+                    }
                     continue; // go back to SCOUTING on next iteration
                 }
                 MonitorResult::NoExit => continue,
@@ -361,11 +369,19 @@ pub async fn run_goal_with_resume(
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
         }
 
+        let wallet_uuid = match resolve_goal_wallet_uuid(&goal) {
+            Ok(u) => u,
+            Err(e) => {
+                fail_goal(&deps.redis, goal_id, &e).await;
+                break;
+            }
+        };
+
         let buy_tx_status = execution_gate::execute_traced(
             &deps.executor,
             &deps.config,
             &deps.chain_registry,
-            goal_id,
+            wallet_uuid,
             &token_in,
             &token_out,
             &swap_amount_wei,
@@ -453,11 +469,21 @@ pub async fn run_goal_with_resume(
         }
 
         let sell_amount = format!("{:.0}", goal.capital_eth * 1e18);
+        // Reuse the wallet_uuid resolved earlier in this iteration; if for some
+        // reason the goal lost it (re-loaded between steps), fall back to a
+        // fresh resolution and fail-fast on error.
+        let sell_wallet_uuid = match resolve_goal_wallet_uuid(&goal) {
+            Ok(u) => u,
+            Err(e) => {
+                fail_goal(&deps.redis, goal_id, &e).await;
+                break;
+            }
+        };
         let sell_tx_status = execution_gate::execute_traced(
             &deps.executor,
             &deps.config,
             &deps.chain_registry,
-            goal_id,
+            sell_wallet_uuid,
             &token_out,
             "WETH",
             &sell_amount,
@@ -727,6 +753,20 @@ where
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
+
+/// Parse the goal's resolved Keymaster wallet UUID. Returns `Err` if the goal
+/// has no `wallet_id` (legacy goal created before this field existed) or the
+/// stored value isn't a valid UUID. Callers should `fail_goal` on `Err`.
+fn resolve_goal_wallet_uuid(goal: &crate::types::goals::GoalSpec) -> Result<Uuid, String> {
+    let raw = goal
+        .wallet_id
+        .as_ref()
+        .ok_or_else(|| format!(
+            "goal has no resolved wallet_id (label='{}'); recreate the goal so the wallet UUID is fetched from Keymaster",
+            goal.wallet_label
+        ))?;
+    Uuid::parse_str(raw).map_err(|e| format!("stored wallet_id '{raw}' is not a valid UUID: {e}"))
+}
 
 async fn fail_goal(redis: &redis::Client, goal_id: Uuid, error: &str) {
     tracing::error!("[goal {goal_id}] FAILED: {error}");

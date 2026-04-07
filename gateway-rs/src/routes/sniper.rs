@@ -241,6 +241,7 @@ async fn alchemy_webhook(
                         "Sniper auto-entry: {token_pair} pool {pool_address}"
                     ),
                     wallet_label: state.config.default_custody.clone(),
+                    wallet_id: None, // resolved lazily by runner; sniper auto-entries pre-date this field
                     chain: chain.clone(),
                     capital_eth: position_eth,
                     target_gain_pct: target_gain,

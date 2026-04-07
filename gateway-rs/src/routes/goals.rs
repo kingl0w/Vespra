@@ -109,6 +109,49 @@ pub async fn list_goals_by_status(
     Ok(all.into_iter().filter(|g| g.status == status).collect())
 }
 
+// ── Wallet label → UUID resolution ─────────────────────────────
+
+/// Look up a wallet by its label via Keymaster's `/wallets` endpoint.
+/// Returns the wallet's UUID (as a string) on a case-insensitive label match.
+async fn resolve_wallet_id(
+    keymaster_url: &str,
+    keymaster_token: &str,
+    wallet_label: &str,
+) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    let resp = client
+        .get(format!("{keymaster_url}/wallets"))
+        .header("Authorization", format!("Bearer {keymaster_token}"))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("keymaster /wallets returned {}", resp.status());
+    }
+
+    let data: serde_json::Value = resp.json().await?;
+    let wallets = data
+        .as_array()
+        .or_else(|| data["wallets"].as_array())
+        .ok_or_else(|| anyhow::anyhow!("keymaster /wallets returned unexpected shape"))?;
+
+    let label_lower = wallet_label.to_lowercase();
+    for w in wallets {
+        let label = w["label"].as_str().unwrap_or("");
+        if label.to_lowercase() == label_lower {
+            let id = w["id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("wallet {label} has no id field"))?;
+            return Ok(id.to_string());
+        }
+    }
+
+    anyhow::bail!("no wallet with label '{wallet_label}' found in Keymaster")
+}
+
 // ── Coordinator LLM parsing ─────────────────────────────────────
 
 const GOAL_PARSE_PROMPT: &str = "\
@@ -159,6 +202,7 @@ async fn parse_goal_via_llm(
         id: Uuid::new_v4(),
         raw_goal: raw_goal.to_string(),
         wallet_label: wallet_label.to_string(),
+        wallet_id: None, // resolved by caller after this returns
         chain: val
             .get("chain")
             .and_then(|v| v.as_str())
@@ -242,7 +286,28 @@ async fn create_goal(
         }
     }
 
-    let goal = match parse_goal_via_llm(
+    // Resolve wallet_label → wallet UUID via Keymaster before doing any LLM work,
+    // so callers get a fast, clear 400 if the label doesn't exist.
+    let wallet_id = match resolve_wallet_id(
+        &state.config.keymaster_url,
+        &state.config.keymaster_token,
+        &body.wallet_label,
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!("wallet_label resolution failed: {e}")
+                })),
+            );
+        }
+    };
+
+    let mut goal = match parse_goal_via_llm(
         state.llm.as_ref(),
         &body.raw_goal,
         &body.wallet_label,
@@ -260,6 +325,7 @@ async fn create_goal(
             );
         }
     };
+    goal.wallet_id = Some(wallet_id);
 
     if let Err(e) = save_goal(&state.redis, &goal).await {
         return (
@@ -272,7 +338,6 @@ async fn create_goal(
     }
 
     // Set status to Running and spawn the GoalRunner
-    let mut goal = goal;
     goal.status = GoalStatus::Running;
     if let Err(e) = save_goal(&state.redis, &goal).await {
         return (
@@ -451,6 +516,7 @@ mod tests {
             id: Uuid::new_v4(),
             raw_goal: "test goal".into(),
             wallet_label: wallet.into(),
+            wallet_id: None,
             chain: "base".into(),
             capital_eth: capital,
             target_gain_pct: 10.0,
@@ -559,6 +625,7 @@ mod tests {
             id: Uuid::new_v4(),
             raw_goal: "Test goal for redis".to_string(),
             wallet_label: "test-wallet".to_string(),
+            wallet_id: None,
             chain: "base_sepolia".to_string(),
             capital_eth: 0.1,
             target_gain_pct: 15.0,
