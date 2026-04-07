@@ -192,7 +192,7 @@ pub async fn run_goal_with_resume(
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
         }
 
-        let best = match with_retry(goal_id, "SCOUTING", &deps, &cancel_rx, || {
+        let scout_result = with_retry(goal_id, "SCOUTING", &deps, &cancel_rx, || {
             let deps = deps.clone();
             let chains = chains.clone();
             async move {
@@ -223,12 +223,41 @@ pub async fn run_goal_with_resume(
                 }
             }
         })
-        .await
-        {
+        .await;
+
+        let best = match scout_result {
             Ok(opp) => opp,
             Err(e) => {
-                fail_goal(&deps.redis, goal_id, &format!("SCOUTING failed: {e}")).await;
-                break;
+                // TODO(VES-92): Replace this with a real testnet pool index.
+                // DefiLlama indexes only fake/junk tokens for Base Sepolia
+                // (ROBO, POLYCLAUDE, ASCV, …) so Scout legitimately finds no
+                // swappable pools and the pipeline can't be exercised end-to-end.
+                // As an interim, on testnet chains we inject a hardcoded
+                // WETH→USDC opportunity so the rest of the runner (RISK,
+                // TRADER, /swap) actually fires. The pool symbol "WETH-USDC"
+                // is enough for the executor's symbol→address resolver to pick
+                // 0x4200… (WETH) and 0x036C… (USDC) on Base Sepolia.
+                let chain_lower = goal.chain.to_lowercase();
+                let is_testnet = chain_lower.contains("sepolia")
+                    || chain_lower.contains("testnet")
+                    || chain_lower.contains("goerli");
+                if is_testnet {
+                    tracing::info!(
+                        "[goal {goal_id}] [scout] no real pools on testnet — injecting fallback WETH/USDC opportunity (scout error: {e})"
+                    );
+                    crate::types::opportunity::Opportunity {
+                        protocol: "uniswap-v3".to_string(),
+                        pool: "WETH-USDC".to_string(),
+                        chain: goal.chain.clone(),
+                        apy: 5.0,
+                        tvl_usd: 1_000_000,
+                        momentum_score: 1.0,
+                        ..Default::default()
+                    }
+                } else {
+                    fail_goal(&deps.redis, goal_id, &format!("SCOUTING failed: {e}")).await;
+                    break;
+                }
             }
         };
 
@@ -818,20 +847,38 @@ where
 /// out fake testnet tokens (e.g. LIQTEST, VELVET, VFY) before submitting a
 /// swap to Keymaster, which would otherwise reject calldata built from a
 /// non-address string.
+///
+/// **Base Sepolia has very limited real token deployments.** Most yield-pool
+/// data sources surface a long tail of fake testnet tokens that have no real
+/// ERC-20 contract and no liquidity. Only the addresses below are known-good
+/// and reachable via Uniswap V3 routes; everything else returns `None` so the
+/// goal runner re-scouts instead of submitting a doomed swap.
 fn known_token_address(symbol: &str, chain: &str) -> Option<String> {
     let s = symbol.trim().to_uppercase();
     let chain_lower = chain.to_lowercase();
-    // Base + Base Sepolia share these canonical addresses for the bridged
-    // tokens we care about. Extend per-chain when other chains come online.
-    if !chain_lower.contains("base") {
-        return None;
+
+    if chain_lower == "base_sepolia" {
+        return match s.as_str() {
+            "WETH" | "ETH" => Some("0x4200000000000000000000000000000000000006".into()),
+            "USDC" => Some("0x036CbD53842c5426634e7929541eC2318f3dCF7e".into()),
+            "WBTC" => Some("0x0555E30da8f98308EdB960aa94C0Db47230d2B9C".into()),
+            // CBBTC, USDBC, DAI etc. don't have real Base Sepolia deployments.
+            _ => None,
+        };
     }
-    match s.as_str() {
-        "WETH" | "ETH" => Some("0x4200000000000000000000000000000000000006".to_string()),
-        "USDC" => Some("0x036CbD53842c5426634e7929541eC2318f3dCF7e".to_string()),
-        "USDBC" => Some("0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA".to_string()),
-        _ => None,
+
+    if chain_lower == "base" {
+        return match s.as_str() {
+            "WETH" | "ETH" => Some("0x4200000000000000000000000000000000000006".into()),
+            "USDC" => Some("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".into()),
+            "USDBC" => Some("0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA".into()),
+            "CBBTC" => Some("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf".into()),
+            "DAI" => Some("0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb".into()),
+            _ => None,
+        };
     }
+
+    None
 }
 
 /// Resolve a token field that may be a plain symbol ("WETH"), a pool pair

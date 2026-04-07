@@ -25,6 +25,44 @@ Output schema: { \"opportunities\": [ { \"protocol\": \"string\", \"pool_id\": \
 Rules: No transactions, no keys. Analyze LIVE_POOL_DATA only. \
 Return max 5 opportunities sorted by apy descending.";
 
+/// Symbols Scout is allowed to recommend on testnet chains. Anything else
+/// has no real ERC-20 contract on Base Sepolia and is not swappable.
+const TESTNET_ALLOWED_SYMBOLS: &[&str] = &["WETH", "ETH", "USDC", "USDBC", "DAI", "WBTC"];
+
+const TESTNET_PROMPT_SUFFIX: &str = "\n\n\
+TESTNET CONSTRAINT: At least one of the chains in this request is a testnet \
+(name contains 'sepolia' or 'testnet'). On testnet you MUST only recommend pools \
+where BOTH tokens in the pair are one of: WETH, ETH, USDC, USDBC, DAI, WBTC. \
+Ignore every other pool regardless of how high the APY looks — most testnet pools \
+contain fake tokens with no real ERC-20 contract and no liquidity, so they cannot \
+be swapped. If no pool in LIVE_POOL_DATA passes this filter, return an empty \
+opportunities array rather than recommending unswappable pools.";
+
+fn chains_include_testnet(chains: &[String]) -> bool {
+    chains.iter().any(|c| {
+        let l = c.to_lowercase();
+        l.contains("sepolia") || l.contains("testnet") || l.contains("goerli")
+    })
+}
+
+/// Check whether a pool symbol like "WETH-USDC" or "USDC-VFY" only references
+/// tokens in the testnet allowlist. Pools with no recognizable separator are
+/// rejected (we can't tell what they contain).
+fn pool_symbol_is_testnet_safe(symbol: &str) -> bool {
+    let parts: Vec<&str> = symbol
+        .split(|c: char| c == '-' || c == '/' || c == ':')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return false;
+    }
+    parts.iter().all(|p| {
+        let upper = p.to_uppercase();
+        TESTNET_ALLOWED_SYMBOLS.iter().any(|allowed| *allowed == upper)
+    })
+}
+
 /// Expected shape of each opportunity in the LLM response.
 #[derive(serde::Deserialize)]
 #[allow(dead_code)]
@@ -131,10 +169,15 @@ impl ScoutAgent {
         // Build live yield context if registry is available
         let yield_context = self.build_yield_context(&ctx.chains).await;
 
-        let system = match &yield_context {
+        let testnet_run = chains_include_testnet(&ctx.chains);
+
+        let mut system = match &yield_context {
             Some(yc) => format!("{SYSTEM_PROMPT}\n\n{yc}"),
             None => SYSTEM_PROMPT.to_string(),
         };
+        if testnet_run {
+            system.push_str(TESTNET_PROMPT_SUFFIX);
+        }
 
         let task = format!(
             "LIVE_POOL_DATA: {pools_json}\n\n\
@@ -188,9 +231,43 @@ impl ScoutAgent {
             }
         };
 
+        // Deterministic safety net: on testnet runs, drop any opportunity whose
+        // pool symbol references tokens outside the testnet allowlist. This is
+        // belt-and-braces — the prompt asks the LLM not to surface these, but
+        // LLMs are unreliable and the goal runner will otherwise loop forever
+        // re-scouting unswappable pools.
+        let opps: Vec<_> = if testnet_run {
+            let before = opps.len();
+            let filtered: Vec<_> = opps
+                .into_iter()
+                .filter(|o| {
+                    let safe = pool_symbol_is_testnet_safe(&o.pool);
+                    if !safe {
+                        tracing::info!(
+                            "[scout] testnet filter dropped pool '{}' (protocol={}) — contains unknown tokens",
+                            o.pool, o.protocol
+                        );
+                    }
+                    safe
+                })
+                .collect();
+            tracing::info!(
+                "[scout] testnet filter: {} → {} opportunities",
+                before,
+                filtered.len()
+            );
+            filtered
+        } else {
+            opps
+        };
+
         if opps.is_empty() {
             Ok(ScoutDecision::NoOpportunities {
-                reason: "no valid opportunities in LLM response".into(),
+                reason: if testnet_run {
+                    "no testnet-swappable pools (only WETH/USDC/USDBC/DAI/WBTC pairs allowed)".into()
+                } else {
+                    "no valid opportunities in LLM response".into()
+                },
             })
         } else {
             Ok(ScoutDecision::Opportunities(opps))

@@ -3,18 +3,23 @@ import { api } from "../lib/api.js";
 import { Card, Button, Badge, Loader } from "../components/Card.jsx";
 
 // ── Status helpers ──────────────────────────────────────────
+//
+// API returns status as lowercase strings ("running", "failed", "completed",
+// "paused", "cancelled", "pending"). Keep the config keyed by those exact
+// values so badge/border lookups don't silently fall through to "Pending".
 
 const STATUS_CFG = {
-  Pending:    { variant: "default", label: "Pending" },
-  Running:    { variant: "green",   label: "Running",   pulse: true },
-  Paused:     { variant: "yellow",  label: "Paused" },
-  Cancelled:  { variant: "red",     label: "Cancelled" },
-  Completed:  { variant: "accent",  label: "Completed" },
-  Failed:     { variant: "red",     label: "Failed" },
+  pending:    { variant: "default", label: "Pending" },
+  running:    { variant: "green",   label: "Running",   pulse: true },
+  paused:     { variant: "yellow",  label: "Paused" },
+  cancelled:  { variant: "red",     label: "Cancelled" },
+  completed:  { variant: "accent",  label: "Completed" },
+  failed:     { variant: "red",     label: "Failed" },
 };
 
 function StatusBadge({ status }) {
-  const cfg = STATUS_CFG[status] || STATUS_CFG.Pending;
+  const key = (status || "").toLowerCase();
+  const cfg = STATUS_CFG[key] || STATUS_CFG.pending;
   return (
     <span class={cfg.pulse ? "animate-pulse" : ""}>
       <Badge variant={cfg.variant}>{cfg.label}</Badge>
@@ -23,8 +28,9 @@ function StatusBadge({ status }) {
 }
 
 function rowBorder(status) {
-  if (status === "Running") return "border-l-2 border-l-vespra-green";
-  if (status === "Failed")  return "border-l-2 border-l-vespra-red";
+  const key = (status || "").toLowerCase();
+  if (key === "running") return "border-l-2 border-l-vespra-green";
+  if (key === "failed")  return "border-l-2 border-l-vespra-red";
   return "border-l-2 border-l-transparent";
 }
 
@@ -119,15 +125,19 @@ function GoalRow({ goal, onAction }) {
     acting.current = false;
   };
 
-  const canPause  = goal.status === "Running";
-  const canResume = goal.status === "Paused";
-  const canCancel = goal.status === "Running" || goal.status === "Paused";
+  const statusKey = (goal.status || "").toLowerCase();
+  const canPause  = statusKey === "running";
+  const canResume = statusKey === "paused";
+  const canCancel = statusKey === "running" || statusKey === "paused";
+
+  // API returns the natural-language goal under `raw_goal`.
+  const goalText = goal.raw_goal || "";
 
   return (
     <tr class={`${rowBorder(goal.status)} hover:bg-vespra-border/30 transition-colors`}>
       <td class="px-3 py-2 text-sm max-w-[240px]">
-        <span title={goal.goal}>
-          {goal.goal?.length > 60 ? goal.goal.slice(0, 60) + "..." : goal.goal}
+        <span title={goalText}>
+          {goalText.length > 40 ? goalText.slice(0, 40) + "…" : goalText}
         </span>
       </td>
       <td class="px-3 py-2"><StatusBadge status={goal.status} /></td>
@@ -175,7 +185,10 @@ export function Goals() {
 
   // Auto-refresh when any goal is Running or Paused
   useEffect(() => {
-    const needsPoll = goals?.some((g) => g.status === "Running" || g.status === "Paused");
+    const needsPoll = goals?.some((g) => {
+      const k = (g.status || "").toLowerCase();
+      return k === "running" || k === "paused";
+    });
     if (needsPoll) {
       intervalRef.current = setInterval(fetchGoals, 10000);
     }

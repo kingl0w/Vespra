@@ -136,9 +136,13 @@ impl SentinelAgent {
         }
         fn default_hold() -> String { "hold".into() }
 
-        let parsed: RawAssessment = serde_json::from_str(&raw).unwrap_or(RawAssessment {
-            action: "hold".into(),
-            reasoning: format!("parse_error: {}", &raw[..raw.len().min(200)]),
+        let parsed: RawAssessment = serde_json::from_str(&raw).unwrap_or_else(|_| {
+            // Truncate by chars (not bytes) so multibyte UTF-8 like ≥ doesn't panic.
+            let snippet: String = raw.chars().take(200).collect();
+            RawAssessment {
+                action: "hold".into(),
+                reasoning: format!("parse_error: {snippet}"),
+            }
         });
 
         Ok(SentinelAssessment {
