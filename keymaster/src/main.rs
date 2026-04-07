@@ -6,6 +6,7 @@ mod keystore;
 mod routes;
 mod rpc;
 mod state;
+mod swap;
 
 use axum::{
     middleware,
@@ -92,6 +93,7 @@ async fn main() {
         .route("/tx/send", post(routes::send_native))
         .route("/tx/send_tx", post(routes::send_tx_with_data))
         .route("/tx/sweep", post(routes::sweep_to_safe))
+        .route("/swap", post(routes::swap_handler))
         .route("/dispatch", post(routes::dispatch))
         .route("/settings/safes", get(routes::get_safes))
         .route("/settings/safes/:chain", put(routes::set_safe))

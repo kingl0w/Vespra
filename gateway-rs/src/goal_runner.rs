@@ -391,6 +391,19 @@ pub async fn run_goal_with_resume(
                 continue;
             }
         };
+        // Guard against degenerate same-token swaps. This happens when a pool
+        // symbol like "WETH-CBBTC" pairs WETH with an unknown token: the
+        // resolver falls back to WETH for both sides since CBBTC has no entry
+        // in the known-token map. The downstream swap would either revert or
+        // be a no-op, so re-scout instead.
+        if token_in.eq_ignore_ascii_case(&token_out) {
+            tracing::warn!(
+                "[goal {goal_id}] skipping pool: token_in == token_out after resolution ({}); pool symbol likely contains an unknown token paired with WETH — re-scouting",
+                token_in
+            );
+            sleep_interruptible(&mut cancel_rx, 30).await;
+            continue;
+        }
         tracing::info!(
             "[goal {goal_id}] resolved swap addresses: in={} out={}",
             token_in, token_out

@@ -15,6 +15,7 @@ use crate::error::{AppError, AppResult};
 use crate::keystore::{WalletInfo, WalletRecord};
 use crate::rpc;
 use crate::state::AppState;
+use crate::swap;
 
 // ─── Treasury Fee Constants ──────────────────────────────────────
 
@@ -516,6 +517,127 @@ pub async fn send_tx_with_data(
                 "send_tx", req.to.as_deref().unwrap_or("deploy"), "0",
                 "failed", Some(&e.to_string()),
             )?;
+            Err(e)
+        }
+    }
+}
+
+// ─── Swap (wrap → approve → exactInputSingle) ────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct SwapRequest {
+    pub wallet_id: String,
+    pub token_in: String,       // "ETH", or 0x... ERC-20 address
+    pub token_out: String,      // 0x... ERC-20 address
+    pub amount_in_wei: String,  // u256 as decimal string
+    pub chain: Option<String>,  // optional override; default = wallet.chain
+}
+
+pub async fn swap_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SwapRequest>,
+) -> AppResult<Json<Value>> {
+    let wallet = state.keystore.get_wallet(&req.wallet_id)?;
+    if !wallet.active {
+        return Err(AppError::BadRequest("Wallet is deactivated".into()));
+    }
+
+    let chain_name = req.chain.as_deref().unwrap_or(&wallet.chain);
+    let chain = state.config.get_chain(chain_name)
+        .ok_or_else(|| AppError::ChainNotConfigured(chain_name.to_string()))?;
+
+    // Parse amount_in_wei as a U256 (decimal string).
+    let amount_in_wei = U256::from_str_radix(req.amount_in_wei.trim(), 10)
+        .map_err(|e| AppError::BadRequest(format!("Invalid amount_in_wei: {e}")))?;
+    if amount_in_wei.is_zero() {
+        return Err(AppError::BadRequest("amount_in_wei must be > 0".into()));
+    }
+
+    // ── Cap enforcement (mirrors send_native) ───────────────────────
+    let cap_wei_str = &wallet.cap_wei;
+    if cap_wei_str != "0" && !cap_wei_str.is_empty() {
+        let cap = cap_wei_str.parse::<u128>()
+            .map_err(|_| AppError::Internal(format!("Invalid cap_wei in DB: {cap_wei_str}")))?;
+        let cap_u256 = U256::from(cap);
+        let total_sent = state.keystore.total_sent_wei(&req.wallet_id)?;
+        let remaining = if cap_u256 > total_sent { cap_u256 - total_sent } else { U256::ZERO };
+        if amount_in_wei > remaining {
+            return Err(AppError::CapExceeded {
+                balance: amount_in_wei.to_string(),
+                cap: remaining.to_string(),
+            });
+        }
+    }
+
+    tracing::info!(
+        wallet_id = %req.wallet_id,
+        token_in = %req.token_in,
+        token_out = %req.token_out,
+        amount_in_wei = %req.amount_in_wei,
+        chain = %chain_name,
+        "[swap] request received"
+    );
+
+    let result = swap::execute_swap(
+        chain_name,
+        chain,
+        &wallet,
+        &state.master_password,
+        &req.token_in,
+        &req.token_out,
+        amount_in_wei,
+    )
+    .await;
+
+    match result {
+        Ok(r) => {
+            // Audit-log the final swap tx; wrap/approve are logged by step.
+            let _ = state.keystore.log_tx(
+                &req.wallet_id,
+                chain_name,
+                Some(&r.swap_tx_hash),
+                "swap",
+                &req.token_out,
+                &req.amount_in_wei,
+                "confirmed",
+                None,
+            );
+            tracing::info!(
+                wallet_id = %req.wallet_id,
+                swap_tx_hash = %r.swap_tx_hash,
+                wrap_tx_hash = ?r.wrap_tx_hash,
+                approve_tx_hash = ?r.approve_tx_hash,
+                "[swap] completed"
+            );
+            Ok(Json(json!({
+                "status": "ok",
+                "tx_hash": r.swap_tx_hash,
+                "wrap_tx_hash": r.wrap_tx_hash,
+                "approve_tx_hash": r.approve_tx_hash,
+                "from": wallet.address,
+                "token_in": req.token_in,
+                "token_out": req.token_out,
+                "amount_in_wei": req.amount_in_wei,
+                "chain": chain_name,
+            })))
+        }
+        Err(e) => {
+            let err_msg = e.to_string();
+            tracing::error!(
+                wallet_id = %req.wallet_id,
+                error = %err_msg,
+                "[swap] failed"
+            );
+            let _ = state.keystore.log_tx(
+                &req.wallet_id,
+                chain_name,
+                None,
+                "swap",
+                &req.token_out,
+                &req.amount_in_wei,
+                "failed",
+                Some(&err_msg),
+            );
             Err(e)
         }
     }

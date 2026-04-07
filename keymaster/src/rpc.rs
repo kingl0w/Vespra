@@ -53,6 +53,71 @@ pub async fn send_tx(
     Ok(format!("{:?}", pending.tx_hash()))
 }
 
+/// Send a transaction and wait for its receipt (1 confirmation). Returns the
+/// tx hash on success. Use this when subsequent transactions depend on the
+/// state changes from this one (e.g. wrap → approve → swap).
+pub async fn send_tx_and_wait(
+    chain: &ChainConfig,
+    private_key_bytes: &[u8],
+    to: Option<&str>,
+    value: U256,
+    data: Option<Vec<u8>>,
+) -> AppResult<String> {
+    use alloy::primitives::Bytes;
+
+    let signer = PrivateKeySigner::from_slice(private_key_bytes)
+        .map_err(|e| AppError::Transaction(format!("Invalid private key: {e}")))?;
+    let wallet = EthereumWallet::from(signer);
+
+    let provider = ProviderBuilder::new()
+        .with_recommended_fillers()
+        .wallet(wallet)
+        .on_http(chain.rpc_url.parse().map_err(|e| AppError::Rpc(format!("Invalid RPC URL: {e}")))?);
+
+    let mut tx = TransactionRequest::default().value(value);
+    if let Some(to_str) = to {
+        let to_addr = Address::from_str(to_str)
+            .map_err(|e| AppError::BadRequest(format!("Invalid to address: {e}")))?;
+        tx = tx.to(to_addr);
+    }
+    if let Some(calldata) = data {
+        tx = tx.input(Bytes::from(calldata).into());
+    }
+
+    let pending = provider.send_transaction(tx).await
+        .map_err(|e| AppError::Transaction(format!("Transaction failed: {e}")))?;
+    let receipt = pending
+        .with_required_confirmations(1)
+        .with_timeout(Some(std::time::Duration::from_secs(60)))
+        .get_receipt()
+        .await
+        .map_err(|e| AppError::Transaction(format!("Receipt wait failed: {e}")))?;
+
+    if !receipt.status() {
+        return Err(AppError::Transaction(format!(
+            "Transaction reverted on-chain: tx_hash={:?}",
+            receipt.transaction_hash
+        )));
+    }
+    Ok(format!("{:?}", receipt.transaction_hash))
+}
+
+/// Low-level eth_call: returns the raw return data from a contract view.
+pub async fn eth_call(
+    chain: &ChainConfig,
+    to: Address,
+    data: Vec<u8>,
+) -> AppResult<alloy::primitives::Bytes> {
+    use alloy::primitives::Bytes;
+    let provider = ProviderBuilder::new()
+        .on_http(chain.rpc_url.parse().map_err(|e| AppError::Rpc(format!("Invalid RPC URL: {e}")))?);
+    let tx = TransactionRequest::default()
+        .to(to)
+        .input(Bytes::from(data).into());
+    provider.call(&tx).await
+        .map_err(|e| AppError::Rpc(format!("eth_call failed: {e}")))
+}
+
 pub async fn send_native(
     chain: &ChainConfig,
     private_key_bytes: &[u8],

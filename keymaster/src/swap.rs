@@ -1,0 +1,300 @@
+//! Swap orchestration: ETH wrap → ERC-20 approve → Uniswap V3 exactInputSingle.
+//!
+//! Keymaster previously only knew how to send native ETH and arbitrary calldata.
+//! This module owns the contract-call ABI encoding and the multi-step swap
+//! choreography so the gateway executor can issue a single `/swap` call and
+//! get back a tx hash.
+
+use alloy::primitives::{Address, U256};
+use alloy::sol;
+use alloy::sol_types::SolCall;
+use std::str::FromStr;
+
+use crate::config::ChainConfig;
+use crate::crypto;
+use crate::error::{AppError, AppResult};
+use crate::keystore::WalletRecord;
+use crate::rpc;
+
+// ─── Solidity bindings ─────────────────────────────────────────────
+
+sol! {
+    interface IWETH9 {
+        function deposit() external payable;
+    }
+
+    interface IERC20 {
+        function approve(address spender, uint256 amount) external returns (bool);
+        function allowance(address owner, address spender) external view returns (uint256);
+        function balanceOf(address owner) external view returns (uint256);
+    }
+
+    interface ISwapRouter02 {
+        struct ExactInputSingleParams {
+            address tokenIn;
+            address tokenOut;
+            uint24 fee;
+            address recipient;
+            uint256 amountIn;
+            uint256 amountOutMinimum;
+            uint160 sqrtPriceLimitX96;
+        }
+
+        function exactInputSingle(ExactInputSingleParams calldata params)
+            external payable returns (uint256 amountOut);
+    }
+}
+
+// ─── Per-chain swap config ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy)]
+pub struct ChainSwapConfig {
+    pub router: Address,
+    pub weth: Address,
+}
+
+/// Hardcoded router/WETH addresses per chain. Returns `None` for chains
+/// where the swap path isn't wired up yet.
+pub fn swap_config(chain_name: &str) -> Option<ChainSwapConfig> {
+    // Both Base and Base Sepolia use the same canonical WETH9 address.
+    let weth = Address::from_str("0x4200000000000000000000000000000000000006").ok()?;
+    match chain_name {
+        "base_sepolia" => Some(ChainSwapConfig {
+            router: Address::from_str("0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4").ok()?,
+            weth,
+        }),
+        "base" => Some(ChainSwapConfig {
+            router: Address::from_str("0x2626664c2603336E57B271c5C0b26F421741e481").ok()?,
+            weth,
+        }),
+        _ => None,
+    }
+}
+
+// ─── ABI encode helpers ────────────────────────────────────────────
+
+pub fn encode_weth_deposit() -> Vec<u8> {
+    IWETH9::depositCall {}.abi_encode()
+}
+
+pub fn encode_erc20_approve(spender: Address, amount: U256) -> Vec<u8> {
+    IERC20::approveCall { spender, amount }.abi_encode()
+}
+
+pub fn encode_exact_input_single(
+    token_in: Address,
+    token_out: Address,
+    recipient: Address,
+    amount_in: U256,
+) -> Vec<u8> {
+    let params = ISwapRouter02::ExactInputSingleParams {
+        tokenIn: token_in,
+        tokenOut: token_out,
+        fee: alloy::primitives::Uint::<24, 1>::from(3000u32),
+        recipient,
+        amountIn: amount_in,
+        amountOutMinimum: U256::ZERO,
+        sqrtPriceLimitX96: alloy::primitives::U160::ZERO,
+    };
+    ISwapRouter02::exactInputSingleCall { params }.abi_encode()
+}
+
+// ─── ERC-20 read helpers ───────────────────────────────────────────
+
+pub async fn read_balance(
+    chain: &ChainConfig,
+    token: Address,
+    owner: Address,
+) -> AppResult<U256> {
+    let data = IERC20::balanceOfCall { owner }.abi_encode();
+    let raw = rpc::eth_call(chain, token, data).await?;
+    let decoded = IERC20::balanceOfCall::abi_decode_returns(&raw, true)
+        .map_err(|e| AppError::Rpc(format!("balanceOf decode failed: {e}")))?;
+    Ok(decoded._0)
+}
+
+pub async fn read_allowance(
+    chain: &ChainConfig,
+    token: Address,
+    owner: Address,
+    spender: Address,
+) -> AppResult<U256> {
+    let data = IERC20::allowanceCall { owner, spender }.abi_encode();
+    let raw = rpc::eth_call(chain, token, data).await?;
+    let decoded = IERC20::allowanceCall::abi_decode_returns(&raw, true)
+        .map_err(|e| AppError::Rpc(format!("allowance decode failed: {e}")))?;
+    Ok(decoded._0)
+}
+
+// ─── Swap orchestration ────────────────────────────────────────────
+
+/// Outcome of a successful `/swap` request. Hashes are populated only for the
+/// steps that actually ran (wrap and approve are skipped when not needed).
+pub struct SwapResult {
+    pub swap_tx_hash: String,
+    pub wrap_tx_hash: Option<String>,
+    pub approve_tx_hash: Option<String>,
+}
+
+/// Orchestrate ETH wrap → approve → exactInputSingle. Each step waits for
+/// receipt before the next so subsequent calls observe the new state.
+///
+/// `token_in_input` accepts `"ETH"` (case-insensitive) as a synonym for the
+/// chain's WETH address; in that case the wallet's native ETH balance is
+/// wrapped first.
+pub async fn execute_swap(
+    chain_name: &str,
+    chain: &ChainConfig,
+    wallet: &WalletRecord,
+    master_password: &str,
+    token_in_input: &str,
+    token_out: &str,
+    amount_in_wei: U256,
+) -> AppResult<SwapResult> {
+    let cfg = swap_config(chain_name).ok_or_else(|| {
+        AppError::BadRequest(format!("Swap not configured for chain '{chain_name}'"))
+    })?;
+
+    // Resolve token_in: "ETH" → WETH address. Caller is allowed to pass either
+    // the literal string "ETH" or the WETH address directly.
+    let token_in_lower = token_in_input.trim().to_lowercase();
+    let is_eth_input = token_in_lower == "eth";
+    let token_in: Address = if is_eth_input {
+        cfg.weth
+    } else {
+        Address::from_str(token_in_input)
+            .map_err(|e| AppError::BadRequest(format!("Invalid token_in address: {e}")))?
+    };
+    let token_out_addr = Address::from_str(token_out)
+        .map_err(|e| AppError::BadRequest(format!("Invalid token_out address: {e}")))?;
+    let wallet_addr = Address::from_str(&wallet.address)
+        .map_err(|e| AppError::BadRequest(format!("Invalid wallet address: {e}")))?;
+
+    if token_in == token_out_addr {
+        return Err(AppError::BadRequest(
+            "token_in and token_out must differ".into(),
+        ));
+    }
+
+    // Decrypt the private key once and reuse it across all sub-transactions.
+    let mut pk_bytes = crypto::decrypt_key(&wallet.encrypted_key, master_password)?;
+    let result = execute_swap_inner(
+        chain,
+        &pk_bytes,
+        cfg,
+        wallet_addr,
+        token_in,
+        token_out_addr,
+        amount_in_wei,
+        is_eth_input || token_in == cfg.weth,
+    )
+    .await;
+    crypto::zeroize_bytes(&mut pk_bytes);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_swap_inner(
+    chain: &ChainConfig,
+    pk_bytes: &[u8],
+    cfg: ChainSwapConfig,
+    wallet_addr: Address,
+    token_in: Address,
+    token_out: Address,
+    amount_in_wei: U256,
+    token_in_is_weth: bool,
+) -> AppResult<SwapResult> {
+    let mut wrap_tx_hash: Option<String> = None;
+    let mut approve_tx_hash: Option<String> = None;
+
+    // ── Step 1: wrap ETH → WETH if needed ────────────────────────────
+    // Only attempt the wrap if token_in is WETH and the wallet's existing
+    // WETH balance is below amount_in_wei. Skips entirely for non-WETH inputs.
+    if token_in_is_weth {
+        let weth_balance = read_balance(chain, cfg.weth, wallet_addr).await?;
+        if weth_balance < amount_in_wei {
+            let needed = amount_in_wei - weth_balance;
+            tracing::info!(
+                wallet = %format!("{wallet_addr:?}"),
+                weth_balance = %weth_balance,
+                wrap_amount = %needed,
+                "[swap] wrapping ETH → WETH"
+            );
+            let data = encode_weth_deposit();
+            let hash = rpc::send_tx_and_wait(
+                chain,
+                pk_bytes,
+                Some(&format!("{:?}", cfg.weth)),
+                needed,
+                Some(data),
+            )
+            .await
+            .map_err(|e| AppError::Transaction(format!("wrap step failed: {e}")))?;
+            tracing::info!(tx_hash = %hash, "[swap] wrap confirmed");
+            wrap_tx_hash = Some(hash);
+        } else {
+            tracing::info!(
+                wallet = %format!("{wallet_addr:?}"),
+                weth_balance = %weth_balance,
+                "[swap] sufficient WETH balance, skipping wrap"
+            );
+        }
+    }
+
+    // ── Step 2: approve router for token_in if allowance is too low ──
+    let current_allowance = read_allowance(chain, token_in, wallet_addr, cfg.router).await?;
+    if current_allowance < amount_in_wei {
+        tracing::info!(
+            wallet = %format!("{wallet_addr:?}"),
+            token = %format!("{token_in:?}"),
+            spender = %format!("{:?}", cfg.router),
+            current = %current_allowance,
+            requested = %amount_in_wei,
+            "[swap] approving router"
+        );
+        let data = encode_erc20_approve(cfg.router, amount_in_wei);
+        let hash = rpc::send_tx_and_wait(
+            chain,
+            pk_bytes,
+            Some(&format!("{:?}", token_in)),
+            U256::ZERO,
+            Some(data),
+        )
+        .await
+        .map_err(|e| AppError::Transaction(format!("approve step failed: {e}")))?;
+        tracing::info!(tx_hash = %hash, "[swap] approve confirmed");
+        approve_tx_hash = Some(hash);
+    } else {
+        tracing::info!(
+            allowance = %current_allowance,
+            requested = %amount_in_wei,
+            "[swap] sufficient allowance, skipping approve"
+        );
+    }
+
+    // ── Step 3: exactInputSingle on Uniswap V3 SwapRouter02 ──────────
+    tracing::info!(
+        token_in = %format!("{token_in:?}"),
+        token_out = %format!("{token_out:?}"),
+        amount_in = %amount_in_wei,
+        router = %format!("{:?}", cfg.router),
+        "[swap] sending exactInputSingle"
+    );
+    let data = encode_exact_input_single(token_in, token_out, wallet_addr, amount_in_wei);
+    let swap_tx_hash = rpc::send_tx_and_wait(
+        chain,
+        pk_bytes,
+        Some(&format!("{:?}", cfg.router)),
+        U256::ZERO,
+        Some(data),
+    )
+    .await
+    .map_err(|e| AppError::Transaction(format!("swap step failed: {e}")))?;
+    tracing::info!(tx_hash = %swap_tx_hash, "[swap] swap confirmed");
+
+    Ok(SwapResult {
+        swap_tx_hash,
+        wrap_tx_hash,
+        approve_tx_hash,
+    })
+}
