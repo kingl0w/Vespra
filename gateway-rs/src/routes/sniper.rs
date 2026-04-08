@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::AppState;
 use crate::agents::sniper::SniperContext;
 use crate::orchestrator::sniper::PoolEvent;
-use crate::routes::goals::save_goal;
+use crate::routes::goals::{save_goal, wallet_has_active_goal};
 use crate::types::decisions::SniperDecision;
 use crate::types::goals::{GoalSpec, GoalStatus, GoalStrategy};
 
@@ -231,7 +231,31 @@ async fn alchemy_webhook(
                 has_dup || runners.len() > 50 // safety cap
             };
 
-            if !already_running && position_eth > 0.0 {
+            // Sprint 7: hold the goal-creation lock across the wallet
+            // active-goal check and the save so a burst of webhook events
+            // can't double-spawn against the same custody wallet.
+            let _create_guard = state.goal_creation_lock.lock().await;
+
+            // Sprint 7: enforce one-wallet-one-goal on the sniper auto-entry
+            // path too. The custody wallet is shared across the swarm, so a
+            // hot pool stream could otherwise stack multiple sniper goals on
+            // the same label and starve every other strategy.
+            let custody_label = state.config.default_custody.clone();
+            if let Some(existing_id) =
+                wallet_has_active_goal(&state.redis, &custody_label).await
+            {
+                tracing::info!(
+                    "[sniper] auto-entry rejected — wallet {} already has active goal {} (pool {})",
+                    custody_label,
+                    existing_id,
+                    pool_address
+                );
+                // Drop the guard before continuing the loop so the next pool
+                // event in this batch isn't blocked.
+                drop(_create_guard);
+                // Skip to the evaluation persistence step below by leaving
+                // auto_entered=false.
+            } else if !already_running && position_eth > 0.0 {
                 let target_gain = state.config.sniper_target_gain_pct;
                 let stop_loss = state.config.sniper_stop_loss_pct;
 

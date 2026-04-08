@@ -319,6 +319,7 @@ async fn main() -> anyhow::Result<()> {
         coordinator_orchestrator,
         goal_runners: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         goal_cancel_txs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        goal_creation_lock: Arc::new(tokio::sync::Mutex::new(())),
         goal_runner_deps,
         sentinel_monitor: Arc::new(SentinelMonitor::new()),
         yield_scheduler_status: gateway_rs::yield_scheduler::default_status(),
