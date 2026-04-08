@@ -45,9 +45,21 @@ pub async fn execute_traced(
 
     // ── Step 4: Dry run gate ────────────────────────────────────
     if dry_run {
+        // VES-102: never log an empty body on serialization failure — surface
+        // it as TxStatus::Failed so the caller treats the dry-run as broken
+        // rather than silently "successful".
+        let calldata_str = match serde_json::to_string(&calldata) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("[exec-trace] failed to serialize dry-run calldata: {e}");
+                return TxStatus::Failed {
+                    error: format!("failed to serialize dry-run calldata: {e}"),
+                };
+            }
+        };
         tracing::info!(
             "[DRY RUN] calldata ready, skipping broadcast: {}",
-            serde_json::to_string(&calldata).unwrap_or_default()
+            calldata_str
         );
         return TxStatus::DryRun { calldata };
     }

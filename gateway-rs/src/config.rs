@@ -175,6 +175,29 @@ impl GatewayConfig {
             }
         }
 
+        // VES-110: explicit GATEWAY_HOST / GATEWAY_PORT env-var overrides on
+        // top of whatever Figment merged from TOML / VESPRA_*. This makes
+        // container deployments configurable without a config.toml file.
+        if let Ok(host) = std::env::var("GATEWAY_HOST") {
+            if !host.is_empty() {
+                config.host = host;
+            }
+        }
+        if let Ok(port_str) = std::env::var("GATEWAY_PORT") {
+            match port_str.parse::<u16>() {
+                Ok(p) => config.port = p,
+                Err(e) => tracing::warn!(
+                    "GATEWAY_PORT='{port_str}' is not a valid u16 ({e}) — keeping {}",
+                    config.port
+                ),
+            }
+        }
+        tracing::info!(
+            "gateway-rs config resolved: host={} port={}",
+            config.host,
+            config.port
+        );
+
         Ok(config)
     }
 }
