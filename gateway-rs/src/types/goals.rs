@@ -68,6 +68,16 @@ pub struct GoalSpec {
     pub pnl_eth: f64,
     #[serde(default)]
     pub pnl_pct: f64,
+    /// Resolved ERC-20 address of the token currently held (set after a
+    /// successful BUY). Persisted so that resumed goals know which token to
+    /// price-monitor instead of falling back to a placeholder.
+    #[serde(default)]
+    pub token_address: Option<String>,
+    /// Actual amount of `token_address` received from the BUY swap, in wei
+    /// (decimal string). Used at sell time so we don't try to dump more
+    /// tokens than we hold. `None` until a BUY has been recorded.
+    #[serde(default)]
+    pub token_amount_held: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
@@ -107,6 +117,8 @@ mod tests {
             current_eth: 0.05,
             pnl_eth: 0.0,
             pnl_pct: 0.0,
+            token_address: None,
+            token_amount_held: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             error: None,

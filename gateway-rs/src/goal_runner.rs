@@ -125,14 +125,27 @@ pub async fn run_goal_with_resume(
                 tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
             }
 
-            // Build a position from goal state — we don't know the exact token,
-            // so use the goal id as a placeholder. The sentinel monitor will still
-            // poll the price oracle (which falls back to 0.0 gracefully).
+            // Build a position from persisted goal state. `token_address` is set
+            // when the BUY confirms; if it's missing the goal can't have a real
+            // open position to monitor, so fail rather than spin against a
+            // placeholder that breaks the price oracle.
+            let resumed_token_address = match goal.token_address.clone() {
+                Some(addr) if !addr.is_empty() => addr,
+                _ => {
+                    fail_goal(
+                        &deps.redis,
+                        goal_id,
+                        "cannot resume monitoring: goal has no persisted token_address (BUY never recorded)",
+                    )
+                    .await;
+                    break;
+                }
+            };
             let position = TradePosition {
                 id: goal_id.to_string(),
                 wallet: goal.wallet_label.clone(),
                 chain: goal.chain.clone(),
-                token_address: goal_id.to_string(),
+                token_address: resumed_token_address.clone(),
                 token_symbol: "RESUMED".into(),
                 entry_price_usd: 0.0,
                 entry_eth: goal.capital_eth,
@@ -161,13 +174,36 @@ pub async fn run_goal_with_resume(
                     // EXITING from resumed monitoring
                     tracing::info!("[goal {goal_id}] MONITORING → EXITING (resumed)");
                     let _ = update_goal_step(&deps.redis, goal_id, "EXITING").await;
-                    let token_out = goal_id.to_string();
-                    let sell_amount = format!("{:.0}", goal.capital_eth * 1e18);
+                    let token_out = resumed_token_address.clone();
+                    let sell_amount = match goal.token_amount_held.clone() {
+                        Some(amt) if !amt.is_empty() && amt != "0" => amt,
+                        _ => {
+                            fail_goal(
+                                &deps.redis,
+                                goal_id,
+                                "token_amount_held not set — cannot sell",
+                            )
+                            .await;
+                            break;
+                        }
+                    };
+                    let weth_addr = match known_token_address("WETH", &goal.chain) {
+                        Some(a) => a,
+                        None => {
+                            fail_goal(
+                                &deps.redis,
+                                goal_id,
+                                &format!("no known WETH address for chain '{}'", goal.chain),
+                            )
+                            .await;
+                            break;
+                        }
+                    };
                     match resolve_goal_wallet_uuid(&goal) {
                         Ok(wallet_uuid) => {
                             let _ = execution_gate::execute_traced(
                                 &deps.executor, &deps.config, &deps.chain_registry,
-                                wallet_uuid, &token_out, "WETH", &sell_amount, &goal.chain, deps.dry_run,
+                                wallet_uuid, &token_out, &weth_addr, &sell_amount, &goal.chain, deps.dry_run,
                             ).await;
                         }
                         Err(e) => {
@@ -315,10 +351,21 @@ pub async fn run_goal_with_resume(
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
         }
 
-        let chain_id = deps
-            .chain_registry
-            .chain_id(&best.chain.to_lowercase())
-            .unwrap_or(8453);
+        let chain_id = match deps.chain_registry.chain_id(&best.chain.to_lowercase()) {
+            Some(id) => id,
+            None => {
+                fail_goal(
+                    &deps.redis,
+                    goal_id,
+                    &format!(
+                        "chain_id could not be resolved for '{}' — goal aborted",
+                        best.chain
+                    ),
+                )
+                .await;
+                break;
+            }
+        };
         let amount_wei = format!("{:.0}", goal.capital_eth * 1e18);
 
         let trader_chain = goal.chain.clone();
@@ -485,6 +532,37 @@ pub async fn run_goal_with_resume(
             }
         }
 
+        // Capture the amount of `token_out` received so the SELL leg can sell
+        // exactly what we hold (not capital_eth * 1e18, which assumes a 1:1
+        // ETH→token mint and reverts on real swaps). We re-quote with the
+        // resolved addresses; if the quote fails the sell will fail-fast at
+        // SELL time with a clear "token_amount_held not set" error rather than
+        // submitting a doomed tx.
+        let token_amount_out = deps
+            .quote_fetcher
+            .fetch_quote(&token_in, &token_out, &swap_amount_wei, chain_id)
+            .await
+            .ok()
+            .map(|q| q.amount_out_wei)
+            .filter(|s| !s.is_empty() && s != "0");
+        match token_amount_out.as_ref() {
+            Some(amt) => tracing::info!(
+                "[goal {goal_id}] recording token_amount_held={} for token={}",
+                amt, token_out
+            ),
+            None => tracing::warn!(
+                "[goal {goal_id}] could not determine token_amount_held after BUY — SELL will fail-fast"
+            ),
+        }
+        if let Ok(mut g) = get_goal(&deps.redis, goal_id).await {
+            g.token_address = Some(token_out.clone());
+            g.token_amount_held = token_amount_out.clone();
+            g.updated_at = Utc::now();
+            if let Err(e) = save_goal(&deps.redis, &g).await {
+                tracing::warn!("[goal {goal_id}] failed to persist token_address/amount: {e}");
+            }
+        }
+
         if *cancel_rx.borrow() { continue; }
 
         // ═════════════════════════════════════════════════════════
@@ -542,7 +620,21 @@ pub async fn run_goal_with_resume(
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
         }
 
-        let sell_amount = format!("{:.0}", goal.capital_eth * 1e18);
+        // Use the actual token amount captured at BUY time. If it's missing
+        // (quote failed or BUY never recorded), fail-fast instead of submitting
+        // a sell that will revert and leave funds stuck.
+        let sell_amount = match token_amount_out.clone() {
+            Some(amt) => amt,
+            None => {
+                fail_goal(
+                    &deps.redis,
+                    goal_id,
+                    "token_amount_held not set — cannot sell",
+                )
+                .await;
+                break;
+            }
+        };
         // Reuse the wallet_uuid resolved earlier in this iteration; if for some
         // reason the goal lost it (re-loaded between steps), fall back to a
         // fresh resolution and fail-fast on error.

@@ -254,6 +254,8 @@ async fn alchemy_webhook(
                     current_eth: position_eth,
                     pnl_eth: 0.0,
                     pnl_pct: 0.0,
+                    token_address: None,
+                    token_amount_held: None,
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
                     error: None,
