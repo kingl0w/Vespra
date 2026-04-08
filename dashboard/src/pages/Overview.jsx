@@ -27,7 +27,7 @@ export function Overview() {
   const agentList = services.gateway?.data?.agents || [];
   const dagData = services.boiler?.data || {};
   const goalsList = Array.isArray(goalsData) ? goalsData : goalsData?.goals || [];
-  const activeGoals = goalsList.filter((g) => g.status === "Running");
+  const activeGoals = goalsList.filter((g) => g.status?.toLowerCase() === "running");
   const latestRunning = activeGoals.sort((a, b) => (b.updated_at || b.created_at || "").localeCompare(a.updated_at || a.created_at || ""))[0];
 
   return (
