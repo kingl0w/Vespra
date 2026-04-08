@@ -1,4 +1,5 @@
 pub mod agent_config;
+pub mod backtest;
 pub mod boot;
 pub mod execution;
 pub mod config;
@@ -40,6 +41,7 @@ use crate::sentinel_monitor::SentinelMonitor;
 use crate::yield_scheduler::SharedSchedulerStatus;
 use crate::config::GatewayConfig;
 use crate::data::aave::AaveFetcher;
+use crate::data::historical::HistoricalFeed;
 use crate::data::yield_provider::ProviderRegistry;
 use crate::middleware::rate_limit::RouteLimiters;
 use crate::orchestrator::command::CommandOrchestrator;
@@ -76,6 +78,7 @@ pub struct AppState {
     pub goal_runner_deps: GoalRunnerDeps,
     pub sentinel_monitor: Arc<SentinelMonitor>,
     pub yield_scheduler_status: SharedSchedulerStatus,
+    pub historical_feed: Arc<dyn HistoricalFeed>,
 }
 
 /// Middleware: Cloudflare Access check
@@ -152,6 +155,7 @@ pub fn router(state: AppState) -> Router {
         .merge(yield_scheduler::router())
         .merge(boot::router())
         .merge(agent_config::router())
+        .merge(backtest::router())
         .merge(proxy::router())
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(

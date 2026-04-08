@@ -16,6 +16,7 @@ use gateway_rs::agents::LlmClient;
 use gateway_rs::chain::ChainRegistry;
 use gateway_rs::config::GatewayConfig;
 use gateway_rs::data::aave::AaveFetcher;
+use gateway_rs::data::historical::{CompositeHistoricalFeed, HistoricalFeed};
 use gateway_rs::data::pool::PoolFetcher;
 use gateway_rs::data::price::OracleRouter;
 use gateway_rs::data::protocol::ProtocolFetcher;
@@ -118,6 +119,11 @@ async fn main() -> anyhow::Result<()> {
         http_client.clone(),
         redis_client.clone(),
     ));
+
+    // 6d. Build historical data feed (DeFiLlama APY + CoinGecko price) for the
+    // backtesting engine.
+    let historical_feed: Arc<dyn HistoricalFeed> =
+        Arc::new(CompositeHistoricalFeed::new(http_client.clone()));
 
     // 7. Build price oracle via config-driven router
     let price_oracle: Arc<dyn gateway_rs::data::price::PriceOracle> =
@@ -322,6 +328,7 @@ async fn main() -> anyhow::Result<()> {
         goal_runner_deps,
         sentinel_monitor: Arc::new(SentinelMonitor::new()),
         yield_scheduler_status: gateway_rs::yield_scheduler::default_status(),
+        historical_feed,
     };
 
     // 10a. Auto-resume running/paused goals from previous boot
