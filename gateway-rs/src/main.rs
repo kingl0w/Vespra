@@ -43,10 +43,18 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // 2. Load config (scans RPC_URL_* env vars into rpc_urls map)
-    let config = GatewayConfig::load().unwrap_or_else(|e| {
-        tracing::warn!("config load failed ({e}), using defaults");
-        serde_json::from_value(serde_json::json!({})).unwrap()
-    });
+    // VES-112: surface load failures loudly. A silent fallback to defaults
+    // means operators can run a misconfigured gateway in prod without
+    // realising it.
+    let config = match GatewayConfig::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::error!(
+                "config load failed ({e}) — running on defaults, verify your config file"
+            );
+            serde_json::from_value(serde_json::json!({})).unwrap()
+        }
+    };
     let config = Arc::new(config);
 
     // 3. Init chain registry (receives rpc_urls from config)
