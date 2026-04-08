@@ -90,6 +90,7 @@ async fn main() {
         .route("/wallets", post(routes::create_wallet))
         .route("/wallets/:wallet_id", delete(routes::deactivate_wallet))
         .route("/wallets/:wallet_id/cap", put(routes::update_cap))
+        .route("/wallets/:wallet_id/cap/reset", post(routes::reset_cap))
         .route("/tx/send", post(routes::send_native))
         .route("/tx/send_tx", post(routes::send_tx_with_data))
         .route("/tx/sweep", post(routes::sweep_to_safe))
