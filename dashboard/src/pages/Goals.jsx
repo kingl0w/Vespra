@@ -112,16 +112,24 @@ function GoalRow({ goal, onAction }) {
   const pnlPct = goal.pnl_pct ?? 0;
   const positive = pnl >= 0;
   const acting = useRef(false);
+  // VES-94: surface cancel/pause/resume failures to the user instead of
+  // silently swallowing — operators were left clicking buttons with no
+  // feedback when the gateway rejected an action.
+  const [actionError, setActionError] = useState(null);
 
   const act = async (action) => {
     if (acting.current) return;
     acting.current = true;
+    setActionError(null);
     try {
       if (action === "cancel") await api.cancelGoal(goal.id);
       else if (action === "pause") await api.pauseGoal(goal.id);
       else if (action === "resume") await api.resumeGoal(goal.id);
       onAction();
-    } catch { /* swallow — refresh will show current state */ }
+    } catch (e) {
+      console.error(`[Goals] ${action} failed for goal ${goal.id}:`, e);
+      setActionError("Action failed — please try again");
+    }
     acting.current = false;
   };
 
@@ -155,6 +163,7 @@ function GoalRow({ goal, onAction }) {
           {canResume && <button onClick={() => act("resume")} class="px-2 py-1 text-xs rounded bg-vespra-green/15 text-vespra-green hover:bg-vespra-green/25 transition-colors">Resume</button>}
           {canCancel && <button onClick={() => act("cancel")} class="px-2 py-1 text-xs rounded bg-vespra-red/15 text-vespra-red hover:bg-vespra-red/25 transition-colors">Cancel</button>}
         </div>
+        {actionError && <p class="mt-1 text-xs text-vespra-red">{actionError}</p>}
       </td>
     </tr>
   );
