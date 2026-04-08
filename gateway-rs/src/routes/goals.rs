@@ -111,13 +111,22 @@ pub async fn list_goals_by_status(
 
 // ── Wallet label → UUID resolution ─────────────────────────────
 
+/// Resolved wallet info pulled from Keymaster. The address is needed for the
+/// pre-creation balance check (sprint 7); the id is what the goal store
+/// persists for runner lookups.
+pub struct ResolvedWallet {
+    pub id: String,
+    pub address: String,
+}
+
 /// Look up a wallet by its label via Keymaster's `/wallets` endpoint.
-/// Returns the wallet's UUID (as a string) on a case-insensitive label match.
-async fn resolve_wallet_id(
+/// Returns the wallet's UUID and on-chain address on a case-insensitive label
+/// match.
+async fn resolve_wallet_info(
     keymaster_url: &str,
     keymaster_token: &str,
     wallet_label: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<ResolvedWallet> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
@@ -144,12 +153,83 @@ async fn resolve_wallet_id(
         if label.to_lowercase() == label_lower {
             let id = w["id"]
                 .as_str()
-                .ok_or_else(|| anyhow::anyhow!("wallet {label} has no id field"))?;
-            return Ok(id.to_string());
+                .ok_or_else(|| anyhow::anyhow!("wallet {label} has no id field"))?
+                .to_string();
+            let address = w["address"].as_str().unwrap_or("").to_string();
+            return Ok(ResolvedWallet { id, address });
         }
     }
 
     anyhow::bail!("no wallet with label '{wallet_label}' found in Keymaster")
+}
+
+// ── Wallet safeguards (sprint 7) ───────────────────────────────
+
+/// Reserved gas budget per wallet — capital-eth requests must leave at least
+/// this much native ETH for transaction fees.
+pub const GAS_RESERVE_ETH: f64 = 0.005;
+
+/// Returns the id of an existing in-flight goal owned by `wallet_label`, if
+/// any. "In-flight" means a goal whose status is `Pending`, `Running`, or
+/// `Paused` — anything Cancelled, Completed, or Failed is treated as freed.
+/// The check is case-insensitive on the label, matching how Keymaster
+/// resolves labels.
+pub async fn wallet_has_active_goal(
+    redis: &redis::Client,
+    wallet_label: &str,
+) -> Option<Uuid> {
+    let goals = list_goals(redis).await.ok()?;
+    let label_lower = wallet_label.to_lowercase();
+    goals.into_iter().find_map(|g| {
+        let active = matches!(
+            g.status,
+            GoalStatus::Pending | GoalStatus::Running | GoalStatus::Paused
+        );
+        if active && g.wallet_label.to_lowercase() == label_lower {
+            Some(g.id)
+        } else {
+            None
+        }
+    })
+}
+
+/// Fetch the live ETH balance for `address` over JSON-RPC. Mirrors the
+/// `eth_getBalance` pattern in `data/wallet.rs` but is standalone so the goal
+/// route can call it without dragging in the WalletFetcher's caching layer.
+async fn fetch_wallet_balance_eth(rpc_url: &str, address: &str) -> anyhow::Result<f64> {
+    if rpc_url.is_empty() {
+        anyhow::bail!("no rpc_url configured");
+    }
+    if address.is_empty() {
+        anyhow::bail!("wallet address is empty");
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_getBalance",
+        "params": [address, "latest"],
+        "id": 1
+    });
+
+    let resp: serde_json::Value = client
+        .post(rpc_url)
+        .json(&payload)
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let hex_str = resp
+        .get("result")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing result in eth_getBalance response"))?;
+    let hex_str = hex_str.trim_start_matches("0x");
+    let wei = u128::from_str_radix(hex_str, 16)?;
+    Ok(wei as f64 / 1e18)
 }
 
 // ── Coordinator LLM parsing ─────────────────────────────────────
@@ -262,22 +342,35 @@ async fn create_goal(
         );
     }
 
-    // ── Constraint: one active goal per wallet ────────────────────
-    if let Ok(running) = list_goals_by_status(&state.redis, GoalStatus::Running).await {
-        if let Some(existing) = running.iter().find(|g| g.wallet_label == body.wallet_label) {
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "status": "error",
-                    "error": format!(
-                        "Wallet {} already has an active goal: {}. Cancel or pause it first.",
-                        body.wallet_label, existing.id
-                    )
-                })),
-            );
-        }
+    // ── Sprint 7: serialize the wallet-active-goal check + insert ─
+    // Holding this lock for the duration of the check, the LLM parse, the
+    // balance check, and the save guarantees two simultaneous submissions
+    // for the same wallet can't both pass `wallet_has_active_goal`.
+    let _create_guard = state.goal_creation_lock.lock().await;
 
-        // ── Constraint: max concurrent goals ────────────────────────
+    // ── Constraint: one active goal per wallet ────────────────────
+    if let Some(existing_id) =
+        wallet_has_active_goal(&state.redis, &body.wallet_label).await
+    {
+        tracing::info!(
+            "goal rejected — wallet {} already has active goal {}",
+            body.wallet_label,
+            existing_id
+        );
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": format!(
+                    "wallet {} already has an active goal — cancel or wait for it to complete before submitting a new one",
+                    body.wallet_label
+                )
+            })),
+        );
+    }
+
+    // ── Constraint: max concurrent goals ──────────────────────────
+    if let Ok(running) = list_goals_by_status(&state.redis, GoalStatus::Running).await {
         let max = max_concurrent_goals();
         if running.len() >= max {
             return (
@@ -292,16 +385,17 @@ async fn create_goal(
         }
     }
 
-    // Resolve wallet_label → wallet UUID via Keymaster before doing any LLM work,
-    // so callers get a fast, clear 400 if the label doesn't exist.
-    let wallet_id = match resolve_wallet_id(
+    // Resolve wallet_label → wallet info (UUID + address) via Keymaster
+    // before doing any LLM work, so callers get a fast 400 if the label
+    // doesn't exist. The address is needed for the live balance check below.
+    let resolved = match resolve_wallet_info(
         &state.config.keymaster_url,
         &state.config.keymaster_token,
         &body.wallet_label,
     )
     .await
     {
-        Ok(id) => id,
+        Ok(r) => r,
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -347,7 +441,53 @@ async fn create_goal(
             })),
         );
     }
-    goal.wallet_id = Some(wallet_id);
+
+    // ── Sprint 7: live balance check on the target chain ──────────
+    // A bad RPC must NOT block goal creation — fall through with a warning
+    // so a flaky provider can't permanently brick submissions.
+    let rpc_url = state
+        .chain_registry
+        .get(&goal.chain)
+        .map(|c| c.rpc_url.clone())
+        .unwrap_or_default();
+    if rpc_url.is_empty() {
+        tracing::warn!(
+            "balance check skipped for wallet {} — no rpc_url for chain '{}'",
+            body.wallet_label,
+            goal.chain
+        );
+    } else {
+        match fetch_wallet_balance_eth(&rpc_url, &resolved.address).await {
+            Ok(balance_eth) => {
+                if goal.capital_eth > (balance_eth - GAS_RESERVE_ETH) {
+                    tracing::warn!(
+                        "goal rejected — insufficient balance for wallet {}: requested={} available={}",
+                        body.wallet_label,
+                        goal.capital_eth,
+                        balance_eth
+                    );
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "status": "error",
+                            "error": format!(
+                                "insufficient wallet balance — requested {:.4} ETH but wallet holds {:.4} ETH (reserve: {:.3} ETH)",
+                                goal.capital_eth, balance_eth, GAS_RESERVE_ETH
+                            )
+                        })),
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "balance check failed for wallet {} — proceeding without confirmation: {e}",
+                    body.wallet_label
+                );
+            }
+        }
+    }
+
+    goal.wallet_id = Some(resolved.id);
 
     if let Err(e) = save_goal(&state.redis, &goal).await {
         return (
