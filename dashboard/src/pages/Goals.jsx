@@ -217,6 +217,37 @@ export function Goals() {
 
   const list = goals || [];
 
+  // ── Group by chain ────────────────────────────────────────
+  // Stable order: base, arbitrum, then alphabetic, then unknown last.
+  // Active count is derived from the filtered group so it stays reactive
+  // when statuses change without needing a separate state slice.
+  const groups = list.reduce((acc, g) => {
+    const chain = (g.chain || "unknown").toLowerCase();
+    (acc[chain] ||= []).push(g);
+    return acc;
+  }, {});
+
+  const CHAIN_ORDER = ["base", "arbitrum"];
+  const orderedChains = Object.keys(groups).sort((a, b) => {
+    if (a === "unknown") return 1;
+    if (b === "unknown") return -1;
+    const ai = CHAIN_ORDER.indexOf(a);
+    const bi = CHAIN_ORDER.indexOf(b);
+    if (ai !== -1 && bi !== -1) return ai - bi;
+    if (ai !== -1) return -1;
+    if (bi !== -1) return 1;
+    return a.localeCompare(b);
+  });
+
+  const chainTitle = (c) =>
+    c === "unknown" ? "Unknown" : c.charAt(0).toUpperCase() + c.slice(1);
+
+  const activeCount = (rows) =>
+    rows.filter((g) => {
+      const k = (g.status || "").toLowerCase();
+      return k === "running" || k === "monitoring";
+    }).length;
+
   return (
     <div class="space-y-6">
       <h2 class="text-xl font-bold">Goals</h2>
@@ -250,9 +281,24 @@ export function Goals() {
                 </tr>
               </thead>
               <tbody class="divide-y divide-vespra-border/50">
-                {list.map((g) => (
-                  <GoalRow key={g.id} goal={g} onAction={fetchGoals} />
-                ))}
+                {orderedChains.map((chain) => {
+                  const rows = groups[chain];
+                  return (
+                    <>
+                      <tr key={`hdr-${chain}`} class="bg-vespra-bg/40">
+                        <td
+                          colSpan={9}
+                          class="px-3 py-2 text-[11px] uppercase tracking-wider text-vespra-muted border-t border-vespra-border/60"
+                        >
+                          {chainTitle(chain)} — {activeCount(rows)} active
+                        </td>
+                      </tr>
+                      {rows.map((g) => (
+                        <GoalRow key={g.id} goal={g} onAction={fetchGoals} />
+                      ))}
+                    </>
+                  );
+                })}
               </tbody>
             </table>
           </div>
