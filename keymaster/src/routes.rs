@@ -239,13 +239,44 @@ pub async fn send_native(
     let value = eth_to_u256(&req.amount_eth)?;
 
     // ── Wallet cap enforcement ───────────────────────────────────
+    // VES-90 / VES-105: a corrupted cap field or a total_sent that exceeds
+    // cap must NEVER fall through to approving a transaction. The first case
+    // would let any amount through; the second would silently brick the
+    // wallet. Both surface as 503s so an operator gets a clear signal.
     let cap_wei_str = &wallet.cap_wei;
     if cap_wei_str != "0" && !cap_wei_str.is_empty() {
-        let cap = cap_wei_str.parse::<u128>()
-            .map_err(|_| AppError::Internal(format!("Invalid cap_wei in DB: {cap_wei_str}")))?;
+        let cap = cap_wei_str.parse::<u128>().map_err(|_| {
+            tracing::error!(
+                wallet_id = %req.wallet_id,
+                address = %wallet.address,
+                raw = %cap_wei_str,
+                "VES-90: wallet cap_wei field is not a valid u128 — rejecting tx"
+            );
+            AppError::CapCorrupt(cap_wei_str.clone())
+        })?;
         let cap_u256 = U256::from(cap);
         let total_sent = state.keystore.total_sent_wei(&req.wallet_id)?;
-        let remaining = if cap_u256 > total_sent { cap_u256 - total_sent } else { U256::ZERO };
+        // VES-105: detect quarantine condition (total_sent > cap) at load time
+        // so the wallet doesn't sit silently bricked. Future: a recovery
+        // endpoint (e.g. POST /wallets/:id/cap/reset, admin-only) could clear
+        // total_sent or raise the cap after operator review — not implemented
+        // here to keep the surface area small.
+        if total_sent > cap_u256 {
+            tracing::error!(
+                wallet_id = %req.wallet_id,
+                address = %wallet.address,
+                total_sent = %total_sent,
+                cap = %cap_u256,
+                "wallet {}: total_sent ({}) exceeds cap ({}) — possible data corruption",
+                wallet.address, total_sent, cap_u256
+            );
+            return Err(AppError::CapIntegrity {
+                address: wallet.address.clone(),
+                total_sent: total_sent.to_string(),
+                cap: cap_u256.to_string(),
+            });
+        }
+        let remaining = cap_u256 - total_sent;
         if value > remaining {
             return Err(AppError::CapExceeded {
                 balance: value.to_string(),
@@ -561,13 +592,37 @@ pub async fn swap_handler(
     }
 
     // ── Cap enforcement (mirrors send_native) ───────────────────────
+    // VES-90 / VES-105: see send_native for the rationale. A corrupt cap or
+    // a total_sent above cap must surface as a 503 — never fall through.
     let cap_wei_str = &wallet.cap_wei;
     if cap_wei_str != "0" && !cap_wei_str.is_empty() {
-        let cap = cap_wei_str.parse::<u128>()
-            .map_err(|_| AppError::Internal(format!("Invalid cap_wei in DB: {cap_wei_str}")))?;
+        let cap = cap_wei_str.parse::<u128>().map_err(|_| {
+            tracing::error!(
+                wallet_id = %req.wallet_id,
+                address = %wallet.address,
+                raw = %cap_wei_str,
+                "VES-90: wallet cap_wei field is not a valid u128 — rejecting swap"
+            );
+            AppError::CapCorrupt(cap_wei_str.clone())
+        })?;
         let cap_u256 = U256::from(cap);
         let total_sent = state.keystore.total_sent_wei(&req.wallet_id)?;
-        let remaining = if cap_u256 > total_sent { cap_u256 - total_sent } else { U256::ZERO };
+        if total_sent > cap_u256 {
+            tracing::error!(
+                wallet_id = %req.wallet_id,
+                address = %wallet.address,
+                total_sent = %total_sent,
+                cap = %cap_u256,
+                "wallet {}: total_sent ({}) exceeds cap ({}) — possible data corruption",
+                wallet.address, total_sent, cap_u256
+            );
+            return Err(AppError::CapIntegrity {
+                address: wallet.address.clone(),
+                total_sent: total_sent.to_string(),
+                cap: cap_u256.to_string(),
+            });
+        }
+        let remaining = cap_u256 - total_sent;
         if amount_in_wei > remaining {
             return Err(AppError::CapExceeded {
                 balance: amount_in_wei.to_string(),
