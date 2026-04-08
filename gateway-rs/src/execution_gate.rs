@@ -97,14 +97,13 @@ pub async fn execute_traced(
         .unwrap_or("");
 
     if rpc_url.is_empty() {
-        tracing::warn!(
-            "[exec-trace] no RPC URL for chain={} — skipping receipt poll",
-            chain
+        tracing::error!(
+            "[exec-trace] no RPC URL for chain={} — cannot confirm tx={}",
+            chain,
+            tx_hash
         );
-        return TxStatus::Confirmed {
-            tx_hash,
-            block_number: 0,
-            gas_used: 0,
+        return TxStatus::Failed {
+            error: format!("RPC URL not configured for chain '{chain}'"),
         };
     }
 
