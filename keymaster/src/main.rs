@@ -23,7 +23,7 @@ use crate::keystore::Keystore;
 use crate::state::AppState;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -110,10 +110,17 @@ async fn main() {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse().unwrap_or_else(|_| {
-        eprintln!("ERROR: Invalid bind address");
-        std::process::exit(1);
-    });
+    // VES-111: surface bind-address parse failures via the normal error path
+    // so callers can react instead of the process vanishing with exit(1).
+    let addr: SocketAddr = format!("{}:{}", config.host, config.port)
+        .parse()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "invalid bind address {}:{} — {e}",
+                config.host,
+                config.port
+            )
+        })?;
 
     // AUM fee sweep background task — VES-56
     tokio::spawn(async move {
@@ -130,4 +137,6 @@ async fn main() {
         eprintln!("ERROR: Server failed: {e}");
         std::process::exit(1);
     });
+
+    Ok(())
 }

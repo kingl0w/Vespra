@@ -78,7 +78,9 @@ pub async fn create_wallet(
         "Generating new wallet key — ensure system entropy is sufficient (getrandom/urandom)."
     );
     let signer = PrivateKeySigner::random();
-    let address = format!("{:?}", signer.address());
+    // VES-117: render with EIP-55 checksum so logs and stored addresses use a
+    // canonical, mixed-case form rather than alloy's Debug-formatted output.
+    let address = signer.address().to_checksum(None);
     let private_key_bytes = signer.to_bytes();
     let encrypted = crypto::encrypt_key(private_key_bytes.as_slice(), &state.master_password)?;
 
