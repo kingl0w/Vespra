@@ -132,10 +132,6 @@ export const api = {
       body: JSON.stringify({ intent, ...(wallet ? { wallet } : {}), ...(chain ? { chain } : {}) }),
     }).then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
 
-  getSessionContext: () =>
-    fetch(`${BASE_GW}/coordinator/session`)
-      .then(r => r.json()),
-
   // Goals (VES-87)
   fetchGoals: () =>
     fetch(`${BASE_GW}/goals`)
