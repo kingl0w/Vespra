@@ -70,6 +70,13 @@ pub async fn create_wallet(
     state.config.get_chain(&req.chain)
         .ok_or_else(|| AppError::ChainNotConfigured(req.chain.clone()))?;
 
+    // Key material entropy: PrivateKeySigner::random() draws from rand's
+    // thread_rng, which is seeded from the OS RNG (getrandom/urandom on Linux).
+    // Surface a warning at the call site so operators are reminded to verify
+    // system entropy is healthy before generating real-funds wallets.
+    tracing::warn!(
+        "Generating new wallet key — ensure system entropy is sufficient (getrandom/urandom)."
+    );
     let signer = PrivateKeySigner::random();
     let address = format!("{:?}", signer.address());
     let private_key_bytes = signer.to_bytes();
