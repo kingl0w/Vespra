@@ -51,7 +51,7 @@ function elapsed(iso) {
 
 function GoalForm({ wallets, onCreated }) {
   const [text, setText] = useState("");
-  const [walletId, setWalletId] = useState("");
+  const [walletLabel, setWalletLabel] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
 
@@ -61,8 +61,8 @@ function GoalForm({ wallets, onCreated }) {
     setError(null);
     try {
       await api.createGoal({
-        goal: text.trim(),
-        ...(walletId ? { wallet_id: walletId } : {}),
+        raw_goal: text.trim(),
+        ...(walletLabel ? { wallet_label: walletLabel } : {}),
       });
       setText("");
       onCreated();
@@ -84,14 +84,14 @@ function GoalForm({ wallets, onCreated }) {
       />
       <div class="flex items-center gap-3">
         <select
-          value={walletId}
-          onChange={(e) => setWalletId(e.target.value)}
+          value={walletLabel}
+          onChange={(e) => setWalletLabel(e.target.value)}
           class="bg-vespra-bg border border-vespra-border rounded px-2 py-2 text-sm text-vespra-text cursor-pointer"
           aria-label="Select wallet"
         >
           <option value="">No wallet (auto)</option>
           {(wallets || []).map((w) => (
-            <option key={w.id} value={w.id}>
+            <option key={w.id} value={w.label || ""}>
               {w.label || w.id.slice(0, 8)}
             </option>
           ))}
