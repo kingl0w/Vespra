@@ -357,8 +357,12 @@ pub async fn run_goal_with_resume(
                     || chain_lower.contains("testnet")
                     || chain_lower.contains("goerli");
                 if is_testnet {
-                    tracing::info!(
-                        "[goal {goal_id}] [scout] no real pools on testnet — injecting fallback WETH/USDC opportunity (scout error: {e})"
+                    // VES-101: surface synthetic-data injection at warn level
+                    // so it's auditable in logs. The Opportunity struct has no
+                    // synthetic flag — adding one is out of scope here, so the
+                    // log is the durable record.
+                    tracing::warn!(
+                        "[goal {goal_id}] injecting synthetic WETH/USDC fallback opportunity — no real testnet pools found from DeFiLlama (scout error: {e})"
                     );
                     crate::types::opportunity::Opportunity {
                         protocol: "uniswap-v3".to_string(),
@@ -813,19 +817,34 @@ pub async fn run_goal_with_resume(
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
         }
 
-        // Compute new capital based on expected gain
-        let new_capital = goal.current_eth * (1.0 + expected_gain_pct / 100.0);
+        // VES-107: guard against zero/negative expected_gain_pct so a HOLD
+        // decision (or trader bug) doesn't compound the wallet flat or
+        // backwards. If invalid, skip the pnl write entirely and keep the
+        // existing capital — the next cycle will retry from SCOUTING.
+        if expected_gain_pct > 0.0 {
+            // Compute new capital based on expected gain
+            let new_capital = goal.current_eth * (1.0 + expected_gain_pct / 100.0);
 
-        // Update P&L
-        if let Err(e) = update_goal_pnl(&deps.redis, goal_id, new_capital).await {
-            tracing::warn!("[goal {goal_id}] pnl update failed: {e}");
+            // Update P&L
+            if let Err(e) = update_goal_pnl(&deps.redis, goal_id, new_capital).await {
+                tracing::warn!("[goal {goal_id}] pnl update failed: {e}");
+            }
+        } else {
+            tracing::warn!(
+                "[goal {goal_id}] expected_gain_pct is {} — skipping capital compounding",
+                expected_gain_pct
+            );
         }
 
         // Increment cycles
         let mut updated_goal = match get_goal(&deps.redis, goal_id).await {
             Ok(g) => g,
             Err(e) => {
-                tracing::error!("[goal {goal_id}] failed to reload goal: {e}");
+                // VES-108: explicit log so an external delete during a goal
+                // cycle is auditable instead of a silent break.
+                tracing::info!(
+                    "goal {goal_id} removed from store mid-loop — exiting goal runner: {e}"
+                );
                 break;
             }
         };
@@ -1025,8 +1044,14 @@ async fn run_monitoring_loop(
             rotation = yield_rx.recv() => {
                 if let Some(rotation) = rotation {
                     if matches!(goal.strategy, GoalStrategy::YieldRotate | GoalStrategy::Adaptive) {
-                        if goal.pnl_pct <= -(goal.stop_loss_pct * 0.8) {
-                            tracing::info!("[goal {goal_id}] yield rotation skipped — P&L too close to stop loss");
+                        // VES-99: snapshot pnl_pct (and stop_loss_pct) before
+                        // any comparison so we don't race against a concurrent
+                        // mutator on `goal`. All checks below use the snapshot
+                        // exclusively.
+                        let pnl_snapshot = goal.pnl_pct;
+                        let stop_loss_snapshot = goal.stop_loss_pct;
+                        if pnl_snapshot <= -(stop_loss_snapshot * 0.8) {
+                            tracing::info!("[goal {goal_id}] yield rotation skipped — P&L too close to stop loss (pnl={pnl_snapshot:.2}%)");
                         } else {
                             tracing::info!("[goal {goal_id}] yield rotation: {} → {} (Δ{:.2}%)", rotation.from_protocol, rotation.to_protocol, rotation.delta_apy);
                             yield_rotate_signal = true;

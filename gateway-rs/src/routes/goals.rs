@@ -328,6 +328,18 @@ async fn create_goal(
             );
         }
     };
+    // VES-104: reject 0/negative capital up front. Without this guard the LLM
+    // returning a string, omitting the field, or producing 0 silently creates
+    // a goal that can never make progress.
+    if !(goal.capital_eth > 0.0) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": "capital_eth must be greater than zero"
+            })),
+        );
+    }
     goal.wallet_id = Some(wallet_id);
 
     if let Err(e) = save_goal(&state.redis, &goal).await {
@@ -375,7 +387,21 @@ async fn create_goal(
         goal.capital_eth
     );
 
-    (StatusCode::CREATED, Json(serde_json::to_value(&goal).unwrap_or_default()))
+    // VES-103: never silently 201 with an empty body — the client needs the
+    // goal_id. Surface a 500 if serialization fails so they can retry.
+    match serde_json::to_value(&goal) {
+        Ok(v) => (StatusCode::CREATED, Json(v)),
+        Err(e) => {
+            tracing::error!("failed to serialize created goal {}: {e}", goal.id);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": "failed to serialize created goal — please retry"
+                })),
+            )
+        }
+    }
 }
 
 async fn list_goals_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
