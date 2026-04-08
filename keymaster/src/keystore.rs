@@ -207,6 +207,33 @@ impl Keystore {
         Ok(())
     }
 
+    /// VES-105 recovery: zero out the wallet's effective `total_sent` by
+    /// re-tagging all confirmed `send_native` rows with status
+    /// `cap_reset_excluded`. The audit row is preserved (we still know the tx
+    /// happened and on what date) but `total_sent_wei` ignores it because the
+    /// query filters on `status = 'confirmed'`. Returns the number of rows
+    /// re-tagged so the operator gets confirmation in the response.
+    ///
+    /// Verifies the wallet exists first so a typo'd UUID returns 404 instead
+    /// of a silent zero-row UPDATE.
+    pub fn reset_total_sent(&self, wallet_id: &str) -> AppResult<u64> {
+        let conn = self.conn.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(1) FROM wallets WHERE id = ?1",
+            params![wallet_id],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            return Err(AppError::WalletNotFound(wallet_id.to_string()));
+        }
+        let rows = conn.execute(
+            "UPDATE tx_log SET status = 'cap_reset_excluded'
+             WHERE wallet_id = ?1 AND tx_type = 'send_native' AND status = 'confirmed'",
+            params![wallet_id],
+        )?;
+        Ok(rows as u64)
+    }
+
     pub fn log_tx(
         &self, wallet_id: &str, chain: &str, tx_hash: Option<&str>,
         tx_type: &str, to_address: &str, value_wei: &str, status: &str, error: Option<&str>,

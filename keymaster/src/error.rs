@@ -31,6 +31,12 @@ pub enum AppError {
     #[error("Invalid request: {0}")]
     BadRequest(String),
 
+    /// Hex decoding failed for a specific request field. Surfaced verbatim
+    /// to the caller (unlike BadRequest which sanitizes) so operators can
+    /// see which field is malformed and the expected format.
+    #[error("Invalid hex for field '{field}': {detail}")]
+    InvalidHex { field: String, detail: String },
+
     #[error("Wallet cap exceeded: balance {balance}, cap {cap}")]
     CapExceeded { balance: String, cap: String },
 
@@ -53,8 +59,21 @@ impl IntoResponse for AppError {
         // Sanitized messages — never echo user input back
         let (status, message): (StatusCode, String) = match &self {
             AppError::WalletNotFound(_) => (StatusCode::NOT_FOUND, "Wallet not found".into()),
-            AppError::ChainNotConfigured(_) => (StatusCode::BAD_REQUEST, "Chain not configured".into()),
+            // VES-109: chain-not-configured is a server config issue, not a
+            // client mistake — return 503 so operators see the right signal.
+            AppError::ChainNotConfigured(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "chain not configured on this Keymaster instance".into(),
+            ),
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "Invalid request".into()),
+            // VES-112: surface the field name + decode detail verbatim so the
+            // operator can fix the request without grepping logs.
+            AppError::InvalidHex { field, detail } => (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "hex decode failed for field '{field}' — expected 0x-prefixed hex string ({detail})"
+                ),
+            ),
             AppError::CapExceeded { .. } => (StatusCode::FORBIDDEN, "Wallet cap exceeded".into()),
             AppError::CapCorrupt(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -70,8 +89,19 @@ impl IntoResponse for AppError {
             AppError::Database(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Database error".into())
             }
-            AppError::Rpc(_) => (StatusCode::BAD_GATEWAY, "RPC error".into()),
-            AppError::Transaction(_) => (StatusCode::BAD_REQUEST, "Transaction failed".into()),
+            // VES-113: surface a sanitized one-liner of the inner detail so
+            // operators can identify failures (RPC error code, revert reason)
+            // without checking server logs. Truncate aggressively and strip
+            // newlines/control chars so we never leak multi-line stack traces
+            // or full RPC bodies.
+            AppError::Rpc(detail) => (
+                StatusCode::BAD_GATEWAY,
+                format!("RPC error: {}", sanitize_error_detail(detail)),
+            ),
+            AppError::Transaction(detail) => (
+                StatusCode::BAD_REQUEST,
+                format!("Transaction failed: {}", sanitize_error_detail(detail)),
+            ),
             AppError::Internal(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".into())
             }
@@ -84,3 +114,23 @@ impl IntoResponse for AppError {
 }
 
 pub type AppResult<T> = Result<T, AppError>;
+
+/// Reduce a raw error string to a single-line, length-capped fragment safe to
+/// return to API callers. Strips newlines/tabs/control chars and truncates so
+/// we never leak full RPC bodies or stack traces. Used by VES-113.
+fn sanitize_error_detail(s: &str) -> String {
+    const MAX: usize = 200;
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if cleaned.chars().count() > MAX {
+        let truncated: String = cleaned.chars().take(MAX).collect();
+        format!("{truncated}…")
+    } else {
+        cleaned
+    }
+}

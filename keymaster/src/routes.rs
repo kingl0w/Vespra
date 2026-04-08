@@ -149,6 +149,29 @@ pub async fn update_cap(
     Ok(Json(json!({ "status": "updated", "wallet_id": wallet_id, "cap_wei": cap_wei })))
 }
 
+/// Admin-only recovery endpoint. Resets total_sent to zero for a wallet that has
+/// hit a cap integrity error (total_sent > cap). Requires operator auth token.
+/// Should only be called after verifying the wallet state externally.
+pub async fn reset_cap(
+    State(state): State<Arc<AppState>>,
+    Path(wallet_id): Path<String>,
+) -> AppResult<Json<WalletInfo>> {
+    // Look up the wallet first so a missing id returns 404 cleanly.
+    let wallet = state.keystore.get_wallet(&wallet_id)?;
+    let rows = state.keystore.reset_total_sent(&wallet_id)?;
+    tracing::warn!(
+        wallet_id = %wallet_id,
+        address = %wallet.address,
+        rows_reset = rows,
+        "operator reset total_sent for wallet {} — cap integrity restored",
+        wallet.address
+    );
+    // Re-fetch in case the keystore mutated any timestamps; cheap and keeps
+    // the response shape identical to GET /wallets/:id.
+    let updated = state.keystore.get_wallet(&wallet_id)?;
+    Ok(Json(WalletInfo::from(updated)))
+}
+
 // ─── Balance & Chain Queries ─────────────────────────────────────
 
 pub async fn get_balance(
@@ -455,8 +478,12 @@ pub async fn send_tx_with_data(
     let data_bytes: Option<Vec<u8>> = match &req.data {
         Some(hex_str) if !hex_str.is_empty() && hex_str != "0x" => {
             let clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-            Some(hex::decode(clean)
-                .map_err(|e| AppError::BadRequest(format!("Invalid calldata hex: {e}")))?)
+            // VES-112: surface field name + decode detail in the response so
+            // operators don't have to grep server logs to find the typo.
+            Some(hex::decode(clean).map_err(|e| AppError::InvalidHex {
+                field: "data".to_string(),
+                detail: e.to_string(),
+            })?)
         }
         _ => None,
     };
