@@ -256,6 +256,7 @@ async fn alchemy_webhook(
                     pnl_pct: 0.0,
                     token_address: None,
                     token_amount_held: None,
+                    resolved_wallet_uuid: None,
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
                     error: None,
