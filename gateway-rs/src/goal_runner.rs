@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use chrono::Utc;
 use tokio::sync::watch;
@@ -34,6 +35,12 @@ const MAX_RETRIES: u32 = 3;
 const RETRY_BACKOFF_SECS: u64 = 10;
 const MONITOR_INTERVAL_SECS: u64 = 300; // 5 minutes
 const PAUSE_CHECK_SECS: u64 = 60;
+/// VES-86: hard cap on total goal-runner lifetime (24h). Prevents zombie goals
+/// that loop forever in HOLD/EXIT branches when sentinel never resolves.
+const MAX_MONITORING_SECS: u64 = 86_400;
+/// VES-92: max consecutive scout retries triggered by token-resolution
+/// failures before failing the goal.
+const MAX_SCOUT_RETRIES: u32 = 5;
 
 /// Determines which step a resumed GoalRunner should begin from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,10 +90,35 @@ pub async fn run_goal_with_resume(
     tracing::info!("[goal {goal_id}] runner started (resume={resume_from:?})");
     let mut first_iteration = true;
 
+    // VES-86: hard deadline on the entire goal-runner lifetime. Local Instant
+    // restarts on each (re)launch — sufficient to break out of any infinite
+    // HOLD/EXIT/re-scout loop within a single process lifetime.
+    let monitoring_deadline = Instant::now()
+        + std::time::Duration::from_secs(MAX_MONITORING_SECS);
+    // VES-92: counter survives across iterations so we can fail the goal after
+    // MAX_SCOUT_RETRIES consecutive token-resolution failures. Reset to 0
+    // every time we successfully resolve token_in/token_out.
+    let mut scout_retry_count: u32 = 0;
+    // VES-91: cached, parsed wallet UUID. Resolved exactly once on the first
+    // iteration (and persisted to Redis), then reused for the entire goal
+    // lifetime so the BUY and SELL legs can never land on different wallets.
+    let mut cached_wallet_uuid: Option<Uuid> = None;
+
     loop {
         // ── Check cancel ────────────────────────────────────────
         if *cancel_rx.borrow() {
             tracing::info!("[goal {goal_id}] cancelled — exiting runner");
+            break;
+        }
+
+        // ── VES-86: deadline check ─────────────────────────────
+        if Instant::now() > monitoring_deadline {
+            fail_goal(
+                &deps.redis,
+                goal_id,
+                "monitoring deadline exceeded after 24h — goal aborted",
+            )
+            .await;
             break;
         }
 
@@ -116,6 +148,58 @@ pub async fn run_goal_with_resume(
                 // proceed
             }
         }
+
+        // ── VES-91: resolve + cache wallet UUID exactly once ───
+        // Prefer the value already persisted in Redis (set on a prior run);
+        // otherwise resolve from `wallet_id` and persist before any execution
+        // step touches a wallet. After this point all execution paths must
+        // read from `cached_wallet_uuid` and never call `resolve_goal_wallet_uuid`
+        // again — that's what guarantees BUY and SELL hit the same wallet.
+        if cached_wallet_uuid.is_none() {
+            let resolved = if let Some(s) = goal.resolved_wallet_uuid.as_deref() {
+                match Uuid::parse_str(s) {
+                    Ok(u) => Ok(u),
+                    Err(e) => Err(format!("stored resolved_wallet_uuid '{s}' is not a valid UUID: {e}")),
+                }
+            } else {
+                resolve_goal_wallet_uuid(&goal)
+            };
+            match resolved {
+                Ok(u) => {
+                    cached_wallet_uuid = Some(u);
+                    if goal.resolved_wallet_uuid.is_none() {
+                        if let Ok(mut g) = get_goal(&deps.redis, goal_id).await {
+                            g.resolved_wallet_uuid = Some(u.to_string());
+                            g.updated_at = Utc::now();
+                            if let Err(e) = save_goal(&deps.redis, &g).await {
+                                tracing::warn!("[goal {goal_id}] failed to persist resolved_wallet_uuid: {e}");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    fail_goal(
+                        &deps.redis,
+                        goal_id,
+                        &format!("wallet UUID not resolved at goal start — cannot execute: {e}"),
+                    )
+                    .await;
+                    break;
+                }
+            }
+        }
+        let cached_wallet_uuid_val = match cached_wallet_uuid {
+            Some(u) => u,
+            None => {
+                fail_goal(
+                    &deps.redis,
+                    goal_id,
+                    "wallet UUID not resolved at goal start — cannot execute",
+                )
+                .await;
+                break;
+            }
+        };
 
         // ── Resume shortcut: skip to MONITORING on first iteration if resuming ──
         if first_iteration && resume_from == Some(GoalStep::Monitoring) {
@@ -199,18 +283,10 @@ pub async fn run_goal_with_resume(
                             break;
                         }
                     };
-                    match resolve_goal_wallet_uuid(&goal) {
-                        Ok(wallet_uuid) => {
-                            let _ = execution_gate::execute_traced(
-                                &deps.executor, &deps.config, &deps.chain_registry,
-                                wallet_uuid, &token_out, &weth_addr, &sell_amount, &goal.chain, deps.dry_run,
-                            ).await;
-                        }
-                        Err(e) => {
-                            fail_goal(&deps.redis, goal_id, &e).await;
-                            break;
-                        }
-                    }
+                    let _ = execution_gate::execute_traced(
+                        &deps.executor, &deps.config, &deps.chain_registry,
+                        cached_wallet_uuid_val, &token_out, &weth_addr, &sell_amount, &goal.chain, deps.dry_run,
+                    ).await;
                     continue; // go back to SCOUTING on next iteration
                 }
                 MonitorResult::NoExit => continue,
@@ -445,13 +521,27 @@ pub async fn run_goal_with_resume(
         // than ERC-20 addresses. Testnet pools sometimes contain fake tokens
         // (LIQTEST, VELVET, VFY) with no real contract — skip them and
         // re-SCOUT instead of submitting a broken swap to Keymaster.
+        // VES-92: helper closure used at every "unresolvable, re-scout" exit
+        // below. Increments a retry counter that survives across iterations
+        // and fails the goal after MAX_SCOUT_RETRIES so we can't loop forever
+        // on a permanently-broken pool.
         let token_in = match resolve_swap_token(&token_in, &goal.chain) {
             Some(a) => a,
             None => {
+                scout_retry_count += 1;
                 tracing::warn!(
-                    "[goal {goal_id}] skipping pool: unresolvable token_in symbol '{}' on chain '{}' — re-scouting",
-                    token_in, goal.chain
+                    "[goal {goal_id}] skipping pool: unresolvable token_in symbol '{}' on chain '{}' — re-scouting (attempt {}/{})",
+                    token_in, goal.chain, scout_retry_count, MAX_SCOUT_RETRIES
                 );
+                if scout_retry_count >= MAX_SCOUT_RETRIES {
+                    fail_goal(
+                        &deps.redis,
+                        goal_id,
+                        "token resolution failed after 5 scout attempts — goal aborted",
+                    )
+                    .await;
+                    break;
+                }
                 sleep_interruptible(&mut cancel_rx, 30).await;
                 continue;
             }
@@ -459,10 +549,20 @@ pub async fn run_goal_with_resume(
         let token_out = match resolve_swap_token(&token_out, &goal.chain) {
             Some(a) => a,
             None => {
+                scout_retry_count += 1;
                 tracing::warn!(
-                    "[goal {goal_id}] skipping pool: unresolvable token_out symbol '{}' on chain '{}' — re-scouting",
-                    token_out, goal.chain
+                    "[goal {goal_id}] skipping pool: unresolvable token_out symbol '{}' on chain '{}' — re-scouting (attempt {}/{})",
+                    token_out, goal.chain, scout_retry_count, MAX_SCOUT_RETRIES
                 );
+                if scout_retry_count >= MAX_SCOUT_RETRIES {
+                    fail_goal(
+                        &deps.redis,
+                        goal_id,
+                        "token resolution failed after 5 scout attempts — goal aborted",
+                    )
+                    .await;
+                    break;
+                }
                 sleep_interruptible(&mut cancel_rx, 30).await;
                 continue;
             }
@@ -473,13 +573,26 @@ pub async fn run_goal_with_resume(
         // in the known-token map. The downstream swap would either revert or
         // be a no-op, so re-scout instead.
         if token_in.eq_ignore_ascii_case(&token_out) {
+            scout_retry_count += 1;
             tracing::warn!(
-                "[goal {goal_id}] skipping pool: token_in == token_out after resolution ({}); pool symbol likely contains an unknown token paired with WETH — re-scouting",
-                token_in
+                "[goal {goal_id}] skipping pool: token_in == token_out after resolution ({}); pool symbol likely contains an unknown token paired with WETH — re-scouting (attempt {}/{})",
+                token_in, scout_retry_count, MAX_SCOUT_RETRIES
             );
+            if scout_retry_count >= MAX_SCOUT_RETRIES {
+                fail_goal(
+                    &deps.redis,
+                    goal_id,
+                    "token resolution failed after 5 scout attempts — goal aborted",
+                )
+                .await;
+                break;
+            }
             sleep_interruptible(&mut cancel_rx, 30).await;
             continue;
         }
+        // VES-92: token resolution succeeded — reset the retry counter so a
+        // future bad pool starts from zero again.
+        scout_retry_count = 0;
         tracing::info!(
             "[goal {goal_id}] resolved swap addresses: in={} out={}",
             token_in, token_out
@@ -490,19 +603,13 @@ pub async fn run_goal_with_resume(
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
         }
 
-        let wallet_uuid = match resolve_goal_wallet_uuid(&goal) {
-            Ok(u) => u,
-            Err(e) => {
-                fail_goal(&deps.redis, goal_id, &e).await;
-                break;
-            }
-        };
-
+        // VES-91: use the wallet UUID cached at goal-runner start. Never
+        // re-resolve mid-lifecycle — that's the bug this fix prevents.
         let buy_tx_status = execution_gate::execute_traced(
             &deps.executor,
             &deps.config,
             &deps.chain_registry,
-            wallet_uuid,
+            cached_wallet_uuid_val,
             &token_in,
             &token_out,
             &swap_amount_wei,
@@ -635,16 +742,9 @@ pub async fn run_goal_with_resume(
                 break;
             }
         };
-        // Reuse the wallet_uuid resolved earlier in this iteration; if for some
-        // reason the goal lost it (re-loaded between steps), fall back to a
-        // fresh resolution and fail-fast on error.
-        let sell_wallet_uuid = match resolve_goal_wallet_uuid(&goal) {
-            Ok(u) => u,
-            Err(e) => {
-                fail_goal(&deps.redis, goal_id, &e).await;
-                break;
-            }
-        };
+        // VES-91: reuse the cached wallet UUID resolved at goal-runner start.
+        // Guarantees the SELL leg lands on the same wallet as the BUY leg.
+        let sell_wallet_uuid = cached_wallet_uuid_val;
         // token_out is already a resolved address (set during BUY handoff above).
         // Resolve "WETH" symbol to the chain's WETH address for the sell side.
         let weth_addr = match known_token_address("WETH", &goal.chain) {

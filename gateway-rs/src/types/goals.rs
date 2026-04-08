@@ -78,6 +78,13 @@ pub struct GoalSpec {
     /// tokens than we hold. `None` until a BUY has been recorded.
     #[serde(default)]
     pub token_amount_held: Option<String>,
+    /// Resolved wallet UUID, cached at goal-runner start (VES-91). Set once
+    /// before the first execution step and reused for the entire goal lifetime
+    /// so the BUY and SELL legs can never accidentally land on different
+    /// wallets if `wallet_id` is mutated externally. Persisted to Redis so it
+    /// survives restarts.
+    #[serde(default)]
+    pub resolved_wallet_uuid: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
@@ -119,6 +126,7 @@ mod tests {
             pnl_pct: 0.0,
             token_address: None,
             token_amount_held: None,
+            resolved_wallet_uuid: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             error: None,
