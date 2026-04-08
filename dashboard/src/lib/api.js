@@ -170,6 +170,22 @@ export const api = {
     fetch(`${BASE_GW}/goals/portfolio`)
       .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
 
+  // Backtest (sprint 6)
+  runBacktest: (payload) =>
+    fetch(`${BASE_GW}/backtest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
+
+  getBacktests: () =>
+    fetch(`${BASE_GW}/backtests`)
+      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
+
+  getBacktest: (id) =>
+    fetch(`${BASE_GW}/backtests/${id}`)
+      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
+
   // Dispatch (generic)
   dispatch: (action, params) =>
     request("/dispatch", {
