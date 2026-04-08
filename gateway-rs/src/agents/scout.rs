@@ -45,19 +45,36 @@ fn chains_include_testnet(chains: &[String]) -> bool {
     })
 }
 
-/// Check whether a pool symbol like "WETH-USDC" or "USDC-VFY" only references
-/// tokens in the testnet allowlist. Pools with no recognizable separator are
-/// rejected (we can't tell what they contain).
-fn pool_symbol_is_testnet_safe(symbol: &str) -> bool {
-    let parts: Vec<&str> = symbol
-        .split(|c: char| c == '-' || c == '/' || c == ':')
-        .map(|p| p.trim())
+/// VES-109: parse a pool pair symbol into its two token symbols, regardless
+/// of which delimiter the upstream data source used. Handles `-`, `/`, `//`,
+/// `_`, and `:` (and any combination of them — `//` falls out of splitting on
+/// `/` once and dropping empty fragments). Whitespace is trimmed off each
+/// half. Returns `Err` when the input doesn't yield exactly 2 non-empty
+/// fragments so callers can fail loudly instead of silently mis-classifying.
+fn parse_pool_symbol(raw_symbol: &str) -> Result<(String, String)> {
+    let parts: Vec<String> = raw_symbol
+        .split(|c: char| matches!(c, '-' | '/' | '_' | ':'))
+        .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect();
-    if parts.is_empty() {
-        return false;
+    if parts.len() != 2 {
+        anyhow::bail!("could not parse token pair from pool symbol: {raw_symbol}");
     }
-    parts.iter().all(|p| {
+    let mut iter = parts.into_iter();
+    let a = iter.next().unwrap();
+    let b = iter.next().unwrap();
+    Ok((a, b))
+}
+
+/// Check whether a pool symbol like "WETH-USDC" or "USDC-VFY" only references
+/// tokens in the testnet allowlist. Pools whose symbol can't be parsed into
+/// exactly two tokens are rejected (we can't tell what they contain).
+fn pool_symbol_is_testnet_safe(symbol: &str) -> bool {
+    let (a, b) = match parse_pool_symbol(symbol) {
+        Ok(pair) => pair,
+        Err(_) => return false,
+    };
+    [a, b].iter().all(|p| {
         let upper = p.to_uppercase();
         TESTNET_ALLOWED_SYMBOLS.iter().any(|allowed| *allowed == upper)
     })
