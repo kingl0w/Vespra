@@ -1,5 +1,6 @@
 pub mod agent_config;
 pub mod agents;
+pub mod backtest;
 pub mod chain;
 pub mod config;
 pub mod data;

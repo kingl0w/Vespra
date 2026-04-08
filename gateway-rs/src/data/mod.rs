@@ -1,4 +1,5 @@
 pub mod aave;
+pub mod historical;
 pub mod pool;
 pub mod price;
 pub mod protocol;
