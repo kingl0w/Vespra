@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::agents::sentinel::SentinelAgent;
 use crate::data::price::PriceOracle;
-use crate::routes::goals::list_goals_by_status;
+use crate::routes::goals::{get_goal, list_goals_by_status, save_goal};
 use crate::types::goals::GoalStatus;
 
 // ── Constants ──────────────────────────────────────────────────
@@ -129,6 +129,54 @@ impl SentinelMonitor {
                 .map(|p| p.price_usd)
                 .unwrap_or(0.0);
 
+            // VES-93: validate current_price before any sentinel comparison.
+            // NaN/inf/<=0 disables every downstream gain/loss check silently.
+            if current_price.is_nan() || current_price.is_infinite() || current_price <= 0.0 {
+                tracing::warn!(
+                    "[sentinel] goal {} invalid current_price ({}) — failing goal",
+                    goal.id, current_price
+                );
+                fail_goal_inline(
+                    redis,
+                    goal.id,
+                    &format!(
+                        "invalid current_price ({}) — sentinel cannot evaluate, goal aborted",
+                        current_price
+                    ),
+                )
+                .await;
+                continue;
+            }
+
+            // VES-93: reverse-derive entry price from P&L, then validate.
+            // If goal state is corrupted (NaN/inf pnl, divide-by-near-zero) the
+            // derived entry_price is meaningless and would silently disable the
+            // exit logic; abort the goal for human review instead.
+            let entry_price_derived = if goal.entry_eth > 0.0 && goal.pnl_pct != 0.0 {
+                current_price / (1.0 + goal.pnl_pct / 100.0)
+            } else {
+                current_price
+            };
+            if entry_price_derived.is_nan()
+                || entry_price_derived.is_infinite()
+                || entry_price_derived <= 0.0
+            {
+                tracing::warn!(
+                    "[sentinel] goal {} invalid entry_price ({}) — failing goal",
+                    goal.id, entry_price_derived
+                );
+                fail_goal_inline(
+                    redis,
+                    goal.id,
+                    &format!(
+                        "invalid entry_price ({}) — sentinel cannot evaluate, goal aborted",
+                        entry_price_derived
+                    ),
+                )
+                .await;
+                continue;
+            }
+
             // Build a lightweight TradePosition for sentinel assessment
             let position = crate::types::trade_up::TradePosition {
                 id: goal.id.to_string(),
@@ -136,12 +184,7 @@ impl SentinelMonitor {
                 chain: goal.chain.clone(),
                 token_address: goal.id.to_string(),
                 token_symbol: String::new(),
-                entry_price_usd: if goal.entry_eth > 0.0 && goal.pnl_pct != 0.0 {
-                    // Reverse-derive entry price from P&L data
-                    current_price / (1.0 + goal.pnl_pct / 100.0)
-                } else {
-                    current_price
-                },
+                entry_price_usd: entry_price_derived,
                 entry_eth: goal.capital_eth,
                 token_amount: 0.0,
                 opened_at: goal.created_at.timestamp(),
@@ -228,6 +271,23 @@ impl SentinelMonitor {
         }
 
         Ok(())
+    }
+}
+
+// ── Helpers ────────────────────────────────────────────────────
+
+/// Mark a goal as Failed with the given error message. Used by the sentinel
+/// background task when it detects unrecoverable state (invalid price/entry,
+/// VES-93) without holding a reference to the GoalRunner's `fail_goal` helper.
+async fn fail_goal_inline(redis: &Arc<redis::Client>, goal_id: Uuid, error: &str) {
+    tracing::error!("[sentinel] goal {goal_id} FAILED: {error}");
+    if let Ok(mut goal) = get_goal(redis, goal_id).await {
+        goal.status = GoalStatus::Failed;
+        goal.error = Some(error.to_string());
+        goal.updated_at = Utc::now();
+        if let Err(e) = save_goal(redis, &goal).await {
+            tracing::warn!("[sentinel] failed to persist Failed status for goal {goal_id}: {e}");
+        }
     }
 }
 

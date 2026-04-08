@@ -41,6 +41,9 @@ const MAX_MONITORING_SECS: u64 = 86_400;
 /// VES-92: max consecutive scout retries triggered by token-resolution
 /// failures before failing the goal.
 const MAX_SCOUT_RETRIES: u32 = 5;
+/// VES-89: max consecutive sentinel LLM parse failures before failing the
+/// goal for human intervention.
+const MAX_SENTINEL_PARSE_FAILURES: u32 = 3;
 
 /// Determines which step a resumed GoalRunner should begin from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -892,6 +895,10 @@ async fn run_monitoring_loop(
 ) -> MonitorResult {
     let mut exit_signal = false;
     let mut yield_rotate_signal = false;
+    // VES-89: count consecutive sentinel LLM parse failures. After
+    // MAX_SENTINEL_PARSE_FAILURES the goal is failed for human review rather
+    // than continuing to monitor against a sentinel that can't decide.
+    let mut sentinel_parse_failures: u32 = 0;
 
     let (sentinel_tx, mut sentinel_rx) = tokio::sync::mpsc::channel::<SentinelSignal>(8);
     let (yield_tx, mut yield_rx) = tokio::sync::mpsc::channel::<YieldRotationSignal>(8);
@@ -946,6 +953,26 @@ async fn run_monitoring_loop(
             .map(|p| p.price_usd)
             .unwrap_or(0.0);
 
+        // VES-93: validate current_price before any sentinel comparison.
+        // NaN/inf/<=0 makes every downstream gain/loss check meaningless and
+        // would silently disable the exit logic.
+        if current_price.is_nan() || current_price.is_infinite() || current_price <= 0.0 {
+            tracing::warn!(
+                "[goal {goal_id}] invalid current_price ({}) — sentinel cannot evaluate",
+                current_price
+            );
+            fail_goal(
+                &deps.redis,
+                goal_id,
+                &format!(
+                    "invalid current_price ({}) — sentinel cannot evaluate, goal aborted",
+                    current_price
+                ),
+            )
+            .await;
+            break;
+        }
+
         let assessment = deps.sentinel.monitor_position(position, current_price).await;
         match assessment {
             Ok(a) if a.is_exit() => {
@@ -953,8 +980,36 @@ async fn run_monitoring_loop(
                 exit_signal = true;
                 break;
             }
-            Ok(a) => tracing::debug!("[goal {goal_id}] sentinel: hold — {}", a.reasoning),
-            Err(e) => tracing::warn!("[goal {goal_id}] sentinel check failed: {e}"),
+            Ok(a) => {
+                sentinel_parse_failures = 0;
+                tracing::debug!("[goal {goal_id}] sentinel: hold — {}", a.reasoning);
+            }
+            Err(e) => {
+                // VES-89: distinguish parse errors from other sentinel failures.
+                // Parse errors get retried up to MAX_SENTINEL_PARSE_FAILURES
+                // before the goal is aborted for human intervention; other
+                // errors (LLM call failure, etc.) keep the prior non-fatal
+                // warn behavior so a transient network blip doesn't kill goals.
+                let msg = e.to_string();
+                if msg.contains("sentinel LLM response parse error") {
+                    sentinel_parse_failures += 1;
+                    tracing::warn!(
+                        "[goal {goal_id}] sentinel parse error on attempt {} — retrying: {e}",
+                        sentinel_parse_failures
+                    );
+                    if sentinel_parse_failures >= MAX_SENTINEL_PARSE_FAILURES {
+                        fail_goal(
+                            &deps.redis,
+                            goal_id,
+                            "sentinel failed to parse LLM response after 3 attempts — goal aborted",
+                        )
+                        .await;
+                        break;
+                    }
+                } else {
+                    tracing::warn!("[goal {goal_id}] sentinel check failed: {e}");
+                }
+            }
         }
 
         tokio::select! {
