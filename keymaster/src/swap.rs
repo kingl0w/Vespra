@@ -208,11 +208,21 @@ async fn execute_swap_inner(
     let mut approve_tx_hash: Option<String> = None;
 
     // ── Step 1: wrap ETH → WETH if needed ────────────────────────────
-    // Only attempt the wrap if token_in is WETH and the wallet's existing
-    // WETH balance is below amount_in_wei. Skips entirely for non-WETH inputs.
+    // VES-95: only attempt the wrap when the wallet's existing WETH balance
+    // is below `amount_in_wei`. If a wrap is needed and fails (e.g. transient
+    // RPC error), re-read the balance: a concurrent top-up may have already
+    // covered the requirement, in which case the swap can still proceed.
+    // Only abort when the balance is *still* insufficient after the failure.
     if token_in_is_weth {
         let weth_balance = read_balance(chain, cfg.weth, wallet_addr).await?;
-        if weth_balance < amount_in_wei {
+        if weth_balance >= amount_in_wei {
+            tracing::info!(
+                wallet = %format!("{wallet_addr:?}"),
+                weth_balance = %weth_balance,
+                "[swap] WETH balance sufficient ({}) — skipping wrap step",
+                weth_balance
+            );
+        } else {
             let needed = amount_in_wei - weth_balance;
             tracing::info!(
                 wallet = %wallet_addr.to_checksum(None),
@@ -221,7 +231,7 @@ async fn execute_swap_inner(
                 "[swap] wrapping ETH → WETH"
             );
             let data = encode_weth_deposit();
-            let hash = rpc::send_tx_and_wait(
+            match rpc::send_tx_and_wait(
                 chain,
                 pk_bytes,
                 Some(&format!("{:?}", cfg.weth)),
@@ -229,15 +239,30 @@ async fn execute_swap_inner(
                 Some(data),
             )
             .await
-            .map_err(|e| AppError::Transaction(format!("wrap step failed: {e}")))?;
-            tracing::info!(tx_hash = %hash, "[swap] wrap confirmed");
-            wrap_tx_hash = Some(hash);
-        } else {
-            tracing::info!(
-                wallet = %wallet_addr.to_checksum(None),
-                weth_balance = %weth_balance,
-                "[swap] sufficient WETH balance, skipping wrap"
-            );
+            {
+                Ok(hash) => {
+                    tracing::info!(tx_hash = %hash, "[swap] wrap confirmed");
+                    wrap_tx_hash = Some(hash);
+                }
+                Err(e) => {
+                    // Re-check balance — a concurrent top-up may have made
+                    // the wrap unnecessary even though our attempt errored.
+                    let post_failure_balance =
+                        read_balance(chain, cfg.weth, wallet_addr).await.unwrap_or(weth_balance);
+                    if post_failure_balance >= amount_in_wei {
+                        tracing::warn!(
+                            wallet = %format!("{wallet_addr:?}"),
+                            weth_balance = %post_failure_balance,
+                            error = %e,
+                            "[swap] wrap failed but WETH balance now sufficient — proceeding"
+                        );
+                    } else {
+                        return Err(AppError::Transaction(format!(
+                            "wrap step failed: {e}"
+                        )));
+                    }
+                }
+            }
         }
     }
 

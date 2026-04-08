@@ -173,12 +173,15 @@ async fn parse_goal_via_llm(
     let task = format!("Parse this goal:\n\n\"{raw_goal}\"\n\nWallet: {wallet_label}");
     let raw = llm.call(GOAL_PARSE_PROMPT, &task).await?;
 
+    // VES-87: never echo LLM output to clients — it can leak prompt content
+    // or upstream context. Log the raw output at debug for operator triage
+    // and return a generic error from the route handler.
     let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
-        anyhow::anyhow!(
-            "LLM returned invalid JSON: {} | raw output: {}",
-            e,
-            &raw[..raw.len().min(500)]
-        )
+        let snippet: String = raw.chars().take(500).collect();
+        tracing::debug!(
+            "[goals] LLM returned invalid JSON: {e} | raw output: {snippet}"
+        );
+        anyhow::anyhow!("LLM returned invalid JSON")
     })?;
 
     let now = Utc::now();
@@ -319,11 +322,15 @@ async fn create_goal(
     {
         Ok(g) => g,
         Err(e) => {
+            // VES-87: log the underlying error for operator triage but never
+            // surface it to the client — the LLM raw output may contain
+            // prompt content or upstream context.
+            tracing::warn!("[goals] parse_goal_via_llm failed: {e}");
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "status": "error",
-                    "error": format!("Failed to parse goal: {e}")
+                    "error": "goal processing failed — please retry"
                 })),
             );
         }

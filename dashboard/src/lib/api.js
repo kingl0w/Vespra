@@ -12,13 +12,24 @@ async function request(path, opts = {}) {
     headers: { "Content-Type": "application/json", ...opts.headers },
     ...opts,
   });
+  // VES-88: never surface raw response text to the UI. If the server returned
+  // HTML (error page, gateway timeout, captive portal) it could be rendered
+  // unsanitized by an upstream error boundary, leaking internals or enabling
+  // XSS. Log the raw text to console for debugging and throw a generic error.
   const text = await res.text();
   let data;
   try {
     data = JSON.parse(text);
-  } catch {
-    if (!res.ok) throw { status: res.status, error: text || `HTTP ${res.status}` };
-    throw { status: res.status, error: `Invalid JSON response: ${text.slice(0, 200)}` };
+  } catch (parseErr) {
+    console.error(
+      `[api] failed to parse response from ${path} (status ${res.status}):`,
+      parseErr,
+      text,
+    );
+    throw {
+      status: res.status,
+      error: "Unexpected server response — please try again",
+    };
   }
   if (!res.ok) throw { status: res.status, ...data };
   return data;
