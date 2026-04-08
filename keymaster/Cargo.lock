@@ -3924,6 +3924,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "alloy",
+ "anyhow",
  "argon2",
  "axum",
  "chrono",

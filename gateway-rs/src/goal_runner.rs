@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Utc;
+use rand::Rng;
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -1101,8 +1102,12 @@ where
                 );
                 last_err = e;
                 if attempt < MAX_RETRIES {
-                    tokio::time::sleep(std::time::Duration::from_secs(
-                        RETRY_BACKOFF_SECS * attempt as u64,
+                    // VES-114: jitter the backoff so concurrent goals don't
+                    // retry in lockstep against the RPC and LLM endpoints.
+                    let base_backoff_ms = RETRY_BACKOFF_SECS * 1000 * attempt as u64;
+                    let jitter = rand::thread_rng().gen_range(0..500);
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        base_backoff_ms + jitter,
                     ))
                     .await;
                 }

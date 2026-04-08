@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -45,6 +46,10 @@ pub struct SentinelStatus {
 #[derive(Clone)]
 pub struct SentinelMonitor {
     pub status: Arc<RwLock<SentinelStatus>>,
+    /// VES-115: tracks goals already being monitored in the current tick so a
+    /// duplicate spawn for the same goal_id is skipped instead of producing
+    /// two parallel sentinel evaluations and confusing log entries.
+    pub active_goals: Arc<RwLock<HashSet<Uuid>>>,
 }
 
 impl SentinelMonitor {
@@ -56,6 +61,7 @@ impl SentinelMonitor {
                 goals_monitored: 0,
                 signals_sent_today: 0,
             })),
+            active_goals: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -111,10 +117,29 @@ impl SentinelMonitor {
         let mut signal_count: u32 = 0;
         let today = Utc::now().format("%Y-%m-%d").to_string();
 
+        // VES-115: clear stale active markers from prior ticks (shouldn't be
+        // any if everything ran cleanly, but reset defensively in case a
+        // previous iteration panicked mid-processing).
+        monitor.active_goals.write().await.clear();
+
         for goal in &goals {
             // Skip goals not in MONITORING step
             if goal.current_step != "MONITORING" {
                 continue;
+            }
+
+            // VES-115: dedupe — if this goal is already being monitored by an
+            // in-flight sentinel evaluation, skip the duplicate spawn.
+            {
+                let mut active = monitor.active_goals.write().await;
+                if active.contains(&goal.id) {
+                    tracing::debug!(
+                        "sentinel already active for goal {} — skipping duplicate spawn",
+                        goal.id
+                    );
+                    continue;
+                }
+                active.insert(goal.id);
             }
 
             // Get current price for position token
@@ -232,7 +257,9 @@ impl SentinelMonitor {
 
                 signal_count += 1;
 
-                tracing::warn!(
+                // VES-118: exits are an expected outcome, not a warning. Log
+                // at info so warn-level filters surface only real failures.
+                tracing::info!(
                     "[sentinel] EXIT signal for goal {}: {} — {}",
                     goal.id,
                     sig,

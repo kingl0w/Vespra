@@ -60,9 +60,16 @@ function GoalForm({ wallets, onCreated }) {
     setSubmitting(true);
     setError(null);
     try {
-      await api.createGoal({
+      // VES-120: log creation result with wallet_label so operators can trace
+      // which wallet a goal was started against without cross-referencing the
+      // goal store.
+      const result = await api.createGoal({
         raw_goal: text.trim(),
         ...(walletLabel ? { wallet_label: walletLabel } : {}),
+      });
+      console.log("[goal created]", {
+        goal_id: result?.id,
+        wallet_label: walletLabel || "(auto)",
       });
       setText("");
       onCreated();
@@ -144,9 +151,18 @@ function GoalRow({ goal, onAction }) {
   return (
     <tr class={`${rowBorder(goal.status)} hover:bg-vespra-border/30 transition-colors`}>
       <td class="px-3 py-2 text-sm max-w-[240px]">
-        <span title={goalText}>
-          {goalText.length > 40 ? goalText.slice(0, 40) + "…" : goalText}
-        </span>
+        <div class="flex flex-col">
+          <span title={goalText}>
+            {goalText.length > 40 ? goalText.slice(0, 40) + "…" : goalText}
+          </span>
+          {/* VES-120: surface wallet_label as a subtle secondary line so the
+              owner of each goal is visible without opening detail. */}
+          {goal.wallet_label && (
+            <span class="text-[10px] text-vespra-muted font-mono mt-0.5">
+              {goal.wallet_label}
+            </span>
+          )}
+        </div>
       </td>
       <td class="px-3 py-2"><StatusBadge status={goal.status} /></td>
       <td class="px-3 py-2 text-xs text-vespra-muted font-mono">{goal.current_step || "--"}</td>

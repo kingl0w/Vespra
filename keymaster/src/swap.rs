@@ -225,7 +225,7 @@ async fn execute_swap_inner(
         } else {
             let needed = amount_in_wei - weth_balance;
             tracing::info!(
-                wallet = %format!("{wallet_addr:?}"),
+                wallet = %wallet_addr.to_checksum(None),
                 weth_balance = %weth_balance,
                 wrap_amount = %needed,
                 "[swap] wrapping ETH → WETH"
@@ -270,9 +270,9 @@ async fn execute_swap_inner(
     let current_allowance = read_allowance(chain, token_in, wallet_addr, cfg.router).await?;
     if current_allowance < amount_in_wei {
         tracing::info!(
-            wallet = %format!("{wallet_addr:?}"),
-            token = %format!("{token_in:?}"),
-            spender = %format!("{:?}", cfg.router),
+            wallet = %wallet_addr.to_checksum(None),
+            token = %token_in.to_checksum(None),
+            spender = %cfg.router.to_checksum(None),
             current = %current_allowance,
             requested = %amount_in_wei,
             "[swap] approving router"
@@ -299,10 +299,10 @@ async fn execute_swap_inner(
 
     // ── Step 3: exactInputSingle on Uniswap V3 SwapRouter02 ──────────
     tracing::info!(
-        token_in = %format!("{token_in:?}"),
-        token_out = %format!("{token_out:?}"),
+        token_in = %token_in.to_checksum(None),
+        token_out = %token_out.to_checksum(None),
         amount_in = %amount_in_wei,
-        router = %format!("{:?}", cfg.router),
+        router = %cfg.router.to_checksum(None),
         "[swap] sending exactInputSingle"
     );
     let data = encode_exact_input_single(token_in, token_out, wallet_addr, amount_in_wei);
