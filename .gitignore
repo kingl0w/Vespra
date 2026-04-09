@@ -42,3 +42,5 @@ nullboiler/deps/sqlite/sqlite3.h
 nullboiler/deps/sqlite/sqlite3ext.h
 __pycache__/
 *.pyc
+*.env*
+.env.*
