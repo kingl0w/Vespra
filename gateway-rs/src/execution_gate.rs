@@ -19,6 +19,7 @@ pub async fn execute_traced(
     executor: &ExecutorAgent,
     _config: &GatewayConfig,
     chain_registry: &ChainRegistry,
+    http_client: &reqwest::Client,
     wallet_id: uuid::Uuid,
     token_in: &str,
     token_out: &str,
@@ -116,7 +117,7 @@ pub async fn execute_traced(
         };
     }
 
-    let client = reqwest::Client::new();
+    let client = http_client;
     let max_attempts = (RECEIPT_TIMEOUT_SECS / RECEIPT_POLL_INTERVAL_SECS) as u32;
 
     for attempt in 1..=max_attempts {
@@ -239,11 +240,9 @@ pub async fn run_validation_checks(
     config: &GatewayConfig,
     chain_registry: &ChainRegistry,
     quote_fetcher: &QuoteFetcher,
+    http_client: &reqwest::Client,
 ) -> Vec<ValidationCheck> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .unwrap_or_default();
+    let client = http_client.clone();
 
     let mut checks = Vec::new();
 

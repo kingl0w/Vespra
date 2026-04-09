@@ -11,6 +11,7 @@ async fn validate(State(state): State<AppState>) -> Json<serde_json::Value> {
         &state.config,
         &state.chain_registry,
         &state.goal_runner_deps.quote_fetcher,
+        &state.http_client,
     )
     .await;
 

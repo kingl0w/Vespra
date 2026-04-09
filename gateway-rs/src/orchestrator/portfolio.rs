@@ -74,6 +74,7 @@ pub struct PortfolioOrchestrator {
     yield_orch: Arc<YieldOrchestrator>,
     config: Arc<GatewayConfig>,
     redis: Arc<redis::Client>,
+    http_client: reqwest::Client,
     kill_flag: Arc<AtomicBool>,
 }
 
@@ -84,6 +85,7 @@ impl PortfolioOrchestrator {
         yield_orch: Arc<YieldOrchestrator>,
         config: Arc<GatewayConfig>,
         redis: Arc<redis::Client>,
+        http_client: reqwest::Client,
         kill_flag: Arc<AtomicBool>,
     ) -> Self {
         Self {
@@ -92,6 +94,7 @@ impl PortfolioOrchestrator {
             yield_orch,
             config,
             redis,
+            http_client,
             kill_flag,
         }
     }
@@ -366,7 +369,8 @@ impl PortfolioOrchestrator {
         &self,
         payload: &serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
-        let resp = reqwest::Client::new()
+        let resp = self
+            .http_client
             .post(format!("{}/wallets", self.config.keymaster_url))
             .header(
                 "Authorization",

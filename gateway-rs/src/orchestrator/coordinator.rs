@@ -130,6 +130,7 @@ pub struct CoordinatorOrchestrator {
     redis: Arc<redis::Client>,
     config: Arc<GatewayConfig>,
     yield_registry: Arc<ProviderRegistry>,
+    http_client: reqwest::Client,
 }
 
 impl CoordinatorOrchestrator {
@@ -138,12 +139,14 @@ impl CoordinatorOrchestrator {
         redis: Arc<redis::Client>,
         config: Arc<GatewayConfig>,
         yield_registry: Arc<ProviderRegistry>,
+        http_client: reqwest::Client,
     ) -> Self {
         Self {
             llm,
             redis,
             config,
             yield_registry,
+            http_client,
         }
     }
 
@@ -338,7 +341,7 @@ impl CoordinatorOrchestrator {
             "chain": chain,
         });
 
-        let client = reqwest::Client::new();
+        let client = self.http_client.clone();
         match client
             .post(&url)
             .json(&body)

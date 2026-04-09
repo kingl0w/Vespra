@@ -74,6 +74,7 @@ pub struct LauncherOrchestrator {
     executor: Arc<ExecutorAgent>,
     config: Arc<GatewayConfig>,
     redis: Arc<redis::Client>,
+    http_client: reqwest::Client,
     kill_flag: Arc<AtomicBool>,
 }
 
@@ -83,6 +84,7 @@ impl LauncherOrchestrator {
         executor: Arc<ExecutorAgent>,
         config: Arc<GatewayConfig>,
         redis: Arc<redis::Client>,
+        http_client: reqwest::Client,
         kill_flag: Arc<AtomicBool>,
     ) -> Self {
         Self {
@@ -90,6 +92,7 @@ impl LauncherOrchestrator {
             executor,
             config,
             redis,
+            http_client,
             kill_flag,
         }
     }
@@ -267,10 +270,7 @@ impl LauncherOrchestrator {
     }
 
     async fn poll_receipt(&self, tx_hash: &str) -> Option<String> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap_or_default();
+        let client = self.http_client.clone();
         let url = format!("{}/tx/{}/receipt", self.config.keymaster_url, tx_hash);
         let token = &self.config.keymaster_token;
 

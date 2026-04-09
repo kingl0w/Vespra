@@ -69,6 +69,7 @@ pub struct GoalRunnerDeps {
     pub config: Arc<GatewayConfig>,
     pub chain_registry: Arc<ChainRegistry>,
     pub redis: Arc<redis::Client>,
+    pub http_client: reqwest::Client,
     pub dry_run: bool,
 }
 
@@ -266,7 +267,7 @@ pub async fn run_goal_with_resume(
                         }
                     };
                     let _ = execution_gate::execute_traced(
-                        &deps.executor, &deps.config, &deps.chain_registry,
+                        &deps.executor, &deps.config, &deps.chain_registry, &deps.http_client,
                         cached_wallet_uuid_val, &token_out, &weth_addr, &sell_amount, &goal.chain, deps.dry_run,
                     ).await;
                     continue; // go back to SCOUTING on next iteration
@@ -556,6 +557,7 @@ pub async fn run_goal_with_resume(
             &deps.executor,
             &deps.config,
             &deps.chain_registry,
+            &deps.http_client,
             cached_wallet_uuid_val,
             &token_in,
             &token_out,
@@ -695,6 +697,7 @@ pub async fn run_goal_with_resume(
             &deps.executor,
             &deps.config,
             &deps.chain_registry,
+            &deps.http_client,
             sell_wallet_uuid,
             &token_out,
             &weth_addr,
@@ -726,6 +729,7 @@ pub async fn run_goal_with_resume(
                 &deps.executor,
                 &deps.config,
                 &deps.chain_registry,
+                &deps.http_client,
                 &deps.redis,
                 deps.dry_run,
             )

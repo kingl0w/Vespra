@@ -65,6 +65,7 @@ pub async fn collect_exit_fee(
     executor: &ExecutorAgent,
     config: &GatewayConfig,
     chain_registry: &ChainRegistry,
+    http_client: &reqwest::Client,
     redis: &redis::Client,
     dry_run: bool,
 ) {
@@ -90,6 +91,7 @@ pub async fn collect_exit_fee(
         executor,
         config,
         chain_registry,
+        http_client,
         goal_id,
         "WETH",
         &treasury,

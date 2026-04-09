@@ -194,6 +194,7 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
         chain_registry: chain_registry.clone(),
         redis: redis_client.clone(),
+        http_client: http_client.clone(),
         dry_run,
     };
 
@@ -263,6 +264,7 @@ async fn main() -> anyhow::Result<()> {
         redis_client.clone(),
         config.clone(),
         yield_registry.clone(),
+        http_client.clone(),
     ));
 
     //9f. build launcher orchestrator
@@ -271,6 +273,7 @@ async fn main() -> anyhow::Result<()> {
         executor.clone(),
         config.clone(),
         redis_client.clone(),
+        http_client.clone(),
         kill_flag.clone(),
     ));
 
@@ -281,6 +284,7 @@ async fn main() -> anyhow::Result<()> {
         yield_orchestrator.clone(),
         config.clone(),
         redis_client.clone(),
+        http_client.clone(),
         kill_flag.clone(),
     ));
 
