@@ -286,4 +286,4 @@ You'll need a Redis running on `localhost:6379` either way.
 
 ## License
 
-See `LICENSE`.
+MIT — see [`LICENSE`](LICENSE).
