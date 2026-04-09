@@ -44,3 +44,5 @@ __pycache__/
 *.pyc
 *.env*
 .env.*
+_apply_fixes.sh
+_redeploy_gateway.sh
