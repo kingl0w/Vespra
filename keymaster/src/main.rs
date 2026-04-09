@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(), keystore, master_password, auth_token,
     });
 
-    // Public read-only routes — no auth required
+    //public read-only routes — no auth required
     let public_routes = Router::new()
         .route("/health", get(routes::health))
         .route("/wallets", get(routes::list_wallets))
@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/fees/aum", get(routes::fees_aum))
         .route("/fees/summary", get(routes::fees_summary));
 
-    // Protected write routes — Bearer token required
+    //protected write routes — bearer token required
     let protected_routes = Router::new()
         .route("/wallets", post(routes::create_wallet))
         .route("/wallets/:wallet_id", delete(routes::deactivate_wallet))
@@ -100,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/settings/safes/:chain", put(routes::set_safe))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require_auth));
 
-    // Clone state for AUM fee background task before moving into router
+    //clone state for aum fee background task before moving into router
     let aum_state = Arc::clone(&state);
 
     let app = Router::new()
@@ -110,8 +110,8 @@ async fn main() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    // VES-111: surface bind-address parse failures via the normal error path
-    // so callers can react instead of the process vanishing with exit(1).
+    //ves-111: surface bind-address parse failures via the normal error path
+    //so callers can react instead of the process vanishing with exit(1).
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
         .map_err(|e| {
@@ -122,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
             )
         })?;
 
-    // AUM fee sweep background task — VES-56
+    //aum fee sweep background task — ves-56
     tokio::spawn(async move {
         routes::aum_sweep_loop(aum_state).await;
     });

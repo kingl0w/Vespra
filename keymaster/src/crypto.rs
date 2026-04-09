@@ -18,7 +18,6 @@ fn derive_key(password: &[u8], salt: &[u8]) -> AppResult<[u8; 32]> {
     Ok(key)
 }
 
-/// Encrypt a private key using AES-256-GCM. Returns hex: salt || nonce || ciphertext
 pub fn encrypt_key(private_key: &[u8], master_password: &str) -> AppResult<String> {
     let mut rng = rand::thread_rng();
     let mut salt = [0u8; SALT_LEN];
@@ -42,7 +41,7 @@ pub fn encrypt_key(private_key: &[u8], master_password: &str) -> AppResult<Strin
     Ok(hex::encode(blob))
 }
 
-/// Decrypt a private key from hex-encoded blob.
+///decrypt a private key from hex-encoded blob.
 pub fn decrypt_key(encrypted_hex: &str, master_password: &str) -> AppResult<Vec<u8>> {
     let blob = hex::decode(encrypted_hex)
         .map_err(|e| AppError::Decryption(format!("Invalid hex: {e}")))?;

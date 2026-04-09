@@ -11,7 +11,7 @@ use dashmap::DashMap;
 
 use crate::config::GatewayConfig;
 
-// ── Token bucket ─────────────────────────────────────────────────
+//── token bucket ─────────────────────────────────────────────────
 
 struct TokenBucket {
     tokens: f64,
@@ -26,8 +26,8 @@ impl TokenBucket {
         }
     }
 
-    /// Refill tokens based on elapsed time, then try to consume one.
-    /// Returns (allowed, retry_after_seconds).
+    ///refill tokens based on elapsed time, then try to consume one.
+    ///returns (allowed, retry_after_seconds).
     fn try_consume(&mut self, capacity: f64, refill_rate: f64) -> (bool, f64) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_refill).as_secs_f64();
@@ -44,12 +44,8 @@ impl TokenBucket {
     }
 }
 
-// ── Rate limiter ─────────────────────────────────────────────────
+//── rate limiter ─────────────────────────────────────────────────
 
-/// A token-bucket rate limiter keyed by IP address.
-///
-/// `max_tokens` is the bucket capacity (burst).
-/// `refill_rate` is tokens added per second.
 #[derive(Clone)]
 pub struct RateLimiter {
     buckets: Arc<DashMap<IpAddr, TokenBucket>>,
@@ -59,8 +55,8 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
-    /// Create a limiter with `max` requests per `window_secs`.
-    /// e.g. `new(10, 60, "agent")` → 10 requests/minute.
+    ///create a limiter with `max` requests per `window_secs`.
+    ///e.g. `new(10, 60, "agent")` → 10 requests/minute.
     pub fn new(max: u32, window_secs: u32, label: &'static str) -> Self {
         Self {
             buckets: Arc::new(DashMap::new()),
@@ -70,7 +66,7 @@ impl RateLimiter {
         }
     }
 
-    /// Check rate limit for a given IP. Returns `Ok(())` or the 429 response.
+    ///check rate limit for a given ip. returns `ok(())` or the 429 response.
     fn check(&self, ip: IpAddr, path: &str) -> Result<(), Response> {
         let max_tokens = self.max_tokens as f64;
         let refill_rate = self.refill_rate;
@@ -107,9 +103,9 @@ impl RateLimiter {
     }
 }
 
-// ── Route-specific limiter set ───────────────────────────────────
+//── route-specific limiter set ───────────────────────────────────
 
-/// Holds the three route-group limiters + the enabled flag.
+///holds the three route-group limiters + the enabled flag.
 #[derive(Clone)]
 pub struct RouteLimiters {
     pub enabled: bool,
@@ -128,7 +124,7 @@ impl RouteLimiters {
         }
     }
 
-    /// Return current config as JSON (no per-IP state exposed).
+    ///return current config as json (no per-ip state exposed).
     pub fn config_json(&self) -> serde_json::Value {
         serde_json::json!({
             "enabled": self.enabled,
@@ -139,31 +135,24 @@ impl RouteLimiters {
     }
 }
 
-// ── IP extraction ────────────────────────────────────────────────
+//── ip extraction ────────────────────────────────────────────────
 
 fn extract_ip(req: &Request<Body>) -> IpAddr {
-    // Try CF/proxy headers first, then ConnectInfo, fallback to loopback
+    //try cf/proxy headers first, then connectinfo, fallback to loopback
     req.headers()
         .get("cf-connecting-ip")
         .or_else(|| req.headers().get("x-real-ip"))
         .or_else(|| req.headers().get("x-forwarded-for"))
         .and_then(|v| v.to_str().ok())
         .and_then(|s| {
-            // x-forwarded-for may contain comma-separated IPs; take the first
+            //x-forwarded-for may contain comma-separated ips; take the first
             s.split(',').next().unwrap_or(s).trim().parse::<IpAddr>().ok()
         })
         .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
 }
 
-// ── Axum middleware function ─────────────────────────────────────
+//── axum middleware function ─────────────────────────────────────
 
-/// Middleware that applies the correct rate limiter based on request path.
-///
-/// Route group mapping:
-/// - `/swarm/command`                     → agent limiter
-/// - `/api/dispatch` (POST)               → tx limiter
-/// - `/api/wallet` (POST only)            → wallet_create limiter
-/// - `/trade-up/position/start`           → tx limiter
 pub async fn rate_limit_middleware(
     axum::extract::State(limiters): axum::extract::State<RouteLimiters>,
     req: Request<Body>,
@@ -177,7 +166,7 @@ pub async fn rate_limit_middleware(
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 
-    // Determine which limiter applies (if any)
+    //determine which limiter applies (if any)
     let limiter = classify_route(&path, &method, &limiters);
 
     if let Some(limiter) = limiter {
@@ -194,17 +183,17 @@ fn classify_route<'a>(
     method: &axum::http::Method,
     limiters: &'a RouteLimiters,
 ) -> Option<&'a RateLimiter> {
-    // Agent-tier: swarm commands
+    //agent-tier: swarm commands
     if path == "/swarm/command" || path.starts_with("/swarm/command/") {
         return Some(&limiters.agent);
     }
 
-    // Wallet creation: POST /api/wallet (proxy creates wallet)
+    //wallet creation: post /api/wallet (proxy creates wallet)
     if method == axum::http::Method::POST && (path == "/api/wallet" || path == "/api/wallet/") {
         return Some(&limiters.wallet_create);
     }
 
-    // TX-tier: dispatch, trade-up position start
+    //tx-tier: dispatch, trade-up position start
     if method == axum::http::Method::POST {
         if path == "/api/dispatch" || path.starts_with("/api/dispatch/") {
             return Some(&limiters.tx_send);

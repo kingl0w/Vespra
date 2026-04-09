@@ -9,7 +9,7 @@ use crate::agents::AgentClient;
 use crate::config::GatewayConfig;
 use crate::data::yield_provider::ProviderRegistry;
 
-// ── Session context ──────────────────────────────────────────────
+//── session context ──────────────────────────────────────────────
 
 const SESSION_KEY: &str = "vespra:coordinator:session";
 const SESSION_TTL: u64 = 3600; // 1 hour
@@ -44,7 +44,7 @@ impl SessionContext {
     }
 }
 
-/// Load session context from Redis. Returns empty context if not found.
+///load session context from redis. returns empty context if not found.
 pub async fn load_session(redis: &redis::Client) -> SessionContext {
     if let Ok(mut conn) = redis::Client::get_multiplexed_async_connection(redis).await {
         let raw: Option<String> = conn.get(SESSION_KEY).await.ok().flatten();
@@ -57,7 +57,7 @@ pub async fn load_session(redis: &redis::Client) -> SessionContext {
     SessionContext::new()
 }
 
-/// Save session context to Redis with TTL.
+///save session context to redis with ttl.
 pub async fn save_session(redis: &redis::Client, ctx: &SessionContext) {
     if let Ok(mut conn) = redis::Client::get_multiplexed_async_connection(redis).await {
         if let Ok(json) = serde_json::to_string(ctx) {
@@ -66,14 +66,14 @@ pub async fn save_session(redis: &redis::Client, ctx: &SessionContext) {
     }
 }
 
-/// Append an agent result to the session and save it.
+///append an agent result to the session and save it.
 pub async fn append_to_session(redis: &redis::Client, result: AgentResult) {
     let mut ctx = load_session(redis).await;
     ctx.push(result);
     save_session(redis, &ctx).await;
 }
 
-// ── Orchestration output ─────────────────────────────────────────
+//── orchestration output ─────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestrationResult {
@@ -90,7 +90,7 @@ pub struct OrchestrationAction {
     pub instruction: String,
 }
 
-/// Expected LLM output for validation.
+///expected llm output for validation.
 #[derive(Deserialize)]
 struct LlmOrchestrationOutput {
     summary: Option<String>,
@@ -106,7 +106,7 @@ struct LlmAction {
     instruction: Option<String>,
 }
 
-// ── Orchestration system prompt ──────────────────────────────────
+//── orchestration system prompt ──────────────────────────────────
 
 const ORCHESTRATE_PROMPT: &str = "You are a DeFi portfolio orchestrator. \
 You receive structured data from specialized agents and synthesize it into clear action plans.\n\n\
@@ -123,7 +123,7 @@ Constraints:\n\
 - next_action: The single most important next step.\n\
 - confidence: 0.0-1.0 score reflecting how much data you have to make a recommendation.";
 
-// ── Coordinator orchestrator ─────────────────────────────────────
+//── coordinator orchestrator ─────────────────────────────────────
 
 pub struct CoordinatorOrchestrator {
     llm: Arc<dyn AgentClient>,
@@ -147,22 +147,22 @@ impl CoordinatorOrchestrator {
         }
     }
 
-    /// Main orchestration entry point.
+    ///main orchestration entry point.
     pub async fn orchestrate(
         &self,
         intent: &str,
         wallet: Option<&str>,
         chain: Option<&str>,
     ) -> Result<OrchestrationResult> {
-        // 1. Load session context
+        //1. load session context
         let mut session = load_session(&self.redis).await;
 
-        // 2. If context is sparse, populate with Scout + Yield data
+        //2. if context is sparse, populate with scout + yield data
         if session.entries.len() < 3 {
             self.populate_context(&mut session, chain).await;
         }
 
-        // 3. Build LLM prompt
+        //3. build llm prompt
         let context_summary = session
             .entries
             .iter()
@@ -172,7 +172,7 @@ impl CoordinatorOrchestrator {
                     .unwrap_or_else(|| "??:??:??".into());
                 let output_str = serde_json::to_string(&e.output)
                     .unwrap_or_else(|_| "{}".into());
-                // Truncate large outputs
+                //truncate large outputs
                 let truncated = if output_str.len() > 500 {
                     format!("{}...", &output_str[..500])
                 } else {
@@ -201,10 +201,10 @@ impl CoordinatorOrchestrator {
 
         let raw = self.llm.call(ORCHESTRATE_PROMPT, &task).await?;
 
-        // 4. Parse and validate output
+        //4. parse and validate output
         let result = match serde_json::from_str::<LlmOrchestrationOutput>(&raw) {
             Ok(output) => {
-                // Validate spawn_dag value
+                //validate spawn_dag value
                 let spawn_dag = output.spawn_dag.and_then(|d| {
                     let valid = ["yield_rotation", "trade_up", "rebalance"];
                     if valid.contains(&d.as_str()) {
@@ -240,7 +240,7 @@ impl CoordinatorOrchestrator {
                 }
             }
             Err(parse_err) => {
-                // Try generic Value parse
+                //try generic value parse
                 match serde_json::from_str::<serde_json::Value>(&raw) {
                     Ok(val) => OrchestrationResult {
                         summary: val
@@ -274,7 +274,7 @@ impl CoordinatorOrchestrator {
             }
         };
 
-        // 5. Append this orchestration result to session
+        //5. append this orchestration result to session
         session.push(AgentResult {
             agent: "coordinator".into(),
             output: serde_json::to_value(&result).unwrap_or_default(),
@@ -285,12 +285,12 @@ impl CoordinatorOrchestrator {
         Ok(result)
     }
 
-    /// Populate session context with quick Scout + Yield data.
+    ///populate session context with quick scout + yield data.
     async fn populate_context(&self, session: &mut SessionContext, chain: Option<&str>) {
         let now = chrono::Utc::now().timestamp();
         let chain_filter = chain.or(self.config.chains.first().map(|s| s.as_str()));
 
-        // Fetch yield pool data
+        //fetch yield pool data
         match self
             .yield_registry
             .fetch_pools(
@@ -320,7 +320,7 @@ impl CoordinatorOrchestrator {
         save_session(&self.redis, session).await;
     }
 
-    /// Spawn a DAG on NullBoiler (fire-and-forget).
+    ///spawn a dag on nullboiler (fire-and-forget).
     pub async fn spawn_dag(
         &self,
         dag_name: &str,

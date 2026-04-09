@@ -6,8 +6,8 @@ use axum::Router;
 
 use super::AppState;
 
-/// Route table: /api/{prefix}/... → (upstream_base, target_path_prefix)
-/// Keymaster routes get Bearer auth injected.
+///route table: /api/{prefix}/... → (upstream_base, target_path_prefix)
+///keymaster routes get bearer auth injected.
 struct RouteEntry {
     prefix: &'static str,
     upstream: Upstream,
@@ -35,7 +35,7 @@ fn resolve_route<'a>(
     path: &str,
     config: &'a crate::config::GatewayConfig,
 ) -> Option<(String, String, bool)> {
-    // path is already stripped of /api/ prefix by the axum route
+    //path is already stripped of /api/ prefix by the axum route
     for entry in ROUTES {
         if path == entry.prefix || path.starts_with(&format!("{}/", entry.prefix)) {
             let remainder = &path[entry.prefix.len()..];
@@ -51,9 +51,6 @@ fn resolve_route<'a>(
     None
 }
 
-/// Build a nested router for /api/* routes.
-/// Uses a fallback on a nested `/api` scope so it doesn't interfere with
-/// top-level routes like /trade-up/*, /swarm/*, /health, etc.
 pub fn router() -> Router<AppState> {
     Router::new().nest(
         "/api",
@@ -69,11 +66,11 @@ async fn api_proxy_handler(
     let uri_path = req.uri().path().to_string();
     let headers = req.headers().clone();
 
-    // uri_path is already relative to /api (axum strips the nest prefix)
-    // so "/api/wallet/xyz" arrives here as "/wallet/xyz"
+    //uri_path is already relative to /api (axum strips the nest prefix)
+    //so "/api/wallet/xyz" arrives here as "/wallet/xyz"
     let rest = uri_path.trim_start_matches('/');
 
-    // Resolve upstream
+    //resolve upstream
     let (upstream_base, target_path, needs_auth) = match resolve_route(rest, &state.config) {
         Some(r) => r,
         None => {
@@ -83,7 +80,7 @@ async fn api_proxy_handler(
 
     let url = format!("{}{}", upstream_base.trim_end_matches('/'), target_path);
 
-    // Read body
+    //read body
     let body_bytes = match axum::body::to_bytes(req.into_body(), 1024 * 1024).await {
         Ok(b) => b,
         Err(_) => {
@@ -91,7 +88,7 @@ async fn api_proxy_handler(
         }
     };
 
-    // Build upstream request
+    //build upstream request
     let client = reqwest::Client::new();
     let mut upstream_req = match method {
         Method::GET => client.get(&url),
@@ -102,12 +99,12 @@ async fn api_proxy_handler(
         _ => client.get(&url),
     };
 
-    // Forward Content-Type
+    //forward content-type
     if let Some(ct) = headers.get("content-type") {
         upstream_req = upstream_req.header("content-type", ct);
     }
 
-    // Inject auth for Keymaster
+    //inject auth for keymaster
     if needs_auth && !state.config.keymaster_token.is_empty() {
         upstream_req = upstream_req.header(
             "Authorization",
@@ -115,12 +112,12 @@ async fn api_proxy_handler(
         );
     }
 
-    // Forward body
+    //forward body
     if !body_bytes.is_empty() {
         upstream_req = upstream_req.body(body_bytes.to_vec());
     }
 
-    // Execute
+    //execute
     match upstream_req.send().await {
         Ok(resp) => {
             let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -136,7 +133,7 @@ async fn api_proxy_handler(
                     let mut response = Response::builder()
                         .status(status)
                         .header("content-type", ct);
-                    // If upstream returned non-JSON error, wrap it
+                    //if upstream returned non-json error, wrap it
                     if !status.is_success() && !is_json {
                         let wrapped = serde_json::json!({
                             "error": String::from_utf8_lossy(&body).to_string()

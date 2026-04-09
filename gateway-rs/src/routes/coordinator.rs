@@ -7,7 +7,7 @@ use crate::orchestrator::coordinator;
 
 use super::AppState;
 
-// ── GET /coordinator/session ─────────────────────────────────────
+//── get /coordinator/session ─────────────────────────────────────
 
 async fn get_session(State(state): State<AppState>) -> Json<serde_json::Value> {
     let session = coordinator::load_session(&state.redis).await;
@@ -18,7 +18,7 @@ async fn get_session(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
-// ── POST /coordinator/orchestrate ────────────────────────────────
+//── post /coordinator/orchestrate ────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct OrchestrateRequest {
@@ -42,7 +42,7 @@ async fn orchestrate(
 
     match result {
         Ok(orch_result) => {
-            // If spawn_dag is set, fire-and-forget to NullBoiler
+            //if spawn_dag is set, fire-and-forget to nullboiler
             if let Some(ref dag_name) = orch_result.spawn_dag {
                 let orch = state.coordinator_orchestrator.clone();
                 let dag = dag_name.clone();

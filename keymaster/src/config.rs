@@ -81,8 +81,8 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load config, override RPC URLs and Safe addresses from env vars.
-    /// Env pattern: VESPRA_RPC_ETHEREUM, VESPRA_SAFE_BASE, etc.
+    ///load config, override rpc urls and safe addresses from env vars.
+    ///env pattern: vespra_rpc_ethereum, vespra_safe_base, etc.
     pub fn load(path: Option<&Path>) -> Self {
         let mut config = if let Some(p) = path {
             if p.exists() {

@@ -22,12 +22,12 @@ impl PoolFetcher {
         Self { client, redis, chain_registry }
     }
 
-    /// Fetch top opportunities for the given chain names.
+    ///fetch top opportunities for the given chain names.
     pub async fn fetch(&self, chains: &[String]) -> Result<Vec<Opportunity>> {
         self.fetch_inner(chains, None).await
     }
 
-    /// Fetch opportunities filtered to specific protocols.
+    ///fetch opportunities filtered to specific protocols.
     pub async fn fetch_for_protocol(
         &self,
         chains: &[String],
@@ -41,8 +41,8 @@ impl PoolFetcher {
         chains: &[String],
         protocol_filter: Option<&[String]>,
     ) -> Result<Vec<Opportunity>> {
-        // Resolve chain names → defillama slugs via ChainRegistry.
-        // slug_to_name maps lowercase defillama slug → our chain name.
+        //resolve chain names → defillama slugs via chainregistry.
+        //slug_to_name maps lowercase defillama slug → our chain name.
         let mut slug_to_name: HashMap<String, String> = HashMap::new();
         for name in chains {
             match self.chain_registry.get(name) {
@@ -58,12 +58,12 @@ impl PoolFetcher {
             return Ok(vec![]);
         }
 
-        // Cache key: sorted chain names joined by ","
+        //cache key: sorted chain names joined by ","
         let mut sorted_chains: Vec<&str> = slug_to_name.values().map(|s| s.as_str()).collect();
         sorted_chains.sort();
         let cache_key = format!("vespra:pools:{}", sorted_chains.join(","));
 
-        // Check Redis cache
+        //check redis cache
         if let Ok(mut conn) = redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await {
             let cached: Option<String> = conn.get(&cache_key).await.ok().flatten();
             if let Some(data) = cached {
@@ -78,7 +78,7 @@ impl PoolFetcher {
             }
         }
 
-        // Fetch from DeFi Llama
+        //fetch from defi llama
         let resp = self.client
             .get("https://yields.llama.fi/pools")
             .send()
@@ -98,14 +98,14 @@ impl PoolFetcher {
         let mut opps = Vec::new();
 
         for item in &items {
-            // Match chain via defillama_slug from ChainRegistry
+            //match chain via defillama_slug from chainregistry
             let pool_chain_raw = item.get("chain").and_then(|v| v.as_str()).unwrap_or("");
             let pool_chain_lower = pool_chain_raw.to_lowercase();
 
             let chain_name = match slug_to_name.get(&pool_chain_lower) {
                 Some(name) => name.clone(),
                 None => {
-                    // Also try reverse lookup through ChainRegistry for unusual casing
+                    //also try reverse lookup through chainregistry for unusual casing
                     match self.chain_registry.from_defillama_slug(pool_chain_raw) {
                         Some(cfg) if slug_to_name.contains_key(&cfg.defillama_slug.to_lowercase()) => {
                             cfg.name.clone()
@@ -118,7 +118,7 @@ impl PoolFetcher {
             let apy = item.get("apy").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let tvl_usd_f = item.get("tvlUsd").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
-            // Filter: tvl > 100k, apy > 0
+            //filter: tvl > 100k, apy > 0
             if tvl_usd_f <= 100_000.0 || apy <= 0.0 {
                 continue;
             }
@@ -185,7 +185,7 @@ impl PoolFetcher {
             });
         }
 
-        // Sort by momentum_score descending, take top 50
+        //sort by momentum_score descending, take top 50
         opps.sort_by(|a, b| {
             b.momentum_score
                 .partial_cmp(&a.momentum_score)
@@ -193,14 +193,14 @@ impl PoolFetcher {
         });
         opps.truncate(50);
 
-        // Cache in Redis with 60s TTL
+        //cache in redis with 60s ttl
         if let Ok(mut conn) = redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await {
             if let Ok(json) = serde_json::to_string(&opps) {
                 let _: Result<(), _> = conn.set_ex(&cache_key, &json, 60).await;
             }
         }
 
-        // Apply protocol filter if requested
+        //apply protocol filter if requested
         if let Some(protos) = protocol_filter {
             let proto_set: std::collections::HashSet<String> =
                 protos.iter().map(|p| p.to_lowercase()).collect();

@@ -136,12 +136,8 @@ impl SentinelAgent {
         }
         fn default_hold() -> String { "hold".into() }
 
-        // VES-89: do NOT silently fall back to "hold" on a parse failure —
-        // that disables every exit signal until the LLM recovers. Propagate
-        // the error so the caller (goal_runner) can retry and ultimately fail
-        // the goal after MAX_SENTINEL_PARSE_FAILURES consecutive parse errors.
         let parsed: RawAssessment = serde_json::from_str(&raw).map_err(|e| {
-            // Truncate by chars (not bytes) so multibyte UTF-8 like ≥ doesn't panic.
+            //truncate by chars (not bytes) so multibyte utf-8 like ≥ doesn't panic.
             let snippet: String = raw.chars().take(200).collect();
             anyhow::anyhow!("sentinel LLM response parse error: {e} (raw: {snippet})")
         })?;

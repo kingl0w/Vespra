@@ -36,24 +36,24 @@ const MAX_RETRIES: u32 = 3;
 const RETRY_BACKOFF_SECS: u64 = 10;
 const MONITOR_INTERVAL_SECS: u64 = 300; // 5 minutes
 const PAUSE_CHECK_SECS: u64 = 60;
-/// VES-86: hard cap on total goal-runner lifetime (24h). Prevents zombie goals
-/// that loop forever in HOLD/EXIT branches when sentinel never resolves.
+///ves-86: hard cap on total goal-runner lifetime (24h). prevents zombie goals
+///that loop forever in hold/exit branches when sentinel never resolves.
 const MAX_MONITORING_SECS: u64 = 86_400;
-/// VES-92: max consecutive scout retries triggered by token-resolution
-/// failures before failing the goal.
+///ves-92: max consecutive scout retries triggered by token-resolution
+///failures before failing the goal.
 const MAX_SCOUT_RETRIES: u32 = 5;
-/// VES-89: max consecutive sentinel LLM parse failures before failing the
-/// goal for human intervention.
+///ves-89: max consecutive sentinel llm parse failures before failing the
+///goal for human intervention.
 const MAX_SENTINEL_PARSE_FAILURES: u32 = 3;
 
-/// Determines which step a resumed GoalRunner should begin from.
+///determines which step a resumed goalrunner should begin from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalStep {
     Scouting,
     Monitoring,
 }
 
-/// Shared dependencies for a GoalRunner task.
+///shared dependencies for a goalrunner task.
 #[derive(Clone)]
 pub struct GoalRunnerDeps {
     pub pool_fetcher: Arc<PoolFetcher>,
@@ -72,8 +72,8 @@ pub struct GoalRunnerDeps {
     pub dry_run: bool,
 }
 
-/// Run the GoalRunner loop as a tokio task.
-/// Checks `cancel_rx` between every step.
+///run the goalrunner loop as a tokio task.
+///checks `cancel_rx` between every step.
 pub async fn run_goal(
     goal_id: Uuid,
     cancel_rx: watch::Receiver<bool>,
@@ -82,9 +82,6 @@ pub async fn run_goal(
     run_goal_with_resume(goal_id, cancel_rx, deps, None).await;
 }
 
-/// Run the GoalRunner with an optional resume point.
-/// `resume_from`: if `Some(Monitoring)`, the first iteration skips SCOUTING→EXECUTING
-/// and jumps directly to MONITORING. Subsequent iterations run from SCOUTING normally.
 pub async fn run_goal_with_resume(
     goal_id: Uuid,
     mut cancel_rx: watch::Receiver<bool>,
@@ -94,28 +91,19 @@ pub async fn run_goal_with_resume(
     tracing::info!("[goal {goal_id}] runner started (resume={resume_from:?})");
     let mut first_iteration = true;
 
-    // VES-86: hard deadline on the entire goal-runner lifetime. Local Instant
-    // restarts on each (re)launch — sufficient to break out of any infinite
-    // HOLD/EXIT/re-scout loop within a single process lifetime.
     let monitoring_deadline = Instant::now()
         + std::time::Duration::from_secs(MAX_MONITORING_SECS);
-    // VES-92: counter survives across iterations so we can fail the goal after
-    // MAX_SCOUT_RETRIES consecutive token-resolution failures. Reset to 0
-    // every time we successfully resolve token_in/token_out.
     let mut scout_retry_count: u32 = 0;
-    // VES-91: cached, parsed wallet UUID. Resolved exactly once on the first
-    // iteration (and persisted to Redis), then reused for the entire goal
-    // lifetime so the BUY and SELL legs can never land on different wallets.
     let mut cached_wallet_uuid: Option<Uuid> = None;
 
     loop {
-        // ── Check cancel ────────────────────────────────────────
+        //── check cancel ────────────────────────────────────────
         if *cancel_rx.borrow() {
             tracing::info!("[goal {goal_id}] cancelled — exiting runner");
             break;
         }
 
-        // ── VES-86: deadline check ─────────────────────────────
+        //── ves-86: deadline check ─────────────────────────────
         if Instant::now() > monitoring_deadline {
             fail_goal(
                 &deps.redis,
@@ -126,7 +114,7 @@ pub async fn run_goal_with_resume(
             break;
         }
 
-        // ── Load current goal state ─────────────────────────────
+        //── load current goal state ─────────────────────────────
         let goal = match get_goal(&deps.redis, goal_id).await {
             Ok(g) => g,
             Err(e) => {
@@ -149,16 +137,10 @@ pub async fn run_goal_with_resume(
                 continue;
             }
             GoalStatus::Pending | GoalStatus::Running => {
-                // proceed
+                //proceed
             }
         }
 
-        // ── VES-91: resolve + cache wallet UUID exactly once ───
-        // Prefer the value already persisted in Redis (set on a prior run);
-        // otherwise resolve from `wallet_id` and persist before any execution
-        // step touches a wallet. After this point all execution paths must
-        // read from `cached_wallet_uuid` and never call `resolve_goal_wallet_uuid`
-        // again — that's what guarantees BUY and SELL hit the same wallet.
         if cached_wallet_uuid.is_none() {
             let resolved = if let Some(s) = goal.resolved_wallet_uuid.as_deref() {
                 match Uuid::parse_str(s) {
@@ -205,7 +187,7 @@ pub async fn run_goal_with_resume(
             }
         };
 
-        // ── Resume shortcut: skip to MONITORING on first iteration if resuming ──
+        //── resume shortcut: skip to monitoring on first iteration if resuming ──
         if first_iteration && resume_from == Some(GoalStep::Monitoring) {
             first_iteration = false;
             tracing::info!("[goal {goal_id}] resuming directly into MONITORING");
@@ -213,10 +195,6 @@ pub async fn run_goal_with_resume(
                 tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
             }
 
-            // Build a position from persisted goal state. `token_address` is set
-            // when the BUY confirms; if it's missing the goal can't have a real
-            // open position to monitor, so fail rather than spin against a
-            // placeholder that breaks the price oracle.
             let resumed_token_address = match goal.token_address.clone() {
                 Some(addr) if !addr.is_empty() => addr,
                 _ => {
@@ -259,7 +237,7 @@ pub async fn run_goal_with_resume(
                     continue;
                 }
                 MonitorResult::ExitSignal => {
-                    // EXITING from resumed monitoring
+                    //exiting from resumed monitoring
                     tracing::info!("[goal {goal_id}] MONITORING → EXITING (resumed)");
                     let _ = update_goal_step(&deps.redis, goal_id, "EXITING").await;
                     let token_out = resumed_token_address.clone();
@@ -300,9 +278,6 @@ pub async fn run_goal_with_resume(
 
         let chains = vec![goal.chain.clone()];
 
-        // ═════════════════════════════════════════════════════════
-        // STEP 1 — SCOUTING
-        // ═════════════════════════════════════════════════════════
         tracing::info!("[goal {goal_id}] SCOUTING");
         if let Err(e) = update_goal_step(&deps.redis, goal_id, "SCOUTING").await {
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
@@ -344,24 +319,11 @@ pub async fn run_goal_with_resume(
         let best = match scout_result {
             Ok(opp) => opp,
             Err(e) => {
-                // TODO(VES-92): Replace this with a real testnet pool index.
-                // DefiLlama indexes only fake/junk tokens for Base Sepolia
-                // (ROBO, POLYCLAUDE, ASCV, …) so Scout legitimately finds no
-                // swappable pools and the pipeline can't be exercised end-to-end.
-                // As an interim, on testnet chains we inject a hardcoded
-                // WETH→USDC opportunity so the rest of the runner (RISK,
-                // TRADER, /swap) actually fires. The pool symbol "WETH-USDC"
-                // is enough for the executor's symbol→address resolver to pick
-                // 0x4200… (WETH) and 0x036C… (USDC) on Base Sepolia.
                 let chain_lower = goal.chain.to_lowercase();
                 let is_testnet = chain_lower.contains("sepolia")
                     || chain_lower.contains("testnet")
                     || chain_lower.contains("goerli");
                 if is_testnet {
-                    // VES-101: surface synthetic-data injection at warn level
-                    // so it's auditable in logs. The Opportunity struct has no
-                    // synthetic flag — adding one is out of scope here, so the
-                    // log is the durable record.
                     tracing::warn!(
                         "[goal {goal_id}] injecting synthetic WETH/USDC fallback opportunity — no real testnet pools found from DeFiLlama (scout error: {e})"
                     );
@@ -383,9 +345,6 @@ pub async fn run_goal_with_resume(
 
         if *cancel_rx.borrow() { continue; }
 
-        // ═════════════════════════════════════════════════════════
-        // STEP 2 — RISK
-        // ═════════════════════════════════════════════════════════
         tracing::info!("[goal {goal_id}] SCOUTING → RISK");
         if let Err(e) = update_goal_step(&deps.redis, goal_id, "RISK").await {
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
@@ -427,9 +386,6 @@ pub async fn run_goal_with_resume(
 
         if *cancel_rx.borrow() { continue; }
 
-        // ═════════════════════════════════════════════════════════
-        // STEP 3 — TRADING
-        // ═════════════════════════════════════════════════════════
         tracing::info!("[goal {goal_id}] RISK → TRADING");
         if let Err(e) = update_goal_step(&deps.redis, goal_id, "TRADING").await {
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
@@ -495,9 +451,6 @@ pub async fn run_goal_with_resume(
 
         if *cancel_rx.borrow() { continue; }
 
-        // ═════════════════════════════════════════════════════════
-        // STEP 4 — EXECUTING
-        // ═════════════════════════════════════════════════════════
         let (token_in, token_out, swap_amount_wei, expected_gain_pct) = match trader_decision {
             TraderDecision::Swap {
                 ref token_in,
@@ -524,15 +477,6 @@ pub async fn run_goal_with_resume(
             }
         };
 
-        // Resolve symbol → address before handing off to executor.
-        // Scout often emits pool symbols ("USDC-WETH", "LIQTEST-WETH") rather
-        // than ERC-20 addresses. Testnet pools sometimes contain fake tokens
-        // (LIQTEST, VELVET, VFY) with no real contract — skip them and
-        // re-SCOUT instead of submitting a broken swap to Keymaster.
-        // VES-92: helper closure used at every "unresolvable, re-scout" exit
-        // below. Increments a retry counter that survives across iterations
-        // and fails the goal after MAX_SCOUT_RETRIES so we can't loop forever
-        // on a permanently-broken pool.
         let token_in = match resolve_swap_token(&token_in, &goal.chain) {
             Some(a) => a,
             None => {
@@ -575,11 +519,6 @@ pub async fn run_goal_with_resume(
                 continue;
             }
         };
-        // Guard against degenerate same-token swaps. This happens when a pool
-        // symbol like "WETH-CBBTC" pairs WETH with an unknown token: the
-        // resolver falls back to WETH for both sides since CBBTC has no entry
-        // in the known-token map. The downstream swap would either revert or
-        // be a no-op, so re-scout instead.
         if token_in.eq_ignore_ascii_case(&token_out) {
             scout_retry_count += 1;
             tracing::warn!(
@@ -598,8 +537,8 @@ pub async fn run_goal_with_resume(
             sleep_interruptible(&mut cancel_rx, 30).await;
             continue;
         }
-        // VES-92: token resolution succeeded — reset the retry counter so a
-        // future bad pool starts from zero again.
+        //ves-92: token resolution succeeded — reset the retry counter so a
+        //future bad pool starts from zero again.
         scout_retry_count = 0;
         tracing::info!(
             "[goal {goal_id}] resolved swap addresses: in={} out={}",
@@ -611,8 +550,8 @@ pub async fn run_goal_with_resume(
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
         }
 
-        // VES-91: use the wallet UUID cached at goal-runner start. Never
-        // re-resolve mid-lifecycle — that's the bug this fix prevents.
+        //ves-91: use the wallet uuid cached at goal-runner start. never
+        //re-resolve mid-lifecycle — that's the bug this fix prevents.
         let buy_tx_status = execution_gate::execute_traced(
             &deps.executor,
             &deps.config,
@@ -647,12 +586,6 @@ pub async fn run_goal_with_resume(
             }
         }
 
-        // Capture the amount of `token_out` received so the SELL leg can sell
-        // exactly what we hold (not capital_eth * 1e18, which assumes a 1:1
-        // ETH→token mint and reverts on real swaps). We re-quote with the
-        // resolved addresses; if the quote fails the sell will fail-fast at
-        // SELL time with a clear "token_amount_held not set" error rather than
-        // submitting a doomed tx.
         let token_amount_out = deps
             .quote_fetcher
             .fetch_quote(&token_in, &token_out, &swap_amount_wei, chain_id)
@@ -680,9 +613,6 @@ pub async fn run_goal_with_resume(
 
         if *cancel_rx.borrow() { continue; }
 
-        // ═════════════════════════════════════════════════════════
-        // STEP 5 — MONITORING
-        // ═════════════════════════════════════════════════════════
         tracing::info!("[goal {goal_id}] EXECUTING → MONITORING");
         if let Err(e) = update_goal_step(&deps.redis, goal_id, "MONITORING").await {
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
@@ -723,21 +653,15 @@ pub async fn run_goal_with_resume(
             }
             MonitorResult::NoExit => continue,
             MonitorResult::ExitSignal => {
-                // fall through to STEP 6 — EXITING
+                //fall through to step 6 — exiting
             }
         }
 
-        // ═════════════════════════════════════════════════════════
-        // STEP 6 — EXITING
-        // ═════════════════════════════════════════════════════════
         tracing::info!("[goal {goal_id}] MONITORING → EXITING");
         if let Err(e) = update_goal_step(&deps.redis, goal_id, "EXITING").await {
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
         }
 
-        // Use the actual token amount captured at BUY time. If it's missing
-        // (quote failed or BUY never recorded), fail-fast instead of submitting
-        // a sell that will revert and leave funds stuck.
         let sell_amount = match token_amount_out.clone() {
             Some(amt) => amt,
             None => {
@@ -750,11 +674,11 @@ pub async fn run_goal_with_resume(
                 break;
             }
         };
-        // VES-91: reuse the cached wallet UUID resolved at goal-runner start.
-        // Guarantees the SELL leg lands on the same wallet as the BUY leg.
+        //ves-91: reuse the cached wallet uuid resolved at goal-runner start.
+        //guarantees the sell leg lands on the same wallet as the buy leg.
         let sell_wallet_uuid = cached_wallet_uuid_val;
-        // token_out is already a resolved address (set during BUY handoff above).
-        // Resolve "WETH" symbol to the chain's WETH address for the sell side.
+        //token_out is already a resolved address (set during buy handoff above).
+        //resolve "weth" symbol to the chain's weth address for the sell side.
         let weth_addr = match known_token_address("WETH", &goal.chain) {
             Some(a) => a,
             None => {
@@ -792,7 +716,7 @@ pub async fn run_goal_with_resume(
             }
         }
 
-        // Collect exit fee (only on confirmed/dry-run sells with profit)
+        //collect exit fee (only on confirmed/dry-run sells with profit)
         if matches!(sell_tx_status, TxStatus::Confirmed { .. } | TxStatus::DryRun { .. }) {
             crate::fees::collect_exit_fee(
                 goal_id,
@@ -810,23 +734,16 @@ pub async fn run_goal_with_resume(
 
         if *cancel_rx.borrow() { continue; }
 
-        // ═════════════════════════════════════════════════════════
-        // STEP 7 — COMPOUNDING
-        // ═════════════════════════════════════════════════════════
         tracing::info!("[goal {goal_id}] EXITING → COMPOUNDING");
         if let Err(e) = update_goal_step(&deps.redis, goal_id, "COMPOUNDING").await {
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
         }
 
-        // VES-107: guard against zero/negative expected_gain_pct so a HOLD
-        // decision (or trader bug) doesn't compound the wallet flat or
-        // backwards. If invalid, skip the pnl write entirely and keep the
-        // existing capital — the next cycle will retry from SCOUTING.
         if expected_gain_pct > 0.0 {
-            // Compute new capital based on expected gain
+            //compute new capital based on expected gain
             let new_capital = goal.current_eth * (1.0 + expected_gain_pct / 100.0);
 
-            // Update P&L
+            //update p&l
             if let Err(e) = update_goal_pnl(&deps.redis, goal_id, new_capital).await {
                 tracing::warn!("[goal {goal_id}] pnl update failed: {e}");
             }
@@ -837,12 +754,12 @@ pub async fn run_goal_with_resume(
             );
         }
 
-        // Increment cycles
+        //increment cycles
         let mut updated_goal = match get_goal(&deps.redis, goal_id).await {
             Ok(g) => g,
             Err(e) => {
-                // VES-108: explicit log so an external delete during a goal
-                // cycle is auditable instead of a silent break.
+                //ves-108: explicit log so an external delete during a goal
+                //cycle is auditable instead of a silent break.
                 tracing::info!(
                     "goal {goal_id} removed from store mid-loop — exiting goal runner: {e}"
                 );
@@ -865,7 +782,7 @@ pub async fn run_goal_with_resume(
             pnl_pct_total
         );
 
-        // Check target gain
+        //check target gain
         if pnl_pct_total >= updated_goal.target_gain_pct {
             tracing::info!(
                 "[goal {goal_id}] target gain {:.1}% reached — completing",
@@ -876,7 +793,7 @@ pub async fn run_goal_with_resume(
             break;
         }
 
-        // Check stop loss
+        //check stop loss
         if pnl_pct_total <= -(updated_goal.stop_loss_pct) {
             tracing::info!(
                 "[goal {goal_id}] stop loss -{:.1}% triggered — failing",
@@ -888,16 +805,16 @@ pub async fn run_goal_with_resume(
             break;
         }
 
-        // Save and loop back to STEP 1
+        //save and loop back to step 1
         let _ = save_goal(&deps.redis, &updated_goal).await;
     }
 
     tracing::info!("[goal {goal_id}] runner exited");
 }
 
-// ── Monitor result + extracted monitoring loop ─────────────────
+//── monitor result + extracted monitoring loop ─────────────────
 
-/// Outcome of the monitoring loop, used to drive the outer GoalRunner loop.
+///outcome of the monitoring loop, used to drive the outer goalrunner loop.
 enum MonitorResult {
     ExitSignal,
     YieldRotate,
@@ -905,7 +822,6 @@ enum MonitorResult {
     NoExit,
 }
 
-/// Shared monitoring loop used by both normal flow (STEP 5) and resume-from-monitoring.
 async fn run_monitoring_loop(
     goal_id: Uuid,
     goal: &crate::types::goals::GoalSpec,
@@ -915,9 +831,6 @@ async fn run_monitoring_loop(
 ) -> MonitorResult {
     let mut exit_signal = false;
     let mut yield_rotate_signal = false;
-    // VES-89: count consecutive sentinel LLM parse failures. After
-    // MAX_SENTINEL_PARSE_FAILURES the goal is failed for human review rather
-    // than continuing to monitor against a sentinel that can't decide.
     let mut sentinel_parse_failures: u32 = 0;
 
     let (sentinel_tx, mut sentinel_rx) = tokio::sync::mpsc::channel::<SentinelSignal>(8);
@@ -973,9 +886,6 @@ async fn run_monitoring_loop(
             .map(|p| p.price_usd)
             .unwrap_or(0.0);
 
-        // VES-93: validate current_price before any sentinel comparison.
-        // NaN/inf/<=0 makes every downstream gain/loss check meaningless and
-        // would silently disable the exit logic.
         if current_price.is_nan() || current_price.is_infinite() || current_price <= 0.0 {
             tracing::warn!(
                 "[goal {goal_id}] invalid current_price ({}) — sentinel cannot evaluate",
@@ -1005,11 +915,6 @@ async fn run_monitoring_loop(
                 tracing::debug!("[goal {goal_id}] sentinel: hold — {}", a.reasoning);
             }
             Err(e) => {
-                // VES-89: distinguish parse errors from other sentinel failures.
-                // Parse errors get retried up to MAX_SENTINEL_PARSE_FAILURES
-                // before the goal is aborted for human intervention; other
-                // errors (LLM call failure, etc.) keep the prior non-fatal
-                // warn behavior so a transient network blip doesn't kill goals.
                 let msg = e.to_string();
                 if msg.contains("sentinel LLM response parse error") {
                     sentinel_parse_failures += 1;
@@ -1045,10 +950,6 @@ async fn run_monitoring_loop(
             rotation = yield_rx.recv() => {
                 if let Some(rotation) = rotation {
                     if matches!(goal.strategy, GoalStrategy::YieldRotate | GoalStrategy::Adaptive) {
-                        // VES-99: snapshot pnl_pct (and stop_loss_pct) before
-                        // any comparison so we don't race against a concurrent
-                        // mutator on `goal`. All checks below use the snapshot
-                        // exclusively.
                         let pnl_snapshot = goal.pnl_pct;
                         let stop_loss_snapshot = goal.stop_loss_pct;
                         if pnl_snapshot <= -(stop_loss_snapshot * 0.8) {
@@ -1076,7 +977,7 @@ async fn run_monitoring_loop(
     }
 }
 
-// ── Retry helper ────────────────────────────────────────────────
+//── retry helper ────────────────────────────────────────────────
 
 async fn with_retry<F, Fut, T>(
     goal_id: Uuid,
@@ -1102,8 +1003,8 @@ where
                 );
                 last_err = e;
                 if attempt < MAX_RETRIES {
-                    // VES-114: jitter the backoff so concurrent goals don't
-                    // retry in lockstep against the RPC and LLM endpoints.
+                    //ves-114: jitter the backoff so concurrent goals don't
+                    //retry in lockstep against the rpc and llm endpoints.
                     let base_backoff_ms = RETRY_BACKOFF_SECS * 1000 * attempt as u64;
                     let jitter = rand::thread_rng().gen_range(0..500);
                     tokio::time::sleep(std::time::Duration::from_millis(
@@ -1117,19 +1018,8 @@ where
     Err(last_err)
 }
 
-// ── Helpers ─────────────────────────────────────────────────────
+//── helpers ─────────────────────────────────────────────────────
 
-/// Look up a known token symbol → ERC-20 address for the given chain.
-/// Returns `None` for unknown symbols or unsupported chains. Used to filter
-/// out fake testnet tokens (e.g. LIQTEST, VELVET, VFY) before submitting a
-/// swap to Keymaster, which would otherwise reject calldata built from a
-/// non-address string.
-///
-/// **Base Sepolia has very limited real token deployments.** Most yield-pool
-/// data sources surface a long tail of fake testnet tokens that have no real
-/// ERC-20 contract and no liquidity. Only the addresses below are known-good
-/// and reachable via Uniswap V3 routes; everything else returns `None` so the
-/// goal runner re-scouts instead of submitting a doomed swap.
 fn known_token_address(symbol: &str, chain: &str) -> Option<String> {
     let s = symbol.trim().to_uppercase();
     let chain_lower = chain.to_lowercase();
@@ -1139,7 +1029,7 @@ fn known_token_address(symbol: &str, chain: &str) -> Option<String> {
             "WETH" | "ETH" => Some("0x4200000000000000000000000000000000000006".into()),
             "USDC" => Some("0x036CbD53842c5426634e7929541eC2318f3dCF7e".into()),
             "WBTC" => Some("0x0555E30da8f98308EdB960aa94C0Db47230d2B9C".into()),
-            // CBBTC, USDBC, DAI etc. don't have real Base Sepolia deployments.
+            //cbbtc, usdbc, dai etc. don't have real base sepolia deployments.
             _ => None,
         };
     }
@@ -1158,11 +1048,6 @@ fn known_token_address(symbol: &str, chain: &str) -> Option<String> {
     None
 }
 
-/// Resolve a token field that may be a plain symbol ("WETH"), a pool pair
-/// symbol ("USDC-WETH", "LIQTEST-WETH", "USDC-VFY"), or already a hex address.
-/// For pool pair symbols, prefers the non-WETH side; if neither side is WETH,
-/// returns whichever half is found in the known-token map. Returns `None`
-/// when no half resolves.
 fn resolve_swap_token(field: &str, chain: &str) -> Option<String> {
     let trimmed = field.trim();
     if trimmed.starts_with("0x") && trimmed.len() == 42 {
@@ -1171,7 +1056,7 @@ fn resolve_swap_token(field: &str, chain: &str) -> Option<String> {
     if let Some((a, b)) = trimmed.split_once('-') {
         let a_upper = a.to_uppercase();
         let b_upper = b.to_uppercase();
-        // Prefer the non-WETH side first.
+        //prefer the non-weth side first.
         let (first, second) = if a_upper == "WETH" || a_upper == "ETH" {
             (b, a)
         } else if b_upper == "WETH" || b_upper == "ETH" {
@@ -1184,9 +1069,6 @@ fn resolve_swap_token(field: &str, chain: &str) -> Option<String> {
     known_token_address(trimmed, chain)
 }
 
-/// Parse the goal's resolved Keymaster wallet UUID. Returns `Err` if the goal
-/// has no `wallet_id` (legacy goal created before this field existed) or the
-/// stored value isn't a valid UUID. Callers should `fail_goal` on `Err`.
 fn resolve_goal_wallet_uuid(goal: &crate::types::goals::GoalSpec) -> Result<Uuid, String> {
     let raw = goal
         .wallet_id
@@ -1215,7 +1097,7 @@ async fn sleep_interruptible(cancel_rx: &mut watch::Receiver<bool>, secs: u64) {
     }
 }
 
-// ── P&L calculation (pure, for testing) ──────────────────────────
+//── p&l calculation (pure, for testing) ──────────────────────────
 
 pub fn compute_pnl(entry_eth: f64, current_eth: f64) -> (f64, f64) {
     let pnl_eth = current_eth - entry_eth;
@@ -1256,7 +1138,7 @@ mod tests {
 
     #[test]
     fn test_goal_step_resume_routing() {
-        // Goals in MONITORING/EXITING should resume from Monitoring
+        //goals in monitoring/exiting should resume from monitoring
         let step_monitoring = "MONITORING";
         let step_exiting = "EXITING";
         let step_executing = "EXECUTING";
@@ -1282,9 +1164,6 @@ mod tests {
 
     #[test]
     fn test_mid_execution_crash_routes_to_monitoring() {
-        // EXECUTING is a dangerous state — if the gateway crashed mid-execution,
-        // the position may or may not exist on-chain. We resume from MONITORING
-        // so sentinel can check.
         let crash_step = "EXECUTING";
         let resume = match crash_step {
             "MONITORING" | "EXITING" | "EXECUTING" => Some(GoalStep::Monitoring),
@@ -1295,8 +1174,8 @@ mod tests {
 
     #[test]
     fn test_auto_resume_disabled_skips_all() {
-        // VESPRA_AUTO_RESUME_GOALS=false means no goals should be resumed.
-        // The logic is: if env var is "false" or "0", skip. Otherwise resume.
+        //vespra_auto_resume_goals=false means no goals should be resumed.
+        //the logic is: if env var is "false" or "0", skip. otherwise resume.
         fn should_resume(val: &str) -> bool {
             val != "false" && val != "0"
         }

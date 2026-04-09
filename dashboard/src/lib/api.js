@@ -12,10 +12,6 @@ async function request(path, opts = {}) {
     headers: { "Content-Type": "application/json", ...opts.headers },
     ...opts,
   });
-  // VES-88: never surface raw response text to the UI. If the server returned
-  // HTML (error page, gateway timeout, captive portal) it could be rendered
-  // unsanitized by an upstream error boundary, leaking internals or enabling
-  // XSS. Log the raw text to console for debugging and throw a generic error.
   const text = await res.text();
   let data;
   try {
@@ -36,12 +32,12 @@ async function request(path, opts = {}) {
 }
 
 export const api = {
-  // Health
+  //health
   health: () => request("/health"),
   healthAll: () => request("/health"),
-  // Returns { gateway: {...}, boiler: {...}, keymaster: {...} }
+  //returns { gateway: {...}, boiler: {...}, keymaster: {...} }
 
-  // Swarm
+  //swarm
   swarmCommand: (command, walletId, { signal } = {}) =>
     fetch(`${BASE_GW}/swarm/command`, {
       method: "POST",
@@ -62,13 +58,13 @@ export const api = {
     fetch(`${BASE_GW}/swarm/status`)
       .then(r => r.json()),
 
-  // DAGs
+  //dags
   dagList: () => request("/dag"),
   dagSubmit: (dag) =>
     request("/dag", { method: "POST", body: JSON.stringify(dag) }),
   dagGet: (id) => request(`/dag/${id}`),
 
-  // Wallets
+  //wallets
   walletList: () => request("/wallet"),
   walletGet: (id) => request(`/wallet/${id}`),
   walletCreate: (body) =>
@@ -81,14 +77,14 @@ export const api = {
       }),
     }),
 
-  // Balances
+  //balances
   balance: (chain, address) => request(`/balance/${chain}/${address}`),
   balancesAll: (chain) => request(`/balances/${chain}`),
 
-  // Chain
+  //chain
   chainStatus: (chain) => request(`/chain/${chain}`),
 
-  // TX
+  //tx
   txLog: (walletId) => request(`/tx/log/${walletId}`),
   txSend: (body) =>
     request("/dispatch", {
@@ -105,7 +101,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  // Settings
+  //settings
   safesGet: () => request("/settings/safes"),
   safeSet: (chain, address) =>
     request(`/settings/safes/${chain}`, {
@@ -113,7 +109,7 @@ export const api = {
       body: JSON.stringify({ address }),
     }),
 
-  // Trade Up (VES-37)
+  //trade up (ves-37)
   tradeUpStart: (wallet, chain) =>
     fetch(`${BASE_GW}/trade-up/position/start`, {
       method: "POST",
@@ -135,7 +131,7 @@ export const api = {
     fetch(`${BASE_GW}/trade-up/position/history`)
       .then(r => r.json()),
 
-  // Coordinator
+  //coordinator
   orchestrate: (intent, wallet, chain) =>
     fetch(`${BASE_GW}/coordinator/orchestrate`, {
       method: "POST",
@@ -143,7 +139,7 @@ export const api = {
       body: JSON.stringify({ intent, ...(wallet ? { wallet } : {}), ...(chain ? { chain } : {}) }),
     }).then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
 
-  // Goals (VES-87)
+  //goals (ves-87)
   fetchGoals: () =>
     fetch(`${BASE_GW}/goals`)
       .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
@@ -181,7 +177,7 @@ export const api = {
     fetch(`${BASE_GW}/goals/portfolio`)
       .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
 
-  // Backtest (sprint 6)
+  //backtest (sprint 6)
   runBacktest: (payload) =>
     fetch(`${BASE_GW}/backtest`, {
       method: "POST",
@@ -197,7 +193,7 @@ export const api = {
     fetch(`${BASE_GW}/backtests/${id}`)
       .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e))),
 
-  // Dispatch (generic)
+  //dispatch (generic)
   dispatch: (action, params) =>
     request("/dispatch", {
       method: "POST",

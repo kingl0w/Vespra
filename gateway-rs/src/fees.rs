@@ -1,8 +1,3 @@
-//! Fee collection on goal exit.
-//!
-//! FEE_RATE_BPS is read from env at startup and cannot be changed via API.
-//! Changing the fee rate requires a gateway redeploy. This is by design —
-//! the rate is fixed for the IaaS model.
 
 use chrono::Utc;
 use redis::AsyncCommands;
@@ -15,16 +10,15 @@ use crate::chain::ChainRegistry;
 use crate::execution_gate;
 use crate::types::tx::TxStatus;
 
-// ── Constants ──────────────────────────────────────────────────
+//── constants ──────────────────────────────────────────────────
 
-/// Default fee rate in basis points (10 = 0.1%). Override with FEE_RATE_BPS env var.
 const DEFAULT_FEE_RATE_BPS: u32 = 10;
 
-/// Redis keys
+///redis keys
 const FEE_TOTAL_KEY: &str = "fees:total";
 const FEE_TODAY_PREFIX: &str = "fees:daily";
 
-/// Read the fee rate from env (once, at call time).
+///read the fee rate from env (once, at call time).
 pub fn fee_rate_bps() -> u32 {
     std::env::var("FEE_RATE_BPS")
         .ok()
@@ -32,12 +26,12 @@ pub fn fee_rate_bps() -> u32 {
         .unwrap_or(DEFAULT_FEE_RATE_BPS)
 }
 
-/// Read the treasury address from env.
+///read the treasury address from env.
 pub fn treasury_address() -> String {
     std::env::var("VESPRA_TREASURY_ADDRESS").unwrap_or_default()
 }
 
-// ── Fee record ─────────────────────────────────────────────────
+//── fee record ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeeRecord {
@@ -52,9 +46,9 @@ fn fee_key(goal_id: &Uuid) -> String {
     format!("fees:{goal_id}")
 }
 
-// ── Core fee logic ─────────────────────────────────────────────
+//── core fee logic ─────────────────────────────────────────────
 
-/// Calculate the fee for a goal exit. Returns 0.0 if there's no profit.
+///calculate the fee for a goal exit. returns 0.0 if there's no profit.
 pub fn calculate_fee(entry_eth: f64, current_eth: f64, rate_bps: u32) -> f64 {
     let net_gain = current_eth - entry_eth;
     if net_gain <= 0.0 {
@@ -63,12 +57,6 @@ pub fn calculate_fee(entry_eth: f64, current_eth: f64, rate_bps: u32) -> f64 {
     net_gain * (rate_bps as f64) / 10_000.0
 }
 
-/// Collect fee after a successful goal exit.
-///
-/// 1. Calculate fee from P&L
-/// 2. Send fee tx via Executor → Keymaster (respects dry_run)
-/// 3. Record in Redis
-/// 4. Log collection
 pub async fn collect_exit_fee(
     goal_id: Uuid,
     entry_eth: f64,
@@ -97,7 +85,7 @@ pub async fn collect_exit_fee(
     let gain_eth = current_eth - entry_eth;
     let fee_wei = format!("{:.0}", fee * 1e18);
 
-    // Send fee through the same execution path as normal txs
+    //send fee through the same execution path as normal txs
     let tx_status = execution_gate::execute_traced(
         executor,
         config,
@@ -132,7 +120,7 @@ pub async fn collect_exit_fee(
         }
     };
 
-    // Record in Redis
+    //record in redis
     let record = FeeRecord {
         goal_id,
         fee_eth: fee,
@@ -145,16 +133,16 @@ pub async fn collect_exit_fee(
         if let Ok(mut conn) =
             redis::Client::get_multiplexed_async_connection(redis).await
         {
-            // Per-goal record
+            //per-goal record
             let _: Result<(), _> = conn.set(fee_key(&goal_id), &json).await;
 
-            // Running total (atomic increment)
+            //running total (atomic increment)
             let _: Result<String, _> = redis::cmd("INCRBYFLOAT")
                     .arg(FEE_TOTAL_KEY)
                     .arg(fee)
                     .query_async(&mut conn).await;
 
-            // Daily total
+            //daily total
             let today = Utc::now().format("%Y-%m-%d").to_string();
             let daily_key = format!("{FEE_TODAY_PREFIX}:{today}");
             let _: Result<String, _> = redis::cmd("INCRBYFLOAT")
@@ -163,14 +151,14 @@ pub async fn collect_exit_fee(
                     .query_async(&mut conn).await;
             let _: Result<(), _> = conn.expire(&daily_key, 172800).await; // 48h TTL
 
-            // Recent fees list
+            //recent fees list
             let _: Result<(), _> = conn.lpush("fees:recent", &json).await;
             let _: Result<(), _> = conn.ltrim("fees:recent", 0, 99).await;
         }
     }
 }
 
-/// Load fee record for a specific goal.
+///load fee record for a specific goal.
 pub async fn get_fee_record(
     redis: &redis::Client,
     goal_id: Uuid,
@@ -180,7 +168,7 @@ pub async fn get_fee_record(
     raw.and_then(|s| serde_json::from_str(&s).ok())
 }
 
-/// Load fee summary data.
+///load fee summary data.
 pub async fn fee_summary(
     redis: &redis::Client,
 ) -> serde_json::Value {
@@ -234,7 +222,7 @@ pub async fn fee_summary(
     })
 }
 
-// ── Tests ──────────────────────────────────────────────────────
+//── tests ──────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -242,11 +230,11 @@ mod tests {
 
     #[test]
     fn fee_positive_gain() {
-        // 10 bps on 0.5 ETH gain = 0.5 * 10/10000 = 0.0005 ETH
+        //10 bps on 0.5 eth gain = 0.5 * 10/10000 = 0.0005 eth
         let fee = calculate_fee(1.0, 1.5, 10);
         assert!((fee - 0.0005).abs() < 1e-12, "fee={fee}");
 
-        // 50 bps on 0.2 ETH gain = 0.2 * 50/10000 = 0.001 ETH
+        //50 bps on 0.2 eth gain = 0.2 * 50/10000 = 0.001 eth
         let fee = calculate_fee(0.1, 0.3, 50);
         assert!((fee - 0.001).abs() < 1e-12, "fee={fee}");
     }
@@ -265,19 +253,19 @@ mod tests {
 
     #[test]
     fn fee_rate_scales_correctly() {
-        // 100 bps = 1%
+        //100 bps = 1%
         let fee = calculate_fee(1.0, 2.0, 100);
         assert!((fee - 0.01).abs() < 1e-12, "1% of 1 ETH gain = 0.01");
 
-        // 1 bps = 0.01%
+        //1 bps = 0.01%
         let fee = calculate_fee(1.0, 2.0, 1);
         assert!((fee - 0.0001).abs() < 1e-12);
     }
 
     #[test]
     fn dry_run_does_not_affect_calculation() {
-        // Fee calculation is pure — dry_run only affects the tx broadcast,
-        // not the calculation itself. Verify the math is the same.
+        //fee calculation is pure — dry_run only affects the tx broadcast,
+        //not the calculation itself. verify the math is the same.
         let fee_normal = calculate_fee(0.5, 0.6, 10);
         let fee_dry = calculate_fee(0.5, 0.6, 10);
         assert_eq!(fee_normal, fee_dry);

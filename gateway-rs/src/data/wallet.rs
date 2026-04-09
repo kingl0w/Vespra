@@ -65,7 +65,7 @@ impl WalletFetcher {
         let entries: Vec<KeymasterWallet> = serde_json::from_str(&body)
             .context("failed to parse keymaster wallets JSON")?;
 
-        // Look up RPC URL from chain registry
+        //look up rpc url from chain registry
         let rpc_url = self
             .chain_registry
             .get(chain)
@@ -83,7 +83,7 @@ impl WalletFetcher {
                 entry.chain
             };
 
-            // Fetch ETH balance via JSON-RPC if we have an RPC URL
+            //fetch eth balance via json-rpc if we have an rpc url
             let balance_eth = if !rpc_url.is_empty() && !address.is_empty() {
                 match self.fetch_eth_balance(rpc_url, &address).await {
                     Ok(bal) => {
@@ -145,7 +145,7 @@ impl WalletFetcher {
             .result
             .ok_or_else(|| anyhow::anyhow!("null result from eth_getBalance"))?;
 
-        // Parse hex string (0x...) to u128 then to f64 ETH
+        //parse hex string (0x...) to u128 then to f64 eth
         let hex_str = hex_str.trim_start_matches("0x");
         let wei = u128::from_str_radix(hex_str, 16)
             .context("failed to parse hex balance")?;

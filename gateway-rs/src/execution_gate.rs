@@ -11,10 +11,10 @@ use crate::types::tx::TxStatus;
 const RECEIPT_TIMEOUT_SECS: u64 = 60;
 const RECEIPT_POLL_INTERVAL_SECS: u64 = 3;
 
-// ── Instrumented execution ──────────────────────────────────────
+//── instrumented execution ──────────────────────────────────────
 
-/// Execute a swap through the full traced path:
-///   quote → decision → calldata → keymaster → receipt polling
+///execute a swap through the full traced path:
+///quote → decision → calldata → keymaster → receipt polling
 pub async fn execute_traced(
     executor: &ExecutorAgent,
     _config: &GatewayConfig,
@@ -26,7 +26,7 @@ pub async fn execute_traced(
     chain: &str,
     dry_run: bool,
 ) -> TxStatus {
-    // ── Step 3: Build calldata ──────────────────────────────────
+    //── step 3: build calldata ──────────────────────────────────
     let calldata = serde_json::json!({
         "wallet_id": wallet_id.to_string(),
         "to": token_out,
@@ -43,11 +43,8 @@ pub async fn execute_traced(
         chain
     );
 
-    // ── Step 4: Dry run gate ────────────────────────────────────
+    //── step 4: dry run gate ────────────────────────────────────
     if dry_run {
-        // VES-102: never log an empty body on serialization failure — surface
-        // it as TxStatus::Failed so the caller treats the dry-run as broken
-        // rather than silently "successful".
         let calldata_str = match serde_json::to_string(&calldata) {
             Ok(s) => s,
             Err(e) => {
@@ -64,7 +61,7 @@ pub async fn execute_traced(
         return TxStatus::DryRun { calldata };
     }
 
-    // ── Step 4: POST to Keymaster /tx/send ──────────────────────
+    //── step 4: post to keymaster /tx/send ──────────────────────
     tracing::info!(
         "[exec-trace] POST keymaster /tx/send: wallet={} {} → {} amount={} chain={}",
         wallet_id,
@@ -87,7 +84,7 @@ pub async fn execute_traced(
         }
     };
 
-    // ── Step 5: tx_hash returned ────────────────────────────────
+    //── step 5: tx_hash returned ────────────────────────────────
     let tx_hash = match exec_result.tx_hash {
         Some(h) => {
             tracing::info!("[exec-trace] keymaster returned tx_hash={}", h);
@@ -102,7 +99,7 @@ pub async fn execute_traced(
         }
     };
 
-    // ── Step 6: Poll RPC for receipt ────────────────────────────
+    //── step 6: poll rpc for receipt ────────────────────────────
     let rpc_url = chain_registry
         .get(&chain.to_lowercase())
         .map(|c| c.rpc_url.as_str())
@@ -135,7 +132,7 @@ pub async fn execute_traced(
             Ok(Some(r)) => {
                 let block = r.block_number;
                 let gas = r.gas_used;
-                // ── Step 7: Receipt received ────────────────────
+                //── step 7: receipt received ────────────────────
                 if r.status == 1 {
                     tracing::info!(
                         "[exec-trace] tx CONFIRMED: hash={} block={} gas_used={}",
@@ -163,7 +160,7 @@ pub async fn execute_traced(
                 }
             }
             Ok(None) => {
-                // receipt not yet available
+                //receipt not yet available
             }
             Err(e) => {
                 tracing::warn!("[exec-trace] receipt poll error: {e}");
@@ -184,7 +181,7 @@ pub async fn execute_traced(
     }
 }
 
-// ── RPC receipt fetcher ─────────────────────────────────────────
+//── rpc receipt fetcher ─────────────────────────────────────────
 
 struct ReceiptData {
     block_number: u64,
@@ -229,7 +226,7 @@ async fn fetch_receipt(
     }))
 }
 
-// ── Validation checklist ────────────────────────────────────────
+//── validation checklist ────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ValidationCheck {
@@ -250,16 +247,16 @@ pub async fn run_validation_checks(
 
     let mut checks = Vec::new();
 
-    // 1. Keymaster reachable
+    //1. keymaster reachable
     checks.push(check_keymaster(&client, &config.keymaster_url).await);
 
-    // 2. RPC reachable
+    //2. rpc reachable
     checks.push(check_rpc(&client, chain_registry).await);
 
-    // 3. 1inch / quote API reachable
+    //3. 1inch / quote api reachable
     checks.push(check_quote_api(quote_fetcher, chain_registry).await);
 
-    // 4. Wallet has balance > 0
+    //4. wallet has balance > 0
     checks.push(
         check_wallet_balance(
             &client,
@@ -270,7 +267,7 @@ pub async fn run_validation_checks(
         .await,
     );
 
-    // 5. Gas estimate succeeds
+    //5. gas estimate succeeds
     checks.push(check_gas_estimate(&client, chain_registry).await);
 
     checks
@@ -386,8 +383,8 @@ async fn check_wallet_balance(
 ) -> ValidationCheck {
     let name = "wallet_has_balance".to_string();
 
-    // Best-effort: ask Keymaster to refresh its cached balances first.
-    // We do not block on this — the actual check queries the RPC directly below.
+    //best-effort: ask keymaster to refresh its cached balances first.
+    //we do not block on this — the actual check queries the rpc directly below.
     let _ = client
         .get(format!("{}/balances/refresh", keymaster_url))
         .header("Authorization", format!("Bearer {keymaster_token}"))
@@ -426,8 +423,8 @@ async fn check_wallet_balance(
 
     let total = wallets.len();
 
-    // Pick a fallback RPC URL for wallets whose chain isn't directly configured
-    // (e.g. wallet.chain = "base_sepolia" but only `base` has an RPC URL set in env).
+    //pick a fallback rpc url for wallets whose chain isn't directly configured
+    //(e.g. wallet.chain = "base_sepolia" but only `base` has an rpc url set in env).
     let fallback_rpc = chain_registry
         .available()
         .into_iter()

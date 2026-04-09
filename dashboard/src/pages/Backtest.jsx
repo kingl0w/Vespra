@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "preact/hooks";
 import { api } from "../lib/api.js";
 import { Card, Button, Badge, Loader } from "../components/Card.jsx";
 
-// ── Date helpers ─────────────────────────────────────────────
+//── date helpers ─────────────────────────────────────────────
 
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
@@ -29,7 +29,7 @@ function fmtMode(mode) {
   return mode === "agents" ? "Agent-based" : "Rule-based";
 }
 
-// ── Mode selector with tooltip ──────────────────────────────
+//── mode selector with tooltip ──────────────────────────────
 
 function ModeSelector({ mode, onChange }) {
   const [tipOpen, setTipOpen] = useState(false);
@@ -84,7 +84,7 @@ function ModeSelector({ mode, onChange }) {
   );
 }
 
-// ── Run-backtest form ───────────────────────────────────────
+//── run-backtest form ───────────────────────────────────────
 
 function BacktestForm({ wallets, onCompleted }) {
   const [text, setText] = useState("");
@@ -203,7 +203,7 @@ function BacktestForm({ wallets, onCompleted }) {
   );
 }
 
-// ── Equity curve chart (SVG polyline) ───────────────────────
+//── equity curve chart (svg polyline) ───────────────────────
 
 function EquityChart({ points }) {
   if (!points || points.length === 0) {
@@ -294,7 +294,7 @@ function EquityChart({ points }) {
   );
 }
 
-// ── Result detail card ──────────────────────────────────────
+//── result detail card ──────────────────────────────────────
 
 function ResultDetail({ result }) {
   const stats = [
@@ -339,7 +339,7 @@ function ResultDetail({ result }) {
   );
 }
 
-// ── History table ───────────────────────────────────────────
+//── history table ───────────────────────────────────────────
 
 function HistoryRow({ item, expanded, highlight, onToggle }) {
   return (
@@ -377,7 +377,7 @@ function HistoryRow({ item, expanded, highlight, onToggle }) {
   );
 }
 
-// ── Main page ───────────────────────────────────────────────
+//── main page ───────────────────────────────────────────────
 
 export function Backtest() {
   const [wallets, setWallets] = useState([]);
@@ -402,9 +402,6 @@ export function Backtest() {
       .catch(() => {});
   }, [fetchHistory]);
 
-  // Toggle row expansion — fetch full BacktestResult lazily so the index call
-  // stays small. The freshly-completed backtest already comes back with the
-  // full payload so we can short-circuit on it.
   const toggleRow = async (id) => {
     if (expandedId === id) {
       setExpandedId(null);
@@ -426,11 +423,11 @@ export function Backtest() {
     setExpandedId(result.id);
     setDetail(result);
     setHighlightId(result.id);
-    // Scroll the row into view once history has refreshed.
+    //scroll the row into view once history has refreshed.
     setTimeout(() => {
       const row = tableRef.current?.querySelector(`tr[data-bt-id="${result.id}"]`);
       if (row) row.scrollIntoView({ behavior: "smooth", block: "center" });
-      // Drop highlight after a few seconds so the table doesn't permanently shout.
+      //drop highlight after a few seconds so the table doesn't permanently shout.
       setTimeout(() => setHighlightId(null), 4000);
     }, 200);
   };

@@ -60,7 +60,7 @@ const STORAGE_PREFIX = "vespra-chat-";
 const MAX_MESSAGES = 50;
 const MAX_AGE_DAYS = 7;
 
-// ─── localStorage persistence ────────────────────────────────────
+//─── localstorage persistence ────────────────────────────────────
 
 function loadHistory(agent) {
   try {
@@ -87,7 +87,7 @@ function clearHistory(agent) {
   } catch {}
 }
 
-// ─── Date grouping for archive ───────────────────────────────────
+//─── date grouping for archive ───────────────────────────────────
 
 function groupByDate(msgs) {
   const groups = {};
@@ -102,7 +102,7 @@ function groupByDate(msgs) {
   return groups;
 }
 
-// ─── Response Renderers ──────────────────────────────────────────
+//─── response renderers ──────────────────────────────────────────
 
 function riskVariant(score) {
   if (!score) return "default";
@@ -254,9 +254,9 @@ function formatTokenAmount(raw, decimals) {
   if (!raw) return "?";
   const s = String(raw);
   const d = parseInt(decimals) || 18;
-  // If it looks like a decimal already, return as-is
+  //if it looks like a decimal already, return as-is
   if (s.includes(".") || s.length <= 6) return s;
-  // Convert from wei-like units
+  //convert from wei-like units
   const n = parseFloat(s) / Math.pow(10, d);
   if (n === 0) return "0";
   if (n >= 1) return n.toFixed(4).replace(/\.?0+$/, "");
@@ -304,16 +304,16 @@ function TraderView({ data }) {
   const symbolIn = hasTokenPair ? (swap.token_in.symbol || "?") : null;
   const symbolOut = hasTokenPair ? (swap.token_out.symbol || "?") : null;
 
-  // Calldata detection in instruction
+  //calldata detection in instruction
   const hasCalldata = instruction && /0x[0-9a-fA-F]{40,}/.test(instruction);
-  // Strip calldata from instruction text for display
+  //strip calldata from instruction text for display
   const instructionText = instruction
     ? instruction.replace(/0x[0-9a-fA-F]{40,}/g, "").replace(/\s{2,}/g, " ").trim()
     : null;
   const calldataMatch = instruction ? instruction.match(/0x[0-9a-fA-F]{40,}/) : null;
   const calldata = calldataMatch ? calldataMatch[0] : null;
 
-  // Build details grid — only fields with values
+  //build details grid — only fields with values
   const details = [];
   if (chain) details.push({ label: "Chain", value: <Badge variant="accent">{chain}</Badge> });
   if (aggregator) details.push({ label: "Aggregator", value: <span class="text-vespra-text">{aggregator}</span> });
@@ -702,24 +702,24 @@ function GenericJsonView({ data }) {
   );
 }
 
-// ─── Render agent response ───────────────────────────────────────
+//─── render agent response ───────────────────────────────────────
 
 function extractJson(text) {
   if (typeof text !== "string") return text;
   text = text.trim();
   try { return JSON.parse(text); } catch {}
-  // Try markdown fences
+  //try markdown fences
   const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fenceMatch) {
     try { return JSON.parse(fenceMatch[1].trim()); } catch {}
   }
-  // Try first { to last }
+  //try first { to last }
   const first = text.indexOf("{");
   const last = text.lastIndexOf("}");
   if (first !== -1 && last > first) {
     try { return JSON.parse(text.slice(first, last + 1)); } catch {}
   }
-  // Try first [ to last ]
+  //try first [ to last ]
   const firstArr = text.indexOf("[");
   const lastArr = text.lastIndexOf("]");
   if (firstArr !== -1 && lastArr > firstArr) {
@@ -736,14 +736,14 @@ function parseMarkdown(text) {
     .replace(/>/g, "&gt;")
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/\*(.+?)\*/g, "<em>$1</em>");
-  // List items
+  //list items
   html = html.replace(/(^|\n)([-*] .+(?:\n[-*] .+)*)/g, (_, pre, block) => {
     const items = block.split("\n").map((l) => `<li>${l.replace(/^[-*] /, "")}</li>`).join("");
     return `${pre}<ul class="list-disc pl-4 my-1">${items}</ul>`;
   });
-  // Headings
+  //headings
   html = html.replace(/(^|\n)## (.+)/g, '$1<h3 class="font-bold text-base mt-2 mb-1">$2</h3>');
-  // Double newlines
+  //double newlines
   html = html.replace(/\n\n/g, "<br><br>");
   return html;
 }
@@ -772,9 +772,9 @@ function AgentResponse({ content, agent }) {
   if (agent === "scout" && (Array.isArray(parsed) || parsed?.protocol))
     return <ScoutView data={parsed} />;
   if (agent === "risk") {
-    // Unwrap common wrapper keys
+    //unwrap common wrapper keys
     const riskData = parsed?.risk_assessment || parsed?.assessment || parsed?.risk || parsed?.assessments || parsed;
-    // Only render RiskView when we have structured data with a factors array
+    //only render riskview when we have structured data with a factors array
     if (Array.isArray(riskData?.factors) && riskData.factors.length > 0)
       return <RiskView data={riskData} />;
   }
@@ -832,10 +832,6 @@ function AgentResponse({ content, agent }) {
   if (agent === "launcher" && (parsed?.token_config || parsed?.deployment))
     return <LauncherView data={parsed} />;
 
-  // Universal fallback: any agent response that's just a {message: "..."} or
-  // {note: "..."} wrapper should render as prose, not raw JSON. The
-  // coordinator/sentinel/executor branches above handle the same case earlier
-  // so they keep their existing precedence; this catches every other agent.
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
     const prose = parsed.message || parsed.note;
     if (prose && typeof prose === "string") {
@@ -851,7 +847,7 @@ function AgentResponse({ content, agent }) {
   return <GenericJsonView data={parsed} />;
 }
 
-// ─── Message bubble ──────────────────────────────────────────────
+//─── message bubble ──────────────────────────────────────────────
 
 function Message({ msg, agent }) {
   const isUser = msg.role === "user";
@@ -873,7 +869,7 @@ function Message({ msg, agent }) {
   );
 }
 
-// ─── Thinking indicator ──────────────────────────────────────────
+//─── thinking indicator ──────────────────────────────────────────
 
 function ThinkingIndicator({ agent }) {
   const [dots, setDots] = useState(0);
@@ -897,13 +893,12 @@ function ThinkingIndicator({ agent }) {
   );
 }
 
-// ─── Chat archive (collapsible history by date) ──────────────────
+//─── chat archive (collapsible history by date) ──────────────────
 
 function ChatArchive({ messages, agent }) {
   const [open, setOpen] = useState(false);
 
-  // Only show messages older than the current "session" (before last clear / page load)
-  // We use date grouping on all stored messages
+  //we use date grouping on all stored messages
   const groups = groupByDate(messages);
   const dates = Object.keys(groups);
 
@@ -941,7 +936,7 @@ function ChatArchive({ messages, agent }) {
   );
 }
 
-// ─── Agent Config Panel ─────────────────────────────────────────
+//─── agent config panel ─────────────────────────────────────────
 
 const BASE_GW = import.meta.env.MODE === "production"
   ? "https://api.vespra.xyz"
@@ -1131,7 +1126,7 @@ function AgentConfigPanel({ agent }) {
   );
 }
 
-// ─── Main component ──────────────────────────────────────────────
+//─── main component ──────────────────────────────────────────────
 
 export function Agents() {
   const [selected, setSelected] = useState("scout");
@@ -1151,7 +1146,7 @@ export function Agents() {
   const chat = messages[selected] || [];
   const sending = sendingMap[selected] || false;
 
-  // Save to localStorage whenever messages change
+  //save to localstorage whenever messages change
   useEffect(() => {
     saveHistory(selected, chat);
   }, [selected, chat]);
@@ -1195,9 +1190,6 @@ export function Agents() {
       const cmdText = `[${agent}] ${enrichedMsg}`;
       const res = await api.swarmCommand(cmdText, null, { signal: controller.signal });
       let content = res.reasoning || res.action_taken || res.response || JSON.stringify(res);
-      // Unwrap {message|note: "..."} for every agent. The render layer
-      // (AgentResponse) does this too, but normalizing at write time keeps
-      // localStorage history clean and devtools inspection readable.
       try {
         const parsed = JSON.parse(content);
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {

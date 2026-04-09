@@ -18,13 +18,13 @@ async fn yield_protocols(
     State(state): State<AppState>,
     Query(params): Query<ProtocolsQuery>,
 ) -> Json<serde_json::Value> {
-    // Determine which chains to query
+    //determine which chains to query
     let chains: Vec<String> = match &params.chain {
         Some(c) => vec![c.clone()],
         None => state.config.chains.clone(),
     };
 
-    // Resolve chain names → defillama slugs via ChainRegistry
+    //resolve chain names → defillama slugs via chainregistry
     let mut slug_to_chain: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for name in &chains {
         if let Some(cfg) = state.chain_registry.get(name) {
@@ -41,7 +41,7 @@ async fn yield_protocols(
         }));
     }
 
-    // Fetch pools from DeFi Llama
+    //fetch pools from defi llama
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -95,7 +95,7 @@ async fn yield_protocols(
     }))
 }
 
-// ─── Yield loop control ──────────────────────────────────────────
+//─── yield loop control ──────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct YieldStartRequest {
@@ -202,7 +202,7 @@ async fn yield_history(
     }
 }
 
-// ─── Raw yield pool data (debug / dashboard) ───────────────────
+//─── raw yield pool data (debug / dashboard) ───────────────────
 
 #[derive(Debug, Deserialize)]
 struct YieldPoolsQuery {
@@ -247,7 +247,7 @@ async fn yield_pools(
     }
 }
 
-// ─── Aave V3 position data ───────────────────────────────────────
+//─── aave v3 position data ───────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct PositionsQuery {
@@ -259,7 +259,7 @@ async fn yield_positions(
     State(state): State<AppState>,
     Query(params): Query<PositionsQuery>,
 ) -> Json<serde_json::Value> {
-    // Resolve wallet label/id to address via Keymaster
+    //resolve wallet label/id to address via keymaster
     let address = match aave::resolve_wallet_address(
         &reqwest::Client::new(),
         &state.config.keymaster_url,
@@ -306,7 +306,7 @@ async fn yield_positions(
     }
 }
 
-// ─── Full yield analysis ─────────────────────────────────────────
+//─── full yield analysis ─────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct AnalyzeRequest {
@@ -318,7 +318,7 @@ async fn yield_analyze(
     State(state): State<AppState>,
     Json(body): Json<AnalyzeRequest>,
 ) -> Json<serde_json::Value> {
-    // Resolve wallet label/id to address
+    //resolve wallet label/id to address
     let address = match aave::resolve_wallet_address(
         &reqwest::Client::new(),
         &state.config.keymaster_url,

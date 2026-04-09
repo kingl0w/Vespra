@@ -2,11 +2,6 @@ import { useState, useEffect, useCallback, useRef } from "preact/hooks";
 import { api } from "../lib/api.js";
 import { Card, Button, Badge, Loader } from "../components/Card.jsx";
 
-// ── Status helpers ──────────────────────────────────────────
-//
-// API returns status as lowercase strings ("running", "failed", "completed",
-// "paused", "cancelled", "pending"). Keep the config keyed by those exact
-// values so badge/border lookups don't silently fall through to "Pending".
 
 const STATUS_CFG = {
   pending:    { variant: "default", label: "Pending" },
@@ -34,7 +29,7 @@ function rowBorder(status) {
   return "border-l-2 border-l-transparent";
 }
 
-// ── Elapsed time ────────────────────────────────────────────
+//── elapsed time ────────────────────────────────────────────
 
 function elapsed(iso) {
   if (!iso) return "--";
@@ -47,7 +42,7 @@ function elapsed(iso) {
   return `${h}h ${m}m`;
 }
 
-// ── New Goal form ───────────────────────────────────────────
+//── new goal form ───────────────────────────────────────────
 
 function GoalForm({ wallets, onCreated }) {
   const [text, setText] = useState("");
@@ -60,9 +55,6 @@ function GoalForm({ wallets, onCreated }) {
     setSubmitting(true);
     setError(null);
     try {
-      // VES-120: log creation result with wallet_label so operators can trace
-      // which wallet a goal was started against without cross-referencing the
-      // goal store.
       const result = await api.createGoal({
         raw_goal: text.trim(),
         ...(walletLabel ? { wallet_label: walletLabel } : {}),
@@ -112,16 +104,13 @@ function GoalForm({ wallets, onCreated }) {
   );
 }
 
-// ── Goal row ────────────────────────────────────────────────
+//── goal row ────────────────────────────────────────────────
 
 function GoalRow({ goal, onAction }) {
   const pnl = goal.pnl_eth ?? 0;
   const pnlPct = goal.pnl_pct ?? 0;
   const positive = pnl >= 0;
   const acting = useRef(false);
-  // VES-94: surface cancel/pause/resume failures to the user instead of
-  // silently swallowing — operators were left clicking buttons with no
-  // feedback when the gateway rejected an action.
   const [actionError, setActionError] = useState(null);
 
   const act = async (action) => {
@@ -145,7 +134,7 @@ function GoalRow({ goal, onAction }) {
   const canResume = statusKey === "paused";
   const canCancel = statusKey === "running" || statusKey === "paused";
 
-  // API returns the natural-language goal under `raw_goal`.
+  //api returns the natural-language goal under `raw_goal`.
   const goalText = goal.raw_goal || "";
 
   return (
@@ -185,7 +174,7 @@ function GoalRow({ goal, onAction }) {
   );
 }
 
-// ── Main page ───────────────────────────────────────────────
+//── main page ───────────────────────────────────────────────
 
 export function Goals() {
   const [goals, setGoals] = useState(null);
@@ -200,7 +189,7 @@ export function Goals() {
       .finally(() => setLoading(false));
   }, []);
 
-  // Initial load
+  //initial load
   useEffect(() => {
     fetchGoals();
     api.walletList()
@@ -208,7 +197,7 @@ export function Goals() {
       .catch(() => {});
   }, [fetchGoals]);
 
-  // Auto-refresh when any goal is Running or Paused
+  //auto-refresh when any goal is running or paused
   useEffect(() => {
     const needsPoll = goals?.some((g) => {
       const k = (g.status || "").toLowerCase();
@@ -226,10 +215,6 @@ export function Goals() {
 
   const list = goals || [];
 
-  // ── Group by chain ────────────────────────────────────────
-  // Stable order: base, arbitrum, then alphabetic, then unknown last.
-  // Active count is derived from the filtered group so it stays reactive
-  // when statuses change without needing a separate state slice.
   const groups = list.reduce((acc, g) => {
     const chain = (g.chain || "unknown").toLowerCase();
     (acc[chain] ||= []).push(g);

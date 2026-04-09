@@ -31,22 +31,19 @@ pub enum AppError {
     #[error("Invalid request: {0}")]
     BadRequest(String),
 
-    /// Hex decoding failed for a specific request field. Surfaced verbatim
-    /// to the caller (unlike BadRequest which sanitizes) so operators can
-    /// see which field is malformed and the expected format.
     #[error("Invalid hex for field '{field}': {detail}")]
     InvalidHex { field: String, detail: String },
 
     #[error("Wallet cap exceeded: balance {balance}, cap {cap}")]
     CapExceeded { balance: String, cap: String },
 
-    /// VES-90: cap_wei field on a wallet record could not be parsed as u128.
-    /// This is an integrity error, not a client error — refuse the tx.
+    ///ves-90: cap_wei field on a wallet record could not be parsed as u128.
+    ///this is an integrity error, not a client error — refuse the tx.
     #[error("Wallet cap field corrupted (raw='{0}')")]
     CapCorrupt(String),
 
-    /// VES-105: total_sent on a wallet has somehow exceeded its cap. Treat
-    /// the wallet as quarantined until an operator inspects the keystore.
+    ///ves-105: total_sent on a wallet has somehow exceeded its cap. treat
+    ///the wallet as quarantined until an operator inspects the keystore.
     #[error("Wallet spend cap integrity error: address={address} total_sent={total_sent} cap={cap}")]
     CapIntegrity { address: String, total_sent: String, cap: String },
 
@@ -56,18 +53,18 @@ pub enum AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        // Sanitized messages — never echo user input back
+        //sanitized messages — never echo user input back
         let (status, message): (StatusCode, String) = match &self {
             AppError::WalletNotFound(_) => (StatusCode::NOT_FOUND, "Wallet not found".into()),
-            // VES-109: chain-not-configured is a server config issue, not a
-            // client mistake — return 503 so operators see the right signal.
+            //ves-109: chain-not-configured is a server config issue, not a
+            //client mistake — return 503 so operators see the right signal.
             AppError::ChainNotConfigured(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "chain not configured on this Keymaster instance".into(),
             ),
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "Invalid request".into()),
-            // VES-112: surface the field name + decode detail verbatim so the
-            // operator can fix the request without grepping logs.
+            //ves-112: surface the field name + decode detail verbatim so the
+            //operator can fix the request without grepping logs.
             AppError::InvalidHex { field, detail } => (
                 StatusCode::BAD_REQUEST,
                 format!(
@@ -89,11 +86,6 @@ impl IntoResponse for AppError {
             AppError::Database(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Database error".into())
             }
-            // VES-113: surface a sanitized one-liner of the inner detail so
-            // operators can identify failures (RPC error code, revert reason)
-            // without checking server logs. Truncate aggressively and strip
-            // newlines/control chars so we never leak multi-line stack traces
-            // or full RPC bodies.
             AppError::Rpc(detail) => (
                 StatusCode::BAD_GATEWAY,
                 format!("RPC error: {}", sanitize_error_detail(detail)),
@@ -115,9 +107,6 @@ impl IntoResponse for AppError {
 
 pub type AppResult<T> = Result<T, AppError>;
 
-/// Reduce a raw error string to a single-line, length-capped fragment safe to
-/// return to API callers. Strips newlines/tabs/control chars and truncates so
-/// we never leak full RPC bodies or stack traces. Used by VES-113.
 fn sanitize_error_detail(s: &str) -> String {
     const MAX: usize = 200;
     let cleaned: String = s

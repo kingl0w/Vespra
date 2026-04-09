@@ -10,7 +10,7 @@ use crate::config::GatewayConfig;
 use crate::orchestrator::trade_up::TradeUpOrchestrator;
 use crate::orchestrator::yield_rot::YieldOrchestrator;
 
-// ─── Types ───────────────────────────────────────────────────────
+//─── types ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -66,7 +66,7 @@ pub struct PortfolioReport {
     pub created_at: i64,
 }
 
-// ─── Orchestrator ────────────────────────────────────────────────
+//─── orchestrator ────────────────────────────────────────────────
 
 pub struct PortfolioOrchestrator {
     executor: Arc<ExecutorAgent>,
@@ -101,7 +101,7 @@ impl PortfolioOrchestrator {
         let mut wallets = Vec::new();
         let mut errors = Vec::new();
 
-        // Gate: kill flag
+        //gate: kill flag
         if self.kill_flag.load(Ordering::SeqCst) {
             return PortfolioReport {
                 portfolio_id,
@@ -115,7 +115,7 @@ impl PortfolioOrchestrator {
             };
         }
 
-        // Validate allocations sum to 100
+        //validate allocations sum to 100
         let total_pct: f64 = spec.allocations.iter().map(|a| a.pct).sum();
         if (total_pct - 100.0).abs() > 0.01 {
             return PortfolioReport {
@@ -164,9 +164,9 @@ impl PortfolioOrchestrator {
             CustodyMode::Operator => "operator",
         };
 
-        // Process each allocation
+        //process each allocation
         for alloc in &spec.allocations {
-            // Kill flag check per-wallet
+            //kill flag check per-wallet
             if self.kill_flag.load(Ordering::SeqCst) {
                 errors.push("kill_switch_activated_mid_deploy".into());
                 break;
@@ -181,7 +181,7 @@ impl PortfolioOrchestrator {
                 continue;
             }
 
-            // 1. Create wallet via Keymaster
+            //1. create wallet via keymaster
             let create_payload = serde_json::json!({
                 "label": alloc.label,
                 "chain": spec.chain,
@@ -211,7 +211,7 @@ impl PortfolioOrchestrator {
                 continue;
             }
 
-            // 2. Fund wallet — send (allocated - gas_reserve) from source
+            //2. fund wallet — send (allocated - gas_reserve) from source
             let fund_eth = allocated_eth - spec.gas_reserve_per_wallet;
             let fund_wei = format!("{:.0}", fund_eth * 1e18);
             let fund_result = self
@@ -227,7 +227,7 @@ impl PortfolioOrchestrator {
                 }
             };
 
-            // 3. Spawn strategy
+            //3. spawn strategy
             let new_wallet_uuid = Uuid::parse_str(&wallet_id).unwrap_or_default();
             let loop_started = match alloc.strategy.as_str() {
                 "trade_up" => {
@@ -261,7 +261,7 @@ impl PortfolioOrchestrator {
                     }
                 }
                 "sniper" => {
-                    // Sniper is webhook-driven, just note it
+                    //sniper is webhook-driven, just note it
                     tracing::info!("portfolio: sniper wallet {} provisioned (webhook-driven)", alloc.label);
                     true
                 }
@@ -294,7 +294,7 @@ impl PortfolioOrchestrator {
             created_at: chrono::Utc::now().timestamp(),
         };
 
-        // Persist to Redis
+        //persist to redis
         self.persist_portfolio(&portfolio_id, &report).await;
 
         report
@@ -322,7 +322,7 @@ impl PortfolioOrchestrator {
         for wallet in &report.wallets {
             let wid = Uuid::parse_str(&wallet.wallet_id).unwrap_or_default();
 
-            // Stop strategy loop
+            //stop strategy loop
             match wallet.strategy.as_str() {
                 "trade_up" => { let _ = self.trade_up.stop_loop(wid).await; }
                 "yield" => { let _ = self.yield_orch.stop_loop(wid).await; }
@@ -330,7 +330,7 @@ impl PortfolioOrchestrator {
             }
             stopped.push(wallet.label.clone());
 
-            // Sweep funds back to source
+            //sweep funds back to source
             let sweep_wei = format!("{:.0}", wallet.allocated_eth * 1e18);
             match self
                 .executor
@@ -360,7 +360,7 @@ impl PortfolioOrchestrator {
         })
     }
 
-    // ── Keymaster wallet creation ────────────────────────────────
+    //── keymaster wallet creation ────────────────────────────────
 
     async fn create_wallet(
         &self,
@@ -380,7 +380,7 @@ impl PortfolioOrchestrator {
         Ok(data)
     }
 
-    // ── Redis persistence ────────────────────────────────────────
+    //── redis persistence ────────────────────────────────────────
 
     async fn persist_portfolio(&self, portfolio_id: &str, report: &PortfolioReport) {
         if let Ok(mut conn) =

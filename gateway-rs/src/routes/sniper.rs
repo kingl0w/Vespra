@@ -14,7 +14,7 @@ use crate::routes::goals::{save_goal, wallet_has_active_goal};
 use crate::types::decisions::SniperDecision;
 use crate::types::goals::{GoalSpec, GoalStatus, GoalStrategy};
 
-// ── Alchemy webhook payload types ──────────────────────────────
+//── alchemy webhook payload types ──────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct AlchemyWebhookBody {
@@ -38,7 +38,7 @@ struct AlchemyEventData {
     logs: Option<Vec<serde_json::Value>>,
 }
 
-// ── Evaluation record stored in Redis ──────────────────────────
+//── evaluation record stored in redis ──────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SniperEvaluation {
@@ -54,7 +54,7 @@ struct SniperEvaluation {
 const EVAL_LIST_KEY_PREFIX: &str = "sniper:evaluations";
 const EVAL_LIST_MAX: isize = 100;
 
-// ── Routes ─────────────────────────────────────────────────────
+//── routes ─────────────────────────────────────────────────────
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -64,14 +64,14 @@ pub fn router() -> Router<AppState> {
         .route("/sniper/exit/:position_id", post(sniper_exit))
 }
 
-// ── POST /webhooks/alchemy ─────────────────────────────────────
+//── post /webhooks/alchemy ─────────────────────────────────────
 
 async fn alchemy_webhook(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
-    // Rate limit — webhook endpoint faces external traffic
+    //rate limit — webhook endpoint faces external traffic
     let client_ip = crate::routes::ratelimit::extract_client_ip(&headers);
     let (allowed, retry_after) = state.webhook_rate_limiter.check(&client_ip);
     if !allowed {
@@ -88,7 +88,7 @@ async fn alchemy_webhook(
             .into_response();
     }
 
-    // Step 1: Validate HMAC-SHA256 signature
+    //step 1: validate hmac-sha256 signature
     let secret = &state.config.alchemy_webhook_secret;
     if !secret.is_empty() {
         let signature = headers
@@ -111,11 +111,11 @@ async fn alchemy_webhook(
         }
     }
 
-    // Step 2: Parse webhook body and extract pool events
+    //step 2: parse webhook body and extract pool events
     let parsed: AlchemyWebhookBody = match serde_json::from_slice(&body) {
         Ok(b) => b,
         Err(e) => {
-            // Always return 200 to Alchemy
+            //always return 200 to alchemy
             return Json(serde_json::json!({
                 "status": "ok",
                 "error": format!("parse_error: {e}"),
@@ -179,7 +179,7 @@ async fn alchemy_webhook(
 
         let token_pair = format!("{}/{}", short_addr(&token0), short_addr(&token1));
 
-        // Step 3: Call Sniper agent for evaluation
+        //step 3: call sniper agent for evaluation
         let ctx = SniperContext {
             pool_address: pool_address.clone(),
             token0: token0.clone(),
@@ -211,14 +211,14 @@ async fn alchemy_webhook(
 
         let mut auto_entered = false;
 
-        // Step 4: Auto-entry if ENTER and auto_entry enabled
+        //step 4: auto-entry if enter and auto_entry enabled
         if decision_str == "ENTER" && state.config.sniper_auto_entry_enabled {
             let position_eth = suggested_eth.min(state.config.sniper_max_entry_eth);
 
-            // Check no existing GoalRunner for this pool_address
+            //check no existing goalrunner for this pool_address
             let already_running = {
                 let runners = state.goal_runners.lock().await;
-                // Check Redis for goals referencing this pool
+                //check redis for goals referencing this pool
                 let has_dup = if let Ok(mut conn) =
                     redis::Client::get_multiplexed_async_connection(state.redis.as_ref()).await
                 {
@@ -231,15 +231,8 @@ async fn alchemy_webhook(
                 has_dup || runners.len() > 50 // safety cap
             };
 
-            // Sprint 7: hold the goal-creation lock across the wallet
-            // active-goal check and the save so a burst of webhook events
-            // can't double-spawn against the same custody wallet.
             let _create_guard = state.goal_creation_lock.lock().await;
 
-            // Sprint 7: enforce one-wallet-one-goal on the sniper auto-entry
-            // path too. The custody wallet is shared across the swarm, so a
-            // hot pool stream could otherwise stack multiple sniper goals on
-            // the same label and starve every other strategy.
             let custody_label = state.config.default_custody.clone();
             if let Some(existing_id) =
                 wallet_has_active_goal(&state.redis, &custody_label).await
@@ -250,11 +243,11 @@ async fn alchemy_webhook(
                     existing_id,
                     pool_address
                 );
-                // Drop the guard before continuing the loop so the next pool
-                // event in this batch isn't blocked.
+                //drop the guard before continuing the loop so the next pool
+                //event in this batch isn't blocked.
                 drop(_create_guard);
-                // Skip to the evaluation persistence step below by leaving
-                // auto_entered=false.
+                //skip to the evaluation persistence step below by leaving
+                //auto_entered=false.
             } else if !already_running && position_eth > 0.0 {
                 let target_gain = state.config.sniper_target_gain_pct;
                 let stop_loss = state.config.sniper_stop_loss_pct;
@@ -289,7 +282,7 @@ async fn alchemy_webhook(
                 if let Err(e) = save_goal(&state.redis, &goal).await {
                     tracing::error!("[sniper] failed to save goal: {e}");
                 } else {
-                    // Mark pool as tracked
+                    //mark pool as tracked
                     if let Ok(mut conn) =
                         redis::Client::get_multiplexed_async_connection(state.redis.as_ref()).await
                     {
@@ -297,7 +290,7 @@ async fn alchemy_webhook(
                         let _: Result<(), _> = conn.set_ex(&key, goal.id.to_string(), 86400).await;
                     }
 
-                    // Spawn GoalRunner
+                    //spawn goalrunner
                     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
                     let goal_id = goal.id;
                     let deps = state.goal_runner_deps.clone();
@@ -323,7 +316,7 @@ async fn alchemy_webhook(
             }
         }
 
-        // Step 5: Store evaluation in Redis
+        //step 5: store evaluation in redis
         let eval = SniperEvaluation {
             timestamp: Utc::now().to_rfc3339(),
             pool_address: pool_address.clone(),
@@ -344,13 +337,13 @@ async fn alchemy_webhook(
                 let _: Result<(), _> = conn.ltrim(&key, 0, EVAL_LIST_MAX - 1).await;
                 let _: Result<(), _> = conn.expire(&key, 172800).await; // 48h TTL
 
-                // Also push to the legacy key for backward compat with /sniper/history
+                //also push to the legacy key for backward compat with /sniper/history
                 let _: Result<(), _> = conn.lpush("vespra:sniper_history", &json).await;
                 let _: Result<(), _> = conn.ltrim("vespra:sniper_history", 0, 99).await;
             }
         }
 
-        // Also run through the orchestrator for existing position tracking
+        //also run through the orchestrator for existing position tracking
         let event = PoolEvent {
             pool_address,
             token0,
@@ -374,7 +367,7 @@ async fn alchemy_webhook(
         }));
     }
 
-    // Step 6: Always return 200 to Alchemy
+    //step 6: always return 200 to alchemy
     Json(serde_json::json!({
         "status": "ok",
         "events": logs.len(),
@@ -383,7 +376,7 @@ async fn alchemy_webhook(
     .into_response()
 }
 
-// ── GET /sniper/positions ──────────────────────────────────────
+//── get /sniper/positions ──────────────────────────────────────
 
 async fn sniper_positions(State(state): State<AppState>) -> Json<serde_json::Value> {
     let entries = state.sniper_orchestrator.active_positions().await;
@@ -393,7 +386,7 @@ async fn sniper_positions(State(state): State<AppState>) -> Json<serde_json::Val
     }))
 }
 
-// ── GET /sniper/history ────────────────────────────────────────
+//── get /sniper/history ────────────────────────────────────────
 
 async fn sniper_history(State(state): State<AppState>) -> Json<serde_json::Value> {
     match redis::Client::get_multiplexed_async_connection(state.redis.as_ref()).await {
@@ -419,7 +412,7 @@ async fn sniper_history(State(state): State<AppState>) -> Json<serde_json::Value
     }
 }
 
-// ── POST /sniper/exit/:position_id ─────────────────────────────
+//── post /sniper/exit/:position_id ─────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct ExitRequest {
@@ -439,7 +432,7 @@ async fn sniper_exit(
     Json(serde_json::to_value(&result).unwrap_or_default())
 }
 
-// ── HMAC-SHA256 verification ───────────────────────────────────
+//── hmac-sha256 verification ───────────────────────────────────
 
 pub fn verify_hmac_sha256(secret: &str, body: &[u8], signature: &str) -> bool {
     use hmac::{Hmac, Mac};
@@ -463,7 +456,7 @@ fn short_addr(addr: &str) -> &str {
     }
 }
 
-// ── Tests ──────────────────────────────────────────────────────
+//── tests ──────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -474,7 +467,7 @@ mod tests {
         let secret = "test_secret_key_12345";
         let body = b"hello world";
 
-        // Valid signature
+        //valid signature
         let valid_sig = {
             use hmac::{Hmac, Mac};
             use sha2::Sha256;
@@ -485,14 +478,14 @@ mod tests {
         };
         assert!(verify_hmac_sha256(secret, body, &valid_sig));
 
-        // Invalid signature
+        //invalid signature
         assert!(!verify_hmac_sha256(secret, body, "deadbeef"));
         assert!(!verify_hmac_sha256(secret, body, ""));
 
-        // Wrong body
+        //wrong body
         assert!(!verify_hmac_sha256(secret, b"wrong body", &valid_sig));
 
-        // Wrong secret
+        //wrong secret
         assert!(!verify_hmac_sha256("wrong_secret", body, &valid_sig));
     }
 
@@ -525,7 +518,7 @@ mod tests {
             "position should be capped to {max_position_eth}"
         );
 
-        // Under cap — no change
+        //under cap — no change
         let suggested_small: f64 = 0.03;
         let capped_small = suggested_small.min(max_position_eth);
         assert!(

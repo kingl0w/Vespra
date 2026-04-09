@@ -35,13 +35,6 @@ impl ExecutorAgent {
         amount_wei: &str,
         chain: &str,
     ) -> Result<ExecutorResult> {
-        // Token swaps now go through Keymaster's /swap endpoint, which handles
-        // ETH wrapping → ERC-20 approve → Uniswap V3 exactInputSingle. The
-        // legacy /tx/send path was only ever a native ETH transfer and would
-        // revert when given a token contract as the recipient.
-        //
-        // We pass token_in as-is: Keymaster accepts the literal string "ETH"
-        // (synonym for the chain's WETH address) or a 0x ERC-20 address.
         let payload = serde_json::json!({
             "wallet_id": wallet_id,
             "token_in": token_in,
@@ -50,9 +43,6 @@ impl ExecutorAgent {
             "chain": chain,
         });
 
-        // Note: tx_deadline + rpc_url_override are no longer relevant — the
-        // swap path executes immediately on Keymaster's configured chain RPC
-        // and waits for receipts inline.
         let _ = crate::guards::tx_deadline(&self.config);
         let _ = self.config.rpc_url_override.as_deref();
 
@@ -75,8 +65,8 @@ impl ExecutorAgent {
             }
         });
 
-        // Surface wrap/approve hashes via tracing so they're visible alongside
-        // the existing exec-trace logs without changing the ExecutorResult shape.
+        //surface wrap/approve hashes via tracing so they're visible alongside
+        //the existing exec-trace logs without changing the executorresult shape.
         if let Some(wrap) = data["wrap_tx_hash"].as_str() {
             tracing::info!("[exec-trace] swap wrap tx={}", wrap);
         }

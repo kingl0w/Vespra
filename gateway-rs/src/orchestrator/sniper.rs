@@ -16,7 +16,7 @@ use crate::data::quote::QuoteFetcher;
 use crate::chain::ChainRegistry;
 use crate::types::decisions::{ExecutorStatus, SniperDecision};
 
-// ─── Types ───────────────────────────────────────────────────────
+//─── types ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolEvent {
@@ -51,7 +51,7 @@ pub struct SniperResult {
     pub tx_hash: Option<String>,
 }
 
-// ─── Orchestrator ────────────────────────────────────────────────
+//─── orchestrator ────────────────────────────────────────────────
 
 pub struct SniperOrchestrator {
     risk: Arc<RiskAgent>,
@@ -96,7 +96,7 @@ impl SniperOrchestrator {
     }
 
     pub async fn evaluate_pool(&self, event: PoolEvent, wallet_id: Uuid) -> SniperResult {
-        // Gate checks
+        //gate checks
         if self.is_killed() {
             return SniperResult {
                 action: "skipped".into(),
@@ -115,7 +115,7 @@ impl SniperOrchestrator {
             };
         }
 
-        // TVL check
+        //tvl check
         if event.tvl_usd < self.config.sniper_min_tvl {
             return SniperResult {
                 action: "skipped".into(),
@@ -128,7 +128,7 @@ impl SniperOrchestrator {
             };
         }
 
-        // Risk assessment
+        //risk assessment
         let protocol_data = self.protocol_fetcher
             .fetch_protocol(&event.protocol)
             .await
@@ -164,7 +164,7 @@ impl SniperOrchestrator {
             };
         }
 
-        // Sniper agent LLM evaluation
+        //sniper agent llm evaluation
         let sniper_ctx = SniperContext {
             pool_address: event.pool_address.clone(),
             token0: event.token0.clone(),
@@ -209,7 +209,7 @@ impl SniperOrchestrator {
                     };
                 }
 
-                // Get quote
+                //get quote
                 let chain_id = self.chain_registry
                     .chain_id(&event.chain.to_lowercase())
                     .unwrap_or(8453);
@@ -219,7 +219,7 @@ impl SniperOrchestrator {
                     .await
                     .unwrap_or_default();
 
-                // Execute swap via Keymaster
+                //execute swap via keymaster
                 let exec_result = match self.executor
                     .execute(wallet_id, "WETH", &event.token1, &amount_wei, &event.chain)
                     .await
@@ -244,7 +244,7 @@ impl SniperOrchestrator {
                     };
                 }
 
-                // Store entry in Redis
+                //store entry in redis
                 let position_id = Uuid::new_v4().to_string();
                 let entry = SniperEntry {
                     position_id: position_id.clone(),
@@ -313,7 +313,7 @@ impl SniperOrchestrator {
         }
     }
 
-    // ── Redis persistence ────────────────────────────────────────
+    //── redis persistence ────────────────────────────────────────
 
     async fn persist_entry(&self, entry: &SniperEntry) {
         if let Ok(mut conn) = redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await {

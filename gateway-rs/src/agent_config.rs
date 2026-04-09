@@ -4,18 +4,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::GatewayConfig;
 
-// ── Redis key helper ───────────────────────────────────────────
+//── redis key helper ───────────────────────────────────────────
 
 fn redis_key(agent: &str) -> String {
     format!("agent_config:{agent}")
 }
 
-/// Known agent names.
+///known agent names.
 pub const AGENT_NAMES: &[&str] = &[
     "scout", "risk", "trader", "sentinel", "sniper", "yield", "tradeup",
 ];
 
-// ── Per-agent config structs ───────────────────────────────────
+//── per-agent config structs ───────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScoutConfig {
@@ -57,7 +57,7 @@ pub struct TradeUpConfig {
     pub stop_loss_pct: f64,
 }
 
-// ── Defaults from GatewayConfig ────────────────────────────────
+//── defaults from gatewayconfig ────────────────────────────────
 
 impl ScoutConfig {
     pub fn defaults(cfg: &GatewayConfig) -> Self {
@@ -148,9 +148,9 @@ impl TradeUpConfig {
     }
 }
 
-// ── Load / Save ────────────────────────────────────────────────
+//── load / save ────────────────────────────────────────────────
 
-/// Load agent config from Redis, falling back to defaults from GatewayConfig.
+///load agent config from redis, falling back to defaults from gatewayconfig.
 pub async fn load_agent_config(
     redis: &redis::Client,
     agent: &str,
@@ -166,7 +166,7 @@ pub async fn load_agent_config(
     }
 }
 
-/// Load all agent configs.
+///load all agent configs.
 pub async fn load_all_configs(
     redis: &redis::Client,
     cfg: &GatewayConfig,
@@ -179,7 +179,7 @@ pub async fn load_all_configs(
     Ok(map)
 }
 
-/// Save agent config to Redis.
+///save agent config to redis.
 pub async fn save_agent_config(
     redis: &redis::Client,
     agent: &str,
@@ -191,7 +191,7 @@ pub async fn save_agent_config(
     Ok(())
 }
 
-/// Return default config JSON for a given agent.
+///return default config json for a given agent.
 pub fn default_config_json(agent: &str, cfg: &GatewayConfig) -> serde_json::Value {
     match agent {
         "scout" => serde_json::to_value(ScoutConfig::defaults(cfg)).unwrap(),
@@ -205,7 +205,7 @@ pub fn default_config_json(agent: &str, cfg: &GatewayConfig) -> serde_json::Valu
     }
 }
 
-/// Return known field names for an agent.
+///return known field names for an agent.
 pub fn known_fields(agent: &str) -> Option<&'static [&'static str]> {
     match agent {
         "scout" => Some(ScoutConfig::known_fields()),
@@ -219,11 +219,11 @@ pub fn known_fields(agent: &str) -> Option<&'static [&'static str]> {
     }
 }
 
-/// Validate numeric ranges for agent config values.
+///validate numeric ranges for agent config values.
 pub fn validate_patch(agent: &str, patch: &serde_json::Value) -> Result<(), String> {
     let obj = patch.as_object().ok_or("body must be a JSON object")?;
 
-    // Reject unknown fields
+    //reject unknown fields
     if let Some(fields) = known_fields(agent) {
         for key in obj.keys() {
             if !fields.contains(&key.as_str()) {
@@ -234,7 +234,7 @@ pub fn validate_patch(agent: &str, patch: &serde_json::Value) -> Result<(), Stri
         return Err(format!("unknown agent '{agent}'"));
     }
 
-    // Validate numeric ranges
+    //validate numeric ranges
     match agent {
         "trader" => {
             if let Some(v) = obj.get("max_slippage_pct").and_then(|v| v.as_f64()) {
@@ -301,7 +301,7 @@ pub fn validate_patch(agent: &str, patch: &serde_json::Value) -> Result<(), Stri
     Ok(())
 }
 
-// ── Tests ──────────────────────────────────────────────────────
+//── tests ──────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn config_persists_via_json_roundtrip() {
-        // Simulates: save to Redis as JSON, load back — verifying serde roundtrip
+        //simulates: save to redis as json, load back — verifying serde roundtrip
         let cfg: GatewayConfig = serde_json::from_value(serde_json::json!({})).unwrap();
         for &agent in AGENT_NAMES {
             let original = default_config_json(agent, &cfg);

@@ -11,7 +11,7 @@ export function Settings() {
   const [status, setStatus] = useState(null); // "saved" | "error"
   const { data: health, loading } = usePolling(() => api.health(), 15000);
 
-  // Load safes from API on mount
+  //load safes from api on mount
   useEffect(() => {
     api.safesGet()
       .then((data) => setSafes(data))

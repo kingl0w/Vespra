@@ -36,17 +36,13 @@ use gateway_rs::yield_scheduler::YieldScheduler;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 1. Init tracing
+    //1. init tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
-    // 2. Load config (scans RPC_URL_* env vars into rpc_urls map)
-    // VES-112: surface load failures loudly. A silent fallback to defaults
-    // means operators can run a misconfigured gateway in prod without
-    // realising it.
     let config = match GatewayConfig::load() {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -58,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let config = Arc::new(config);
 
-    // 3. Init chain registry (receives rpc_urls from config)
+    //3. init chain registry (receives rpc_urls from config)
     let chain_registry = Arc::new(ChainRegistry::new(&config.rpc_urls));
     let available = chain_registry.available();
     tracing::info!(
@@ -67,9 +63,9 @@ async fn main() -> anyhow::Result<()> {
         available.iter().map(|c| &c.name).collect::<Vec<_>>()
     );
 
-    // 4. Init Redis
+    //4. init redis
     let redis_client = Arc::new(redis::Client::open(config.redis_url.as_str())?);
-    // Verify connectivity
+    //verify connectivity
     match redis::Client::get_multiplexed_async_connection(redis_client.as_ref()).await {
         Ok(_) => tracing::info!("redis connected: {}", config.redis_url),
         Err(e) => {
@@ -78,13 +74,13 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // 5. Build shared HTTP client
+    //5. build shared http client
     let http_client = reqwest::Client::builder()
         .user_agent("vespra-gateway-rs/0.1.0")
         .timeout(std::time::Duration::from_secs(15))
         .build()?;
 
-    // 6. Build data fetchers
+    //6. build data fetchers
     let pool_fetcher = Arc::new(PoolFetcher::new(
         http_client.clone(),
         redis_client.clone(),
@@ -107,25 +103,25 @@ async fn main() -> anyhow::Result<()> {
         chain_registry.clone(),
     ));
 
-    // 6b. Build yield provider registry
+    //6b. build yield provider registry
     let yield_registry = Arc::new(ProviderRegistry::from_config(
         &config,
         http_client.clone(),
         redis_client.clone(),
     ));
 
-    // 6c. Build Aave V3 fetcher
+    //6c. build aave v3 fetcher
     let aave_fetcher = Arc::new(AaveFetcher::new(
         http_client.clone(),
         redis_client.clone(),
     ));
 
-    // 6d. Build historical data feed (DeFiLlama APY + CoinGecko price) for the
-    // backtesting engine.
+    //6d. build historical data feed (defillama apy + coingecko price) for the
+    //backtesting engine.
     let historical_feed: Arc<dyn HistoricalFeed> =
         Arc::new(CompositeHistoricalFeed::new(http_client.clone()));
 
-    // 7. Build price oracle via config-driven router
+    //7. build price oracle via config-driven router
     let price_oracle: Arc<dyn gateway_rs::data::price::PriceOracle> =
         Arc::new(OracleRouter::from_config(
             &config,
@@ -134,9 +130,6 @@ async fn main() -> anyhow::Result<()> {
             http_client.clone(),
         ));
 
-    // 8. Build LLM client + agents
-    // Separate HTTP client for LLM — disable auto-decompression to avoid
-    // "error decoding response body" when DeepSeek returns chunked gzip
     let llm_http = reqwest::Client::builder()
         .user_agent("vespra-gateway-rs/0.1.0")
         .timeout(std::time::Duration::from_secs(120))
@@ -179,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
         config.clone(),
     ));
 
-    // 8b. Build GoalRunner dependencies (before orchestrators consume Arcs)
+    //8b. build goalrunner dependencies (before orchestrators consume arcs)
     let dry_run = std::env::var("VESPRA_DRY_RUN")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
@@ -203,7 +196,7 @@ async fn main() -> anyhow::Result<()> {
         dry_run,
     };
 
-    // 9. Build shared kill flag + orchestrator
+    //9. build shared kill flag + orchestrator
     let kill_flag = Arc::new(AtomicBool::new(false));
     let trade_up_orchestrator = Arc::new(TradeUpOrchestrator::new(
         pool_fetcher.clone(),
@@ -222,7 +215,7 @@ async fn main() -> anyhow::Result<()> {
         kill_flag.clone(),
     ));
 
-    // 9b. Build yield orchestrator
+    //9b. build yield orchestrator
     let yield_orchestrator = Arc::new(YieldOrchestrator::new(
         pool_fetcher,
         protocol_fetcher.clone(),
@@ -234,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
         kill_flag.clone(),
     ));
 
-    // 9c. Build sniper orchestrator
+    //9c. build sniper orchestrator
     let sniper_orchestrator = Arc::new(SniperOrchestrator::new(
         risk.clone(),
         sniper_agent.clone(),
@@ -247,7 +240,7 @@ async fn main() -> anyhow::Result<()> {
         kill_flag.clone(),
     ));
 
-    // 9d. Build command orchestrator
+    //9d. build command orchestrator
     let command_orchestrator = Arc::new(CommandOrchestrator::new(
         coordinator_agent,
         trade_up_orchestrator.clone(),
@@ -263,7 +256,7 @@ async fn main() -> anyhow::Result<()> {
         launcher_agent.clone(),
     ));
 
-    // 9e. Build coordinator orchestrator
+    //9e. build coordinator orchestrator
     let coordinator_orchestrator = Arc::new(CoordinatorOrchestrator::new(
         llm.clone(),
         redis_client.clone(),
@@ -271,7 +264,7 @@ async fn main() -> anyhow::Result<()> {
         yield_registry.clone(),
     ));
 
-    // 9f. Build launcher orchestrator
+    //9f. build launcher orchestrator
     let launcher_orchestrator = Arc::new(LauncherOrchestrator::new(
         launcher_agent,
         executor.clone(),
@@ -280,7 +273,7 @@ async fn main() -> anyhow::Result<()> {
         kill_flag.clone(),
     ));
 
-    // 9f. Build portfolio orchestrator
+    //9f. build portfolio orchestrator
     let portfolio_orchestrator = Arc::new(PortfolioOrchestrator::new(
         executor,
         trade_up_orchestrator.clone(),
@@ -290,7 +283,7 @@ async fn main() -> anyhow::Result<()> {
         kill_flag.clone(),
     ));
 
-    // 10. Build rate limiters + app state
+    //10. build rate limiters + app state
     let webhook_rate_limiter = Arc::new(
         gateway_rs::routes::ratelimit::WebhookRateLimiter::new(config.rl_webhook_rpm),
     );
@@ -332,7 +325,7 @@ async fn main() -> anyhow::Result<()> {
         historical_feed,
     };
 
-    // 10a. Auto-resume running/paused goals from previous boot
+    //10a. auto-resume running/paused goals from previous boot
     let auto_resume = std::env::var("VESPRA_AUTO_RESUME_GOALS")
         .map(|v| v != "false" && v != "0")
         .unwrap_or(true);
@@ -377,7 +370,7 @@ async fn main() -> anyhow::Result<()> {
                             Some(gateway_rs::goal_runner::GoalStep::Monitoring)
                         }
                         _ => {
-                            // SCOUTING, RISK, TRADING, or unknown → start from beginning
+                            //scouting, risk, trading, or unknown → start from beginning
                             from_scouting += 1;
                             None
                         }
@@ -409,7 +402,7 @@ async fn main() -> anyhow::Result<()> {
                      {from_scouting} from scouting, {paused_count} paused)"
                 );
 
-                // Store boot resume report in Redis
+                //store boot resume report in redis
                 let report = serde_json::json!({
                     "booted_at": chrono::Utc::now().to_rfc3339(),
                     "goals_resumed": total,
@@ -436,7 +429,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("[boot] VESPRA_AUTO_RESUME_GOALS=false — skipping goal resume");
     }
 
-    // 10b. Spawn SentinelMonitor background task
+    //10b. spawn sentinelmonitor background task
     tokio::spawn(SentinelMonitor::run(
         state.sentinel_monitor.clone(),
         state.redis.clone(),
@@ -444,7 +437,7 @@ async fn main() -> anyhow::Result<()> {
         state.goal_runner_deps.price_oracle.clone(),
     ));
 
-    // 10c. Spawn YieldRotationScheduler background task
+    //10c. spawn yieldrotationscheduler background task
     let yield_sched = Arc::new(YieldScheduler::new(state.yield_scheduler_status.clone()));
     tokio::spawn(YieldScheduler::run(
         yield_sched,
@@ -455,7 +448,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = routes::router(state);
 
-    // 11. Serve
+    //11. serve
     let addr = format!("{}:{}", config.host, config.port);
     tracing::info!("gateway-rs listening on {addr}");
 

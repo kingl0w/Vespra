@@ -10,7 +10,7 @@ use crate::agents::launcher::{LauncherAgent, LauncherContext};
 use crate::config::GatewayConfig;
 use crate::types::decisions::LaunchDecision;
 
-// ─── Types ───────────────────────────────────────────────────────
+//─── types ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenSpec {
@@ -45,10 +45,10 @@ struct DeployedContract {
     pub deployed_at: i64,
 }
 
-// ─── ERC-20 bytecode ─────────────────────────────────────────────
+//─── erc-20 bytecode ─────────────────────────────────────────────
 
-/// Standard OpenZeppelin ERC-20 compiled bytecode (simplified).
-/// Constructor: (string name, string symbol, uint256 totalSupply, uint8 decimals)
+///standard openzeppelin erc-20 compiled bytecode (simplified).
+///constructor: (string name, string symbol, uint256 totalsupply, uint8 decimals)
 const ERC20_BYTECODE: &str = "608060405234801561001057600080fd5b506040516200\
 0e3a3800620e3a833981016040819052610032916200016e565b8351849190620000\
 4a906003906020870190620000b2565b50825162000060906004906020860190620000b2565b50600581905560068054\
@@ -67,7 +67,7 @@ const ERC20_BYTECODE: &str = "608060405234801561001057600080fd5b506040516200\
 200022357607f821691505b60208210810362000244576000805160001960036101000a03\
 1916909117905550565b5090565b610bdf806200025b6000396000f3fe";
 
-// ─── Orchestrator ────────────────────────────────────────────────
+//─── orchestrator ────────────────────────────────────────────────
 
 pub struct LauncherOrchestrator {
     launcher_agent: Arc<LauncherAgent>,
@@ -95,7 +95,7 @@ impl LauncherOrchestrator {
     }
 
     pub async fn deploy(&self, spec: TokenSpec, wallet_id: String) -> LaunchResult {
-        // Gate checks
+        //gate checks
         if self.kill_flag.load(Ordering::SeqCst) {
             return LaunchResult {
                 deployed: false,
@@ -118,7 +118,7 @@ impl LauncherOrchestrator {
             };
         }
 
-        // Run launcher agent
+        //run launcher agent
         let liquidity_eth = spec.liquidity_eth
             .unwrap_or(self.config.launcher_initial_liquidity_eth);
         let agent_ctx = LauncherContext {
@@ -161,7 +161,7 @@ impl LauncherOrchestrator {
             }
         };
 
-        // ABI-encode constructor arguments
+        //abi-encode constructor arguments
         let constructor_args = encode_erc20_constructor(
             &spec.name,
             &spec.symbol,
@@ -170,7 +170,7 @@ impl LauncherOrchestrator {
         );
         let deploy_data = format!("0x{}{}", ERC20_BYTECODE, hex::encode(&constructor_args));
 
-        // Deploy via Keymaster (to="" for contract creation)
+        //deploy via keymaster (to="" for contract creation)
         let wallet_uuid = match uuid::Uuid::parse_str(&wallet_id) {
             Ok(id) => id,
             Err(e) => {
@@ -216,7 +216,7 @@ impl LauncherOrchestrator {
             }
         };
 
-        // Poll for receipt to get contract address
+        //poll for receipt to get contract address
         let contract_address = self.poll_receipt(&deploy_tx_hash).await;
 
         let contract_addr = match contract_address {
@@ -233,7 +233,7 @@ impl LauncherOrchestrator {
             }
         };
 
-        // Add liquidity via Keymaster
+        //add liquidity via keymaster
         let liq_amount_wei = format!("{:.0}", suggested_liquidity * 1e18);
         let liq_result = self.executor
             .execute(wallet_uuid, "WETH", &contract_addr, &liq_amount_wei, &spec.chain)
@@ -242,7 +242,7 @@ impl LauncherOrchestrator {
 
         let dex_url = format!("https://dexscreener.com/{}/{}", spec.chain, contract_addr);
 
-        // Persist to Redis
+        //persist to redis
         let deployed = DeployedContract {
             contract_address: contract_addr.clone(),
             name: spec.name,
@@ -329,7 +329,7 @@ impl LauncherOrchestrator {
     }
 }
 
-// ─── ABI encoding ────────────────────────────────────────────────
+//─── abi encoding ────────────────────────────────────────────────
 
 fn encode_erc20_constructor(name: &str, symbol: &str, supply: u64, decimals: u8) -> Vec<u8> {
     use ethabi::{encode, Token};

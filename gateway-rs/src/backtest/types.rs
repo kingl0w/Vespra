@@ -11,11 +11,11 @@ pub struct BacktestRequest {
     pub to_date: NaiveDate,
     #[serde(default)]
     pub mode: BacktestMode,
-    /// DeFiLlama pool id used for the APY series. Optional — defaults to a
-    /// stablecoin pool if omitted, but real backtests should always set it.
+    ///defillama pool id used for the apy series. optional — defaults to a
+    ///stablecoin pool if omitted, but real backtests should always set it.
     #[serde(default)]
     pub pool_id: Option<String>,
-    /// CoinGecko coin id used for the price series.
+    ///coingecko coin id used for the price series.
     #[serde(default)]
     pub coingecko_id: Option<String>,
 }
@@ -51,8 +51,8 @@ pub struct BacktestResult {
     pub equity_curve: Vec<EquityPoint>,
 }
 
-/// Lightweight projection used by the index endpoint so the dashboard can
-/// list past runs without paying the bandwidth cost of the full equity curve.
+///lightweight projection used by the index endpoint so the dashboard can
+///list past runs without paying the bandwidth cost of the full equity curve.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BacktestSummary {
     pub id: Uuid,

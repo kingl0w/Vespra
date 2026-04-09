@@ -55,7 +55,7 @@ async fn patch_agent_config(
     Path(agent): Path<String>,
     Json(patch): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    // Validate agent name
+    //validate agent name
     if agent_config::known_fields(&agent).is_none() {
         return (
             StatusCode::NOT_FOUND,
@@ -64,7 +64,7 @@ async fn patch_agent_config(
             .into_response();
     }
 
-    // Validate fields and ranges
+    //validate fields and ranges
     if let Err(err) = agent_config::validate_patch(&agent, &patch) {
         return (
             StatusCode::BAD_REQUEST,
@@ -73,7 +73,7 @@ async fn patch_agent_config(
             .into_response();
     }
 
-    // Load existing config (or defaults)
+    //load existing config (or defaults)
     let existing = match agent_config::load_agent_config(&state.redis, &agent, &state.config).await
     {
         Ok(c) => c,
@@ -86,7 +86,7 @@ async fn patch_agent_config(
         }
     };
 
-    // Merge patch into existing
+    //merge patch into existing
     let mut merged = existing.as_object().cloned().unwrap_or_default();
     if let Some(obj) = patch.as_object() {
         for (k, v) in obj {
@@ -95,7 +95,7 @@ async fn patch_agent_config(
     }
     let merged_value = serde_json::Value::Object(merged);
 
-    // Save
+    //save
     match agent_config::save_agent_config(&state.redis, &agent, &merged_value).await {
         Ok(()) => Json(serde_json::json!({
             "status": "updated",

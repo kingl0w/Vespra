@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use dashmap::DashMap;
 
-/// Token bucket for a single IP.
+///token bucket for a single ip.
 struct TokenBucket {
     tokens: f64,
     last: Instant,
@@ -20,7 +20,7 @@ impl TokenBucket {
         }
     }
 
-    /// Try to consume one token. Returns (allowed, retry_after_seconds).
+    ///try to consume one token. returns (allowed, retry_after_seconds).
     fn consume(&mut self) -> (bool, f64) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last).as_secs_f64();
@@ -37,8 +37,8 @@ impl TokenBucket {
     }
 }
 
-/// Rate limiter for the Alchemy webhook endpoint only.
-/// Per-IP token bucket, configurable max requests per minute.
+///rate limiter for the alchemy webhook endpoint only.
+///per-ip token bucket, configurable max requests per minute.
 pub struct WebhookRateLimiter {
     buckets: DashMap<String, TokenBucket>,
     capacity: f64,
@@ -55,7 +55,7 @@ impl WebhookRateLimiter {
         }
     }
 
-    /// Check rate limit for the given IP. Returns (allowed, retry_after_seconds).
+    ///check rate limit for the given ip. returns (allowed, retry_after_seconds).
     pub fn check(&self, ip: &str) -> (bool, f64) {
         let capacity = self.capacity;
         let refill_rate = self.refill_rate;
@@ -66,7 +66,7 @@ impl WebhookRateLimiter {
         entry.consume()
     }
 
-    /// Return rate limit config as JSON for /api/rate-limits endpoint.
+    ///return rate limit config as json for /api/rate-limits endpoint.
     pub fn config_json(&self) -> serde_json::Value {
         serde_json::json!({
             "webhook": {
@@ -78,7 +78,7 @@ impl WebhookRateLimiter {
     }
 }
 
-/// Extract client IP from Cloudflare headers, falling back to socket addr.
+///extract client ip from cloudflare headers, falling back to socket addr.
 pub fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
     headers
         .get("cf-connecting-ip")

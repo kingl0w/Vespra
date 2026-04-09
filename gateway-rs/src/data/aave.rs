@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 
-// ── Types ────────────────────────────────────────────────────────
+//── types ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AavePosition {
@@ -20,9 +20,9 @@ pub struct AavePosition {
     pub gas_drag_apy: f64,
 }
 
-// ── Subgraph URL mapping ─────────────────────────────────────────
+//── subgraph url mapping ─────────────────────────────────────────
 
-/// Known Aave V3 subgraph endpoints per chain.
+///known aave v3 subgraph endpoints per chain.
 fn subgraph_url(chain: &str) -> Option<&'static str> {
     match chain {
         "base" => Some(
@@ -44,7 +44,7 @@ fn subgraph_url(chain: &str) -> Option<&'static str> {
     }
 }
 
-// ── Subgraph response types ──────────────────────────────────────
+//── subgraph response types ──────────────────────────────────────
 
 #[derive(Deserialize)]
 struct SubgraphResponse {
@@ -76,19 +76,16 @@ struct SubgraphReserve {
     variable_borrow_rate: String,
 }
 
-// ── Config for gas drag calculation ──────────────────────────────
+//── config for gas drag calculation ──────────────────────────────
 
-/// Estimated gas cost for one Aave deposit/withdraw in ETH.
-/// Used for gas drag APY calculation.
+///estimated gas cost for one aave deposit/withdraw in eth.
+///used for gas drag apy calculation.
 const GAS_COST_PER_TX_ETH: f64 = 0.0003;
-/// Assumed number of yield-rotation transactions per month.
+///assumed number of yield-rotation transactions per month.
 const TXS_PER_MONTH: f64 = 2.0;
-/// ETH price estimate for gas drag denominator.
-/// In production this would come from the price oracle, but for a
-/// conservative constant-drag estimate we use a reference price.
 const ETH_PRICE_USD: f64 = 3_000.0;
 
-// ── Fetcher ──────────────────────────────────────────────────────
+//── fetcher ──────────────────────────────────────────────────────
 
 pub struct AaveFetcher {
     client: reqwest::Client,
@@ -100,7 +97,7 @@ impl AaveFetcher {
         Self { client, redis }
     }
 
-    /// Fetch all open Aave V3 positions for `wallet_address` on `chain`.
+    ///fetch all open aave v3 positions for `wallet_address` on `chain`.
     pub async fn fetch_positions(
         &self,
         chain: &str,
@@ -112,7 +109,7 @@ impl AaveFetcher {
             wallet_address.to_lowercase()
         );
 
-        // Check Redis cache (120s TTL)
+        //check redis cache (120s ttl)
         if let Ok(mut conn) =
             redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await
         {
@@ -186,12 +183,12 @@ impl AaveFetcher {
             let supplied = supplied_raw / divisor;
             let borrowed = borrowed_raw / divisor;
 
-            // Skip positions with no supply and no debt
+            //skip positions with no supply and no debt
             if supplied < 1e-8 && borrowed < 1e-8 {
                 continue;
             }
 
-            // Rates are in RAY units (1e27)
+            //rates are in ray units (1e27)
             let ray = 1e27;
             let supply_apy = ur
                 .reserve
@@ -209,15 +206,15 @@ impl AaveFetcher {
                 / ray
                 * 100.0;
 
-            // Net APY calculation
+            //net apy calculation
             let net_apy = if borrowed > 1e-8 && supplied > 1e-8 {
                 supply_apy - (borrow_apy * (borrowed / supplied))
             } else {
                 supply_apy
             };
 
-            // Gas drag: amortize 2 txs/month of gas cost over 30 days,
-            // expressed as annualized APY drag relative to position value.
+            //gas drag: amortize 2 txs/month of gas cost over 30 days,
+            //expressed as annualized apy drag relative to position value.
             let monthly_gas_cost_usd = GAS_COST_PER_TX_ETH * ETH_PRICE_USD * TXS_PER_MONTH;
             let position_value_usd = supplied * ETH_PRICE_USD; // rough estimate
             let gas_drag_apy = if position_value_usd > 1.0 {
@@ -240,7 +237,7 @@ impl AaveFetcher {
             });
         }
 
-        // Cache in Redis with 120s TTL
+        //cache in redis with 120s ttl
         if let Ok(mut conn) =
             redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await
         {
@@ -252,8 +249,8 @@ impl AaveFetcher {
         Ok(positions)
     }
 
-    /// Convenience: fetch positions and try to enrich with health factor
-    /// from Keymaster's wallet endpoint (if available).
+    ///convenience: fetch positions and try to enrich with health factor
+    ///from keymaster's wallet endpoint (if available).
     pub async fn fetch_positions_enriched(
         &self,
         chain: &str,
@@ -264,7 +261,7 @@ impl AaveFetcher {
     ) -> Result<Vec<AavePosition>> {
         let mut positions = self.fetch_positions(chain, wallet_address).await?;
 
-        // Try to fetch health factor from Keymaster
+        //try to fetch health factor from keymaster
         let health_factor = fetch_health_factor(
             http_client,
             keymaster_url,
@@ -286,7 +283,7 @@ impl AaveFetcher {
     }
 }
 
-/// Try to get Aave V3 health factor via Keymaster's account data endpoint.
+///try to get aave v3 health factor via keymaster's account data endpoint.
 async fn fetch_health_factor(
     client: &reqwest::Client,
     keymaster_url: &str,
@@ -321,7 +318,7 @@ async fn fetch_health_factor(
             });
             match data.health_factor {
                 Some(hf_str) => {
-                    // Health factor from contract is in 1e18 units
+                    //health factor from contract is in 1e18 units
                     let hf = hf_str.parse::<f64>().unwrap_or(0.0) / 1e18;
                     if hf > 0.0 {
                         Ok(Some(hf))
@@ -336,7 +333,7 @@ async fn fetch_health_factor(
     }
 }
 
-/// Resolve a wallet label or ID to an address via Keymaster.
+///resolve a wallet label or id to an address via keymaster.
 pub async fn resolve_wallet_address(
     client: &reqwest::Client,
     keymaster_url: &str,
@@ -368,7 +365,7 @@ pub async fn resolve_wallet_address(
         .await
         .context("failed to parse keymaster wallets")?;
 
-    // Match by label or wallet_id, optionally filtered by chain
+    //match by label or wallet_id, optionally filtered by chain
     let wallet_lower = wallet_label.to_lowercase();
     let chain_lower = chain.to_lowercase();
 

@@ -17,20 +17,20 @@ use crate::rpc;
 use crate::state::AppState;
 use crate::swap;
 
-// ─── Treasury Fee Constants ──────────────────────────────────────
+//─── treasury fee constants ──────────────────────────────────────
 
-/// Hardcoded treasury — swap for prod wallet before mainnet launch, then recompile.
+///hardcoded treasury — swap for prod wallet before mainnet launch, then recompile.
 const TREASURY_ADDRESS: &str = "0x10d2db399137b01a814162d49b1f1ca693747c0a";
 const PERF_FEE_BPS: u64 = 500;       // 500 basis points = 5%
 const MIN_FEE_WEI: u128 = 100_000_000_000_000; // 0.0001 ETH dust threshold
 
-// ─── AUM Fee Constants ───────────────────────────────────────────
+//─── aum fee constants ───────────────────────────────────────────
 const AUM_FEE_BPS_ANNUAL: u128 = 50;           // 50 BPS = 0.5% annual
 const AUM_SWEEP_INTERVAL_SECS: u64 = 604_800;  // 7 days in seconds
 const MIN_AUM_SWEEP_WEI: u128 = 100_000_000_000_000; // 0.0001 ETH dust threshold
 
-/// Calculate fee in wei using basis points. Returns (fee_wei, net_wei).
-/// Returns (0, amount_wei) if fee is below dust threshold.
+///calculate fee in wei using basis points. returns (fee_wei, net_wei).
+///returns (0, amount_wei) if fee is below dust threshold.
 fn calculate_fee(amount_wei: U256) -> (U256, U256) {
     let fee_wei = amount_wei * U256::from(PERF_FEE_BPS) / U256::from(10_000u64);
     if fee_wei < U256::from(MIN_FEE_WEI) {
@@ -40,7 +40,7 @@ fn calculate_fee(amount_wei: U256) -> (U256, U256) {
     (fee_wei, net_wei)
 }
 
-// ─── Health ──────────────────────────────────────────────────────
+//─── health ──────────────────────────────────────────────────────
 
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
     let chains = state.config.active_chains();
@@ -53,7 +53,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
     }))
 }
 
-// ─── Wallet CRUD ─────────────────────────────────────────────────
+//─── wallet crud ─────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct CreateWalletRequest {
@@ -70,16 +70,12 @@ pub async fn create_wallet(
     state.config.get_chain(&req.chain)
         .ok_or_else(|| AppError::ChainNotConfigured(req.chain.clone()))?;
 
-    // Key material entropy: PrivateKeySigner::random() draws from rand's
-    // thread_rng, which is seeded from the OS RNG (getrandom/urandom on Linux).
-    // Surface a warning at the call site so operators are reminded to verify
-    // system entropy is healthy before generating real-funds wallets.
     tracing::warn!(
         "Generating new wallet key — ensure system entropy is sufficient (getrandom/urandom)."
     );
     let signer = PrivateKeySigner::random();
-    // VES-117: render with EIP-55 checksum so logs and stored addresses use a
-    // canonical, mixed-case form rather than alloy's Debug-formatted output.
+    //ves-117: render with eip-55 checksum so logs and stored addresses use a
+    //canonical, mixed-case form rather than alloy's debug-formatted output.
     let address = signer.address().to_checksum(None);
     let private_key_bytes = signer.to_bytes();
     let encrypted = crypto::encrypt_key(private_key_bytes.as_slice(), &state.master_password)?;
@@ -151,14 +147,11 @@ pub async fn update_cap(
     Ok(Json(json!({ "status": "updated", "wallet_id": wallet_id, "cap_wei": cap_wei })))
 }
 
-/// Admin-only recovery endpoint. Resets total_sent to zero for a wallet that has
-/// hit a cap integrity error (total_sent > cap). Requires operator auth token.
-/// Should only be called after verifying the wallet state externally.
 pub async fn reset_cap(
     State(state): State<Arc<AppState>>,
     Path(wallet_id): Path<String>,
 ) -> AppResult<Json<WalletInfo>> {
-    // Look up the wallet first so a missing id returns 404 cleanly.
+    //look up the wallet first so a missing id returns 404 cleanly.
     let wallet = state.keystore.get_wallet(&wallet_id)?;
     let rows = state.keystore.reset_total_sent(&wallet_id)?;
     tracing::warn!(
@@ -168,13 +161,13 @@ pub async fn reset_cap(
         "operator reset total_sent for wallet {} — cap integrity restored",
         wallet.address
     );
-    // Re-fetch in case the keystore mutated any timestamps; cheap and keeps
-    // the response shape identical to GET /wallets/:id.
+    //re-fetch in case the keystore mutated any timestamps; cheap and keeps
+    //the response shape identical to get /wallets/:id.
     let updated = state.keystore.get_wallet(&wallet_id)?;
     Ok(Json(WalletInfo::from(updated)))
 }
 
-// ─── Balance & Chain Queries ─────────────────────────────────────
+//─── balance & chain queries ─────────────────────────────────────
 
 pub async fn get_balance(
     State(state): State<Arc<AppState>>,
@@ -230,7 +223,7 @@ pub async fn chain_status(
     })))
 }
 
-// ─── Transactions ────────────────────────────────────────────────
+//─── transactions ────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct SendNativeRequest {
@@ -248,7 +241,7 @@ pub async fn send_native(
         return Err(AppError::BadRequest("Wallet is deactivated".into()));
     }
 
-    // ── Address validation ───────────────────────────────────────
+    //── address validation ───────────────────────────────────────
     let to_normalized = req.to.trim().to_lowercase();
     let zero_address = "0x0000000000000000000000000000000000000000";
     if to_normalized == zero_address {
@@ -263,11 +256,6 @@ pub async fn send_native(
 
     let value = eth_to_u256(&req.amount_eth)?;
 
-    // ── Wallet cap enforcement ───────────────────────────────────
-    // VES-90 / VES-105: a corrupted cap field or a total_sent that exceeds
-    // cap must NEVER fall through to approving a transaction. The first case
-    // would let any amount through; the second would silently brick the
-    // wallet. Both surface as 503s so an operator gets a clear signal.
     let cap_wei_str = &wallet.cap_wei;
     if cap_wei_str != "0" && !cap_wei_str.is_empty() {
         let cap = cap_wei_str.parse::<u128>().map_err(|_| {
@@ -281,11 +269,6 @@ pub async fn send_native(
         })?;
         let cap_u256 = U256::from(cap);
         let total_sent = state.keystore.total_sent_wei(&req.wallet_id)?;
-        // VES-105: detect quarantine condition (total_sent > cap) at load time
-        // so the wallet doesn't sit silently bricked. Future: a recovery
-        // endpoint (e.g. POST /wallets/:id/cap/reset, admin-only) could clear
-        // total_sent or raise the cap after operator review — not implemented
-        // here to keep the surface area small.
         if total_sent > cap_u256 {
             tracing::error!(
                 wallet_id = %req.wallet_id,
@@ -310,7 +293,7 @@ pub async fn send_native(
         }
     }
 
-    // ── TX simulation (eth_call before broadcast) ────────────────
+    //── tx simulation (eth_call before broadcast) ────────────────
     let sim_result = rpc::simulate_tx(chain, &wallet.address, &req.to, value).await;
     let (simulated, simulation_result, revert_reason) = match sim_result {
         Ok(()) => (true, "success".to_string(), None::<String>),
@@ -337,13 +320,13 @@ pub async fn send_native(
         }
     };
 
-    // ── Treasury fee calculation ─────────────────────────────────
+    //── treasury fee calculation ─────────────────────────────────
     let (fee_wei, net_wei) = calculate_fee(value);
     let fee_wei_str = fee_wei.to_string();
     let mut fee_tx_hash_str: String = String::new();
     let mut fee_sent = false;
 
-    // ── Broadcast fee TX (never blocks main TX) ──────────────────
+    //── broadcast fee tx (never blocks main tx) ──────────────────
     let mut pk_bytes = crypto::decrypt_key(&wallet.encrypted_key, &state.master_password)?;
 
     if !fee_wei.is_zero() {
@@ -365,7 +348,7 @@ pub async fn send_native(
                 fee_sent = true;
             }
             Err(e) => {
-                // Fee failure must NEVER block the main TX
+                //fee failure must never block the main tx
                 tracing::warn!(
                     wallet_id = %req.wallet_id,
                     error = %e,
@@ -375,7 +358,7 @@ pub async fn send_native(
         }
     }
 
-    // ── Broadcast main TX with net amount (after fee) ────────────
+    //── broadcast main tx with net amount (after fee) ────────────
     let send_value = if fee_sent { net_wei } else { value };
     let max_attempts = 3u32;
     let mut last_error = String::new();
@@ -402,7 +385,7 @@ pub async fn send_native(
                 if !is_transient || attempt == max_attempts {
                     break;
                 }
-                // Exponential backoff: 1s, 2s (attempt 1→2, 2→3)
+                //exponential backoff: 1s, 2s (attempt 1→2, 2→3)
                 let delay_ms = 1000u64 * 2u64.pow(attempt - 1);
                 tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
             }
@@ -410,7 +393,7 @@ pub async fn send_native(
     }
     crypto::zeroize_bytes(&mut pk_bytes);
 
-    // Build fee_tx_hash as null or string for JSON response
+    //build fee_tx_hash as null or string for json response
     let fee_tx_json: Value = if fee_sent {
         Value::String(fee_tx_hash_str)
     } else {
@@ -476,12 +459,12 @@ pub async fn send_tx_with_data(
         _ => U256::ZERO,
     };
 
-    // Decode hex calldata
+    //decode hex calldata
     let data_bytes: Option<Vec<u8>> = match &req.data {
         Some(hex_str) if !hex_str.is_empty() && hex_str != "0x" => {
             let clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-            // VES-112: surface field name + decode detail in the response so
-            // operators don't have to grep server logs to find the typo.
+            //ves-112: surface field name + decode detail in the response so
+            //operators don't have to grep server logs to find the typo.
             Some(hex::decode(clean).map_err(|e| AppError::InvalidHex {
                 field: "data".to_string(),
                 detail: e.to_string(),
@@ -490,14 +473,14 @@ pub async fn send_tx_with_data(
         _ => None,
     };
 
-    // Compute data hash for audit trail
+    //compute data hash for audit trail
     let data_hash = data_bytes.as_ref()
         .map(|b| format!("{:?}", keccak256(b)))
         .unwrap_or_else(|| "none".to_string());
 
     let to_ref = req.to.as_deref();
 
-    // Address validation for non-deploy transactions
+    //address validation for non-deploy transactions
     if let Some(to_str) = to_ref {
         let to_lower = to_str.trim().to_lowercase();
         let zero = "0x0000000000000000000000000000000000000000";
@@ -506,7 +489,7 @@ pub async fn send_tx_with_data(
         }
     }
 
-    // Simulate before broadcast
+    //simulate before broadcast
     let sim = rpc::simulate_tx_with_data(chain, &wallet.address, to_ref, value, data_bytes.clone()).await;
     let (simulated, simulation_result, revert_reason) = match sim {
         Ok(()) => (true, "success".to_string(), None::<String>),
@@ -529,7 +512,7 @@ pub async fn send_tx_with_data(
         }
     };
 
-    // Broadcast with retry
+    //broadcast with retry
     let mut pk_bytes = crypto::decrypt_key(&wallet.encrypted_key, &state.master_password)?;
     let max_attempts = 3u32;
     let mut last_error = String::new();
@@ -589,7 +572,7 @@ pub async fn send_tx_with_data(
     }
 }
 
-// ─── Swap (wrap → approve → exactInputSingle) ────────────────────
+//─── swap (wrap → approve → exactinputsingle) ────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct SwapRequest {
@@ -613,16 +596,13 @@ pub async fn swap_handler(
     let chain = state.config.get_chain(chain_name)
         .ok_or_else(|| AppError::ChainNotConfigured(chain_name.to_string()))?;
 
-    // Parse amount_in_wei as a U256 (decimal string).
+    //parse amount_in_wei as a u256 (decimal string).
     let amount_in_wei = U256::from_str_radix(req.amount_in_wei.trim(), 10)
         .map_err(|e| AppError::BadRequest(format!("Invalid amount_in_wei: {e}")))?;
     if amount_in_wei.is_zero() {
         return Err(AppError::BadRequest("amount_in_wei must be > 0".into()));
     }
 
-    // ── Cap enforcement (mirrors send_native) ───────────────────────
-    // VES-90 / VES-105: see send_native for the rationale. A corrupt cap or
-    // a total_sent above cap must surface as a 503 — never fall through.
     let cap_wei_str = &wallet.cap_wei;
     if cap_wei_str != "0" && !cap_wei_str.is_empty() {
         let cap = cap_wei_str.parse::<u128>().map_err(|_| {
@@ -682,7 +662,7 @@ pub async fn swap_handler(
 
     match result {
         Ok(r) => {
-            // Audit-log the final swap tx; wrap/approve are logged by step.
+            //audit-log the final swap tx; wrap/approve are logged by step.
             let _ = state.keystore.log_tx(
                 &req.wallet_id,
                 chain_name,
@@ -746,7 +726,7 @@ pub async fn sweep_to_safe(
     let wallet = state.keystore.get_wallet(&req.wallet_id)?;
     let chain = state.config.get_chain(&wallet.chain)
         .ok_or_else(|| AppError::ChainNotConfigured(wallet.chain.clone()))?;
-    // Check DB first, fall back to .env config
+    //check db first, fall back to .env config
     let db_safe = state.keystore.get_setting(&format!("safe_{}", wallet.chain))?;
     let safe_address = db_safe.as_deref()
         .or(chain.safe_address.as_deref())
@@ -796,7 +776,7 @@ pub async fn get_tx_log(
     Ok(Json(json!({ "wallet_id": wallet_id, "transactions": txs })))
 }
 
-// ─── Settings ────────────────────────────────────────────────────
+//─── settings ────────────────────────────────────────────────────
 
 pub async fn get_safes(
     State(state): State<Arc<AppState>>,
@@ -820,11 +800,11 @@ pub async fn set_safe(
     Path(chain): Path<String>,
     Json(req): Json<SetSafeRequest>,
 ) -> AppResult<Json<Value>> {
-    // Validate chain exists
+    //validate chain exists
     state.config.get_chain(&chain)
         .ok_or_else(|| AppError::ChainNotConfigured(chain.clone()))?;
 
-    // Basic address validation
+    //basic address validation
     if !req.address.starts_with("0x") || req.address.len() != 42 {
         return Err(AppError::BadRequest("Invalid address format".into()));
     }
@@ -835,7 +815,7 @@ pub async fn set_safe(
     Ok(Json(json!({ "status": "ok", "chain": chain, "address": req.address })))
 }
 
-// ─── NullBoiler Dispatch ─────────────────────────────────────────
+//─── nullboiler dispatch ─────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct DispatchRequest {
@@ -884,7 +864,7 @@ pub async fn dispatch(
 }
 
 fn resolve_action(prompt: &str, input: &Value) -> String {
-    // Explicit action field takes priority
+    //explicit action field takes priority
     if let Some(action) = input.get("action").and_then(|v| v.as_str()) {
         return action.to_string();
     }
@@ -1013,7 +993,7 @@ async fn dispatch_get_tx_log(state: Arc<AppState>, input: &Value) -> Result<Valu
     Ok(v)
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────
+//─── helpers ─────────────────────────────────────────────────────
 
 fn eth_to_wei(eth: &str) -> AppResult<String> {
     let value = eth_to_u256(eth)?;
@@ -1057,7 +1037,7 @@ fn wei_to_eth_string(wei: U256) -> String {
     }
 }
 
-// ─── AUM Fee Sweep Background Task ──────────────────────────────
+//─── aum fee sweep background task ──────────────────────────────
 
 pub async fn aum_sweep_loop(state: Arc<AppState>) {
     tracing::info!(
@@ -1065,7 +1045,7 @@ pub async fn aum_sweep_loop(state: Arc<AppState>) {
         "[aum_fee] background sweep thread started"
     );
 
-    // Always sleep one full interval before first sweep
+    //always sleep one full interval before first sweep
     tokio::time::sleep(tokio::time::Duration::from_secs(AUM_SWEEP_INTERVAL_SECS)).await;
 
     loop {
@@ -1077,14 +1057,14 @@ pub async fn aum_sweep_loop(state: Arc<AppState>) {
 }
 
 async fn run_aum_sweep(state: &Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // 1. Get all active wallets
+    //1. get all active wallets
     let wallets = state.keystore.list_wallets(None, None)?;
     if wallets.is_empty() {
         tracing::info!("[aum_fee] no wallets — skipping");
         return Ok(());
     }
 
-    // 2. Sum AUM across all wallets by fetching balances via RPC
+    //2. sum aum across all wallets by fetching balances via rpc
     let mut total_aum_wei: u128 = 0;
     let mut highest_balance_wei: u128 = 0;
     let mut sweep_wallet_info: Option<(&str, &str)> = None; // (wallet_id, chain)
@@ -1097,7 +1077,7 @@ async fn run_aum_sweep(state: &Arc<AppState>) -> Result<(), Box<dyn std::error::
         };
         match rpc::get_balance(chain, &wallet.address).await {
             Ok(balance) => {
-                // U256 -> u128: safe for realistic balances (< 2^128 wei)
+                //u256 -> u128: safe for realistic balances (< 2^128 wei)
                 let bal: u128 = balance.to_string().parse().unwrap_or(0);
                 total_aum_wei += bal;
                 if bal > highest_balance_wei {
@@ -1116,7 +1096,7 @@ async fn run_aum_sweep(state: &Arc<AppState>) -> Result<(), Box<dyn std::error::
         return Ok(());
     }
 
-    // 3. Calculate days since last sweep
+    //3. calculate days since last sweep
     let last_sweep_ts = state.keystore.get_last_aum_sweep_time()?;
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -1126,7 +1106,7 @@ async fn run_aum_sweep(state: &Arc<AppState>) -> Result<(), Box<dyn std::error::
         None => AUM_SWEEP_INTERVAL_SECS as f64 / 86400.0,
     };
 
-    // 4. Calculate accrual
+    //4. calculate accrual
     let accrual_wei = (total_aum_wei as f64
         * (AUM_FEE_BPS_ANNUAL as f64 / 10_000.0)
         / 365.0
@@ -1142,14 +1122,14 @@ async fn run_aum_sweep(state: &Arc<AppState>) -> Result<(), Box<dyn std::error::
         "[aum_fee] calculated accrual"
     );
 
-    // 5. Sweep if above dust threshold
+    //5. sweep if above dust threshold
     let mut tx_hash: Option<String> = None;
     let mut swept = false;
 
     if accrual_wei >= MIN_AUM_SWEEP_WEI {
         if let Some((wallet_id, chain_name)) = sweep_wallet_info {
             if let Some(chain) = state.config.get_chain(chain_name) {
-                // Decrypt PK for the sweep wallet
+                //decrypt pk for the sweep wallet
                 match state.keystore.get_wallet(wallet_id) {
                     Ok(wallet_record) => {
                         match crypto::decrypt_key(&wallet_record.encrypted_key, &state.master_password) {
@@ -1195,7 +1175,7 @@ async fn run_aum_sweep(state: &Arc<AppState>) -> Result<(), Box<dyn std::error::
         );
     }
 
-    // 6. Always log the sweep attempt to DB
+    //6. always log the sweep attempt to db
     state.keystore.insert_fee_sweep(
         "aum",
         Some(total_aum_eth),
@@ -1207,7 +1187,7 @@ async fn run_aum_sweep(state: &Arc<AppState>) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-// ─── Fee Endpoints ───────────────────────────────────────────────
+//─── fee endpoints ───────────────────────────────────────────────
 
 use axum::response::IntoResponse;
 

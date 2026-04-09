@@ -16,7 +16,7 @@ use crate::config::GatewayConfig;
 use crate::orchestrator::trade_up::TradeUpOrchestrator;
 use crate::orchestrator::yield_rot::YieldOrchestrator;
 
-// ─── Types ───────────────────────────────────────────────────────
+//─── types ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandReport {
@@ -26,7 +26,7 @@ pub struct CommandReport {
     pub reasoning: String,
 }
 
-// ─── Orchestrator ────────────────────────────────────────────────
+//─── orchestrator ────────────────────────────────────────────────
 
 pub struct CommandOrchestrator {
     coordinator: Arc<CoordinatorAgent>,
@@ -80,7 +80,7 @@ impl CommandOrchestrator {
         command: String,
         wallet_id: Option<String>,
     ) -> CommandReport {
-        // Gather system state
+        //gather system state
         let trade_up_wallets = self.trade_up.active_wallets().await;
         let yield_wallets = self.yield_orch.active_wallets().await;
         let mut active_loops: Vec<String> = trade_up_wallets
@@ -96,7 +96,7 @@ impl CommandOrchestrator {
             chains: self.config.chains.clone(),
         };
 
-        // Run coordinator agent
+        //run coordinator agent
         let ctx = CoordinatorContext {
             command: command.clone(),
             system_state,
@@ -113,7 +113,7 @@ impl CommandOrchestrator {
             }
         };
 
-        // Determine wallet_id — prefer explicit param, then LLM extraction
+        //determine wallet_id — prefer explicit param, then llm extraction
         let resolved_wallet_id = wallet_id
             .as_deref()
             .or(intent.wallet_id.as_deref())
@@ -129,7 +129,7 @@ impl CommandOrchestrator {
             "threshold_pct": intent.threshold_pct,
         });
 
-        // Route by strategy
+        //route by strategy
         match intent.strategy.as_str() {
             "TradeUp" => {
                 let Some(wid) = resolved_wallet_id else {
@@ -208,7 +208,7 @@ impl CommandOrchestrator {
                 self.kill_flag.store(true, Ordering::SeqCst);
                 tracing::warn!("KILL SWITCH ACTIVATED via command");
 
-                // Stop all loops
+                //stop all loops
                 for wid in &trade_up_wallets {
                     let _ = self.trade_up.stop_loop(*wid).await;
                 }
@@ -246,7 +246,7 @@ impl CommandOrchestrator {
                     "AskSniper" => ("sniper", self.sniper.query(&query).await),
                     "AskLauncher" => ("launcher", self.launcher.query(&query).await),
                     "AskExecutor" => {
-                        // Executor is not LLM-backed — return system state
+                        //executor is not llm-backed — return system state
                         ("executor", Ok(serde_json::json!({
                             "note": "Executor handles on-chain transactions via Keymaster. Use wallet endpoints for balances/history.",
                             "active_trade_up_wallets": trade_up_wallets.iter().map(|id| id.to_string()).collect::<Vec<_>>(),

@@ -7,7 +7,7 @@ use axum::Router;
 
 use super::AppState;
 
-/// GET /health — gateway-only health (existing behavior)
+///get /health — gateway-only health (existing behavior)
 async fn health_check(State(state): State<AppState>) -> Json<serde_json::Value> {
     let available_chains: Vec<String> = state
         .chain_registry
@@ -27,8 +27,8 @@ async fn health_check(State(state): State<AppState>) -> Json<serde_json::Value> 
     }))
 }
 
-/// GET /api/health — aggregated health from gateway + NullBoiler + Keymaster
-/// (called from proxy router, path is "/health" under the /api nest)
+///get /api/health — aggregated health from gateway + nullboiler + keymaster
+///(called from proxy router, path is "/health" under the /api nest)
 pub async fn api_health_aggregate(State(state): State<AppState>) -> Json<serde_json::Value> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -76,7 +76,7 @@ pub async fn api_health_aggregate(State(state): State<AppState>) -> Json<serde_j
     }))
 }
 
-/// GET /api/rate-limits
+///get /api/rate-limits
 pub async fn api_rate_limits(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(state.webhook_rate_limiter.config_json())
 }

@@ -1,12 +1,3 @@
-//! REST routes for the backtesting engine.
-//!
-//! Persistence layout in Redis:
-//! - `backtest:{id}` → JSON-encoded `BacktestResult` (no TTL — backtests are
-//!   small and operators want them to stick around)
-//! - `backtest:index` → JSON array of `BacktestSummary`, newest-first
-//!
-//! The index is a single key (rather than a sorted set) so the dashboard can
-//! fetch the full list in one round trip without paging logic.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -28,14 +19,14 @@ fn backtest_key(id: &Uuid) -> String {
     format!("{BACKTEST_KEY_PREFIX}{id}")
 }
 
-// ─── Persistence helpers ───────────────────────────────────────────────
+//─── persistence helpers ───────────────────────────────────────────────
 
 async fn save_backtest(redis: &redis::Client, result: &BacktestResult) -> anyhow::Result<()> {
     let mut conn = redis.get_multiplexed_async_connection().await?;
     let payload = serde_json::to_string(result)?;
     let _: () = conn.set(backtest_key(&result.id), payload).await?;
 
-    // Maintain backtest:index — newest-first list of summaries.
+    //maintain backtest:index — newest-first list of summaries.
     let raw: Option<String> = conn.get(BACKTEST_INDEX_KEY).await.unwrap_or(None);
     let mut index: Vec<BacktestSummary> = raw
         .as_deref()
@@ -63,12 +54,12 @@ async fn load_index(redis: &redis::Client) -> anyhow::Result<Vec<BacktestSummary
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
-    // Defensive: ensure newest-first even if a writer raced.
+    //defensive: ensure newest-first even if a writer raced.
     index.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(index)
 }
 
-// ─── Handlers ──────────────────────────────────────────────────────────
+//─── handlers ──────────────────────────────────────────────────────────
 
 async fn create_backtest(
     State(state): State<AppState>,

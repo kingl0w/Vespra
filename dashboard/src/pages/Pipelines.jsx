@@ -111,7 +111,7 @@ function Toast({ toast, onDone }) {
 
   useEffect(() => {
     if (!toast) return;
-    // Trigger fade-in on next frame
+    //trigger fade-in on next frame
     const frameId = requestAnimationFrame(() => setVisible(true));
     const timer = setTimeout(() => setVisible(false), 3000);
     const cleanup = setTimeout(onDone, 3300);

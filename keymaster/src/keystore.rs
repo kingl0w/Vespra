@@ -207,15 +207,6 @@ impl Keystore {
         Ok(())
     }
 
-    /// VES-105 recovery: zero out the wallet's effective `total_sent` by
-    /// re-tagging all confirmed `send_native` rows with status
-    /// `cap_reset_excluded`. The audit row is preserved (we still know the tx
-    /// happened and on what date) but `total_sent_wei` ignores it because the
-    /// query filters on `status = 'confirmed'`. Returns the number of rows
-    /// re-tagged so the operator gets confirmation in the response.
-    ///
-    /// Verifies the wallet exists first so a typo'd UUID returns 404 instead
-    /// of a silent zero-row UPDATE.
     pub fn reset_total_sent(&self, wallet_id: &str) -> AppResult<u64> {
         let conn = self.conn.lock().map_err(|e| AppError::Internal(e.to_string()))?;
         let exists: i64 = conn.query_row(
@@ -331,7 +322,7 @@ impl Keystore {
         Ok(rows)
     }
 
-    // ─── Fee Sweep Helpers ───────────────────────────────────────
+    //─── fee sweep helpers ───────────────────────────────────────
 
     pub fn insert_fee_sweep(
         &self, sweep_type: &str, aum_eth: Option<f64>, accrual_eth: f64,

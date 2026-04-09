@@ -72,7 +72,7 @@ impl ProtocolFetcher {
     pub async fn fetch_protocol(&self, slug: &str) -> Result<ProtocolData> {
         let cache_key = format!("vespra:protocol:{slug}");
 
-        // Check cache
+        //check cache
         if let Ok(mut conn) =
             redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await
         {
@@ -95,14 +95,14 @@ impl ProtocolFetcher {
             .await
             .context("failed to parse llama protocol response")?;
 
-        // Current TVL — last entry in tvl array
+        //current tvl — last entry in tvl array
         let current_tvl = resp
             .tvl
             .last()
             .map(|e| e.total_liquidity_usd)
             .unwrap_or(0.0);
 
-        // TVL trend — 30-day change
+        //tvl trend — 30-day change
         let tvl_trend_pct =
             if let (Some(latest), true) = (resp.tvl.last(), resp.tvl.len() >= 2) {
                 let target_ts = latest.date.saturating_sub(30 * 86400);
@@ -122,7 +122,7 @@ impl ProtocolFetcher {
                 0.0
             };
 
-        // TVL velocity — compare current to 1hr-ago cached value
+        //tvl velocity — compare current to 1hr-ago cached value
         let velocity_key = format!("vespra:tvl_cache:{slug}");
         let tvl_velocity_1hr = if let Ok(mut conn) =
             redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await
@@ -139,7 +139,7 @@ impl ProtocolFetcher {
                 }
                 None => 0.0,
             };
-            // Store current TVL with 1hr TTL for next comparison
+            //store current tvl with 1hr ttl for next comparison
             let _: Result<(), _> = conn
                 .set_ex(&velocity_key, current_tvl.to_string(), 3600)
                 .await;
@@ -148,7 +148,7 @@ impl ProtocolFetcher {
             0.0
         };
 
-        // Age in days from first TVL entry
+        //age in days from first tvl entry
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -159,7 +159,7 @@ impl ProtocolFetcher {
             .map(|e| if e.date > 0 { (now - e.date) / 86400 } else { 0 })
             .unwrap_or(0);
 
-        // Audits
+        //audits
         let audits = match resp.audit_links {
             Some(links) => links,
             None => match resp.audits {
@@ -171,7 +171,7 @@ impl ProtocolFetcher {
             },
         };
 
-        // Resolve chain from response "chains" array via ChainRegistry
+        //resolve chain from response "chains" array via chainregistry
         let chain = resp
             .chains
             .as_ref()
@@ -194,7 +194,7 @@ impl ProtocolFetcher {
             chain,
         };
 
-        // Cache with 300s TTL
+        //cache with 300s ttl
         if let Ok(mut conn) =
             redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await
         {

@@ -15,8 +15,8 @@ pub struct TraderContext {
     pub risk_score: RiskScore,
     pub min_gain_pct: f64,
     pub max_eth: f64,
-    /// Chain the goal is targeting. Used to apply testnet-vs-mainnet trade rules.
-    /// Defaults to the opportunity's chain if not set explicitly by the caller.
+    ///chain the goal is targeting. used to apply testnet-vs-mainnet trade rules.
+    ///defaults to the opportunity's chain if not set explicitly by the caller.
     #[serde(default)]
     pub chain: String,
 }
@@ -103,9 +103,6 @@ impl TraderAgent {
             .or(parsed.reason.clone())
             .unwrap_or_else(|| "no reasoning provided".into());
 
-        // Deterministic override: on testnet, if the LLM held due to momentum
-        // (despite the prompt instructing it to skip the gate), promote to a swap
-        // using the quote we already fetched. Risk-based holds are still respected.
         if testnet
             && action == "hold"
             && !matches!(ctx.risk_score, RiskScore::High | RiskScore::Critical)

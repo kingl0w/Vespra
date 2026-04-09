@@ -86,7 +86,7 @@ export function Setup() {
   const [saveResult, setSaveResult] = useState(null);
   const [validationError, setValidationError] = useState(null);
 
-  // Load config from API, then overlay any saved wizard state
+  //load config from api, then overlay any saved wizard state
   useEffect(() => {
     fetch(`${BASE_GW}/config`)
       .then((r) => r.json())
@@ -106,7 +106,7 @@ export function Setup() {
         }
       })
       .catch(() => {
-        // Start with empty defaults if API is down
+        //start with empty defaults if api is down
         const defaults = {
           llm_provider: "deepseek",
           llm_model: "deepseek-chat",
@@ -130,7 +130,7 @@ export function Setup() {
       .finally(() => setLoading(false));
   }, []);
 
-  // Persist wizard state on every change
+  //persist wizard state on every change
   useEffect(() => {
     if (!config) return;
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...config, _step: step }));

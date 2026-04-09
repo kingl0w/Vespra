@@ -22,12 +22,12 @@ export function Nav({ url }) {
   const { chain, setChain, chains } = useChain();
   const [open, setOpen] = useState(false);
 
-  // Close drawer on route change
+  //close drawer on route change
   useEffect(() => {
     setOpen(false);
   }, [url]);
 
-  // Prevent body scroll when drawer is open
+  //prevent body scroll when drawer is open
   useEffect(() => {
     if (open) {
       document.body.style.overflow = "hidden";

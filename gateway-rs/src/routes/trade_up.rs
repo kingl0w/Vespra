@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use super::AppState;
 
-// ─── Existing cycle-based routes ────────────────────────────────
+//─── existing cycle-based routes ────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct StartRequest {
@@ -64,7 +64,7 @@ async fn trade_up_status(
     let active_wallets = state.trade_up_orchestrator.active_wallets().await;
     let is_active = active_wallets.contains(&wallet_id);
 
-    // Read last cycle result from Redis
+    //read last cycle result from redis
     let (cycle, capital, last_status) = match redis::Client::get_multiplexed_async_connection(
         state.redis.as_ref(),
     )
@@ -134,7 +134,7 @@ async fn read_history_from_redis(state: &AppState, key: &str) -> Json<serde_json
     }
 }
 
-// ─── VES-37: Position-based routes ──────────────────────────────
+//─── ves-37: position-based routes ──────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct PositionStartRequest {
@@ -226,17 +226,17 @@ async fn position_history(
     }
 }
 
-// ─── Router ─────────────────────────────────────────────────────
+//─── router ─────────────────────────────────────────────────────
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        // Existing cycle-based endpoints
+        //existing cycle-based endpoints
         .route("/trade-up/start", post(start_trade_up))
         .route("/trade-up/stop/:wallet_id", post(stop_trade_up))
         .route("/trade-up/status/:wallet_id", get(trade_up_status))
         .route("/trade-up/history", get(trade_up_history))
         .route("/trade-up/history/:wallet_id", get(trade_up_wallet_history))
-        // VES-37: Position-based endpoints
+        //ves-37: position-based endpoints
         .route("/trade-up/position/start", post(start_position_loop))
         .route("/trade-up/position/stop", post(stop_position_loop))
         .route("/trade-up/position/status", get(position_status))

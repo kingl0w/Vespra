@@ -11,20 +11,19 @@ use crate::data::price::PriceOracle;
 use crate::routes::goals::{get_goal, list_goals_by_status, save_goal};
 use crate::types::goals::GoalStatus;
 
-// ── Constants ──────────────────────────────────────────────────
+//── constants ──────────────────────────────────────────────────
 
-/// Default polling interval (seconds). Override with SENTINEL_INTERVAL_SECS env var.
 const DEFAULT_INTERVAL_SECS: u64 = 300;
 
-/// Redis pub/sub channel for exit signals.
+///redis pub/sub channel for exit signals.
 pub const SENTINEL_CHANNEL: &str = "vespra:sentinel:signals";
 
-/// Redis key prefix for daily signal counter.
+///redis key prefix for daily signal counter.
 const SIGNALS_COUNT_PREFIX: &str = "sentinel:signals:count";
 
-// ── Public types ───────────────────────────────────────────────
+//── public types ───────────────────────────────────────────────
 
-/// Signal published to Redis pub/sub when Sentinel decides to exit a position.
+///signal published to redis pub/sub when sentinel decides to exit a position.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SentinelSignal {
     pub goal_id: Uuid,
@@ -33,7 +32,7 @@ pub struct SentinelSignal {
     pub current_price: f64,
 }
 
-/// Snapshot of the monitor's runtime status (served by GET /sentinel/status).
+///snapshot of the monitor's runtime status (served by get /sentinel/status).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SentinelStatus {
     pub running: bool,
@@ -42,13 +41,10 @@ pub struct SentinelStatus {
     pub signals_sent_today: u32,
 }
 
-/// Shared handle so the route handler can read live status.
+///shared handle so the route handler can read live status.
 #[derive(Clone)]
 pub struct SentinelMonitor {
     pub status: Arc<RwLock<SentinelStatus>>,
-    /// VES-115: tracks goals already being monitored in the current tick so a
-    /// duplicate spawn for the same goal_id is skipped instead of producing
-    /// two parallel sentinel evaluations and confusing log entries.
     pub active_goals: Arc<RwLock<HashSet<Uuid>>>,
 }
 
@@ -65,7 +61,7 @@ impl SentinelMonitor {
         }
     }
 
-    /// Long-running background task. Spawned once at gateway boot.
+    ///long-running background task. spawned once at gateway boot.
     pub async fn run(
         monitor: Arc<SentinelMonitor>,
         redis: Arc<redis::Client>,
@@ -103,7 +99,7 @@ impl SentinelMonitor {
         }
     }
 
-    /// Single polling iteration: load running goals, check each, publish signals.
+    ///single polling iteration: load running goals, check each, publish signals.
     async fn tick(
         monitor: &Arc<SentinelMonitor>,
         redis: &Arc<redis::Client>,
@@ -117,19 +113,16 @@ impl SentinelMonitor {
         let mut signal_count: u32 = 0;
         let today = Utc::now().format("%Y-%m-%d").to_string();
 
-        // VES-115: clear stale active markers from prior ticks (shouldn't be
-        // any if everything ran cleanly, but reset defensively in case a
-        // previous iteration panicked mid-processing).
         monitor.active_goals.write().await.clear();
 
         for goal in &goals {
-            // Skip goals not in MONITORING step
+            //skip goals not in monitoring step
             if goal.current_step != "MONITORING" {
                 continue;
             }
 
-            // VES-115: dedupe — if this goal is already being monitored by an
-            // in-flight sentinel evaluation, skip the duplicate spawn.
+            //ves-115: dedupe — if this goal is already being monitored by an
+            //in-flight sentinel evaluation, skip the duplicate spawn.
             {
                 let mut active = monitor.active_goals.write().await;
                 if active.contains(&goal.id) {
@@ -142,20 +135,14 @@ impl SentinelMonitor {
                 active.insert(goal.id);
             }
 
-            // Get current price for position token
-            // GoalSpec doesn't store token_address directly — use chain + wallet context.
-            // The token being monitored is embedded in the goal's context. For now we
-            // derive a placeholder address from the goal id (the GoalRunner wrote it).
-            // In practice the position token address should be on the GoalSpec; we fall
-            // back to a price of 0.0 on error, same as GoalRunner does.
             let current_price = price_oracle
                 .fetch(&goal.id.to_string(), &goal.chain)
                 .await
                 .map(|p| p.price_usd)
                 .unwrap_or(0.0);
 
-            // VES-93: validate current_price before any sentinel comparison.
-            // NaN/inf/<=0 disables every downstream gain/loss check silently.
+            //ves-93: validate current_price before any sentinel comparison.
+            //nan/inf/<=0 disables every downstream gain/loss check silently.
             if current_price.is_nan() || current_price.is_infinite() || current_price <= 0.0 {
                 tracing::warn!(
                     "[sentinel] goal {} invalid current_price ({}) — failing goal",
@@ -173,10 +160,6 @@ impl SentinelMonitor {
                 continue;
             }
 
-            // VES-93: reverse-derive entry price from P&L, then validate.
-            // If goal state is corrupted (NaN/inf pnl, divide-by-near-zero) the
-            // derived entry_price is meaningless and would silently disable the
-            // exit logic; abort the goal for human review instead.
             let entry_price_derived = if goal.entry_eth > 0.0 && goal.pnl_pct != 0.0 {
                 current_price / (1.0 + goal.pnl_pct / 100.0)
             } else {
@@ -202,7 +185,7 @@ impl SentinelMonitor {
                 continue;
             }
 
-            // Build a lightweight TradePosition for sentinel assessment
+            //build a lightweight tradeposition for sentinel assessment
             let position = crate::types::trade_up::TradePosition {
                 id: goal.id.to_string(),
                 wallet: goal.wallet_label.clone(),
@@ -241,7 +224,7 @@ impl SentinelMonitor {
 
                 let payload = serde_json::to_string(&signal)?;
 
-                // Publish to Redis pub/sub
+                //publish to redis pub/sub
                 let mut conn = redis::Client::get_multiplexed_async_connection(redis.as_ref()).await?;
                 let _: i64 = redis::cmd("PUBLISH")
                     .arg(SENTINEL_CHANNEL)
@@ -249,16 +232,16 @@ impl SentinelMonitor {
                     .query_async(&mut conn)
                     .await?;
 
-                // Increment daily counter
+                //increment daily counter
                 let count_key = format!("{SIGNALS_COUNT_PREFIX}:{today}");
                 let _: () = conn.incr(&count_key, 1).await?;
-                // Expire after 48h so keys auto-clean
+                //expire after 48h so keys auto-clean
                 let _: () = conn.expire(&count_key, 172800).await?;
 
                 signal_count += 1;
 
-                // VES-118: exits are an expected outcome, not a warning. Log
-                // at info so warn-level filters surface only real failures.
+                //ves-118: exits are an expected outcome, not a warning. log
+                //at info so warn-level filters surface only real failures.
                 tracing::info!(
                     "[sentinel] EXIT signal for goal {}: {} — {}",
                     goal.id,
@@ -283,7 +266,7 @@ impl SentinelMonitor {
             "[sentinel] checked {goal_count} goals, {signal_count} exit signals published"
         );
 
-        // Update shared status
+        //update shared status
         let mut conn = redis::Client::get_multiplexed_async_connection(redis.as_ref()).await?;
         let today_key = format!("{SIGNALS_COUNT_PREFIX}:{today}");
         let total_today: u32 = redis::AsyncCommands::get(&mut conn, &today_key)
@@ -301,11 +284,8 @@ impl SentinelMonitor {
     }
 }
 
-// ── Helpers ────────────────────────────────────────────────────
+//── helpers ────────────────────────────────────────────────────
 
-/// Mark a goal as Failed with the given error message. Used by the sentinel
-/// background task when it detects unrecoverable state (invalid price/entry,
-/// VES-93) without holding a reference to the GoalRunner's `fail_goal` helper.
 async fn fail_goal_inline(redis: &Arc<redis::Client>, goal_id: Uuid, error: &str) {
     tracing::error!("[sentinel] goal {goal_id} FAILED: {error}");
     if let Ok(mut goal) = get_goal(redis, goal_id).await {
@@ -318,7 +298,7 @@ async fn fail_goal_inline(redis: &Arc<redis::Client>, goal_id: Uuid, error: &str
     }
 }
 
-// ── Tests ──────────────────────────────────────────────────────
+//── tests ──────────────────────────────────────────────────────
 
 #[cfg(test)]
 pub mod tests {
@@ -346,7 +326,7 @@ pub mod tests {
 
     #[test]
     fn exit_stop_loss_identified_correctly() {
-        // Simulate: entry at $2000, current at $1880 → -6% (exceeds 5% stop loss)
+        //simulate: entry at $2000, current at $1880 → -6% (exceeds 5% stop loss)
         let entry_price = 2000.0;
         let current_price = 1880.0;
         let stop_loss_pct = 5.0;
@@ -354,7 +334,7 @@ pub mod tests {
         let loss_pct = ((entry_price - current_price) / entry_price) * 100.0;
         assert!(loss_pct > stop_loss_pct, "loss {loss_pct}% should exceed stop {stop_loss_pct}%");
 
-        // The signal type that would be assigned
+        //the signal type that would be assigned
         let signal = if loss_pct > stop_loss_pct {
             "EXIT_STOP_LOSS"
         } else {
@@ -365,7 +345,7 @@ pub mod tests {
 
     #[test]
     fn exit_target_hit_identified_correctly() {
-        // Simulate: entry at $2000, current at $2250 → +12.5% (exceeds 10% target)
+        //simulate: entry at $2000, current at $2250 → +12.5% (exceeds 10% target)
         let entry_price = 2000.0;
         let current_price = 2250.0;
         let target_gain_pct = 10.0;

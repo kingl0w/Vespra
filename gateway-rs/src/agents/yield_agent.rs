@@ -8,7 +8,7 @@ use crate::data::aave::{AaveFetcher, AavePosition};
 use crate::data::yield_provider::ProviderRegistry;
 use crate::types::decisions::YieldDecision;
 
-// ── Context types (kept for backwards compat with orchestrator) ──
+//── context types (kept for backwards compat with orchestrator) ──
 
 #[derive(Debug, Clone, Serialize)]
 pub struct YieldContext {
@@ -34,9 +34,9 @@ pub struct YieldCandidate {
     pub momentum_score: f64,
 }
 
-// ── Live analysis result ─────────────────────────────────────────
+//── live analysis result ─────────────────────────────────────────
 
-/// Structured output from the full yield analysis pipeline.
+///structured output from the full yield analysis pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YieldAnalysis {
     pub positions: Vec<AavePosition>,
@@ -48,7 +48,7 @@ pub struct YieldAnalysis {
     pub reasoning: String,
 }
 
-/// Expected LLM output schema for validation.
+///expected llm output schema for validation.
 #[derive(Deserialize)]
 #[allow(dead_code)]
 struct YieldLlmOutput {
@@ -60,7 +60,7 @@ struct YieldLlmOutput {
     reasoning: Option<String>,
 }
 
-// ── System prompt ────────────────────────────────────────────────
+//── system prompt ────────────────────────────────────────────────
 
 const SYSTEM_PROMPT: &str = "You are Yield, the yield rotation specialist of the Vespra DeFi agent swarm. \
 You MUST respond with valid JSON only. No prose, no markdown.\n\n\
@@ -79,7 +79,7 @@ Rules:\n\
 
 const DELTA_THRESHOLD: f64 = 0.5; // 0.5% APY improvement required
 
-// ── Agent ────────────────────────────────────────────────────────
+//── agent ────────────────────────────────────────────────────────
 
 pub struct YieldAgent {
     llm: Arc<dyn AgentClient>,
@@ -98,7 +98,7 @@ impl YieldAgent {
         }
     }
 
-    /// Attach live data sources for real position analysis.
+    ///attach live data sources for real position analysis.
     pub fn with_live_data(
         mut self,
         aave_fetcher: Arc<AaveFetcher>,
@@ -111,7 +111,7 @@ impl YieldAgent {
         self
     }
 
-    /// Legacy evaluate path used by the yield orchestrator.
+    ///legacy evaluate path used by the yield orchestrator.
     pub async fn evaluate(&self, ctx: &YieldContext) -> Result<YieldDecision> {
         let ctx_json = serde_json::to_string(ctx)?;
         let task = format!(
@@ -164,8 +164,8 @@ impl YieldAgent {
         }
     }
 
-    /// Full live analysis: fetch Aave positions, compare with Scout opportunities,
-    /// and produce a structured recommendation.
+    ///full live analysis: fetch aave positions, compare with scout opportunities,
+    ///and produce a structured recommendation.
     pub async fn analyze_live(
         &self,
         chain: &str,
@@ -184,10 +184,10 @@ impl YieldAgent {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("yield agent: config not configured"))?;
 
-        // 1. Fetch current Aave positions
+        //1. fetch current aave positions
         let positions = aave.fetch_positions(chain, wallet_address).await?;
 
-        // 2. Fetch top Scout opportunities from ProviderRegistry
+        //2. fetch top scout opportunities from providerregistry
         let opportunities = registry
             .fetch_pools(Some(chain), config.yield_min_tvl_usd, config.yield_min_apy)
             .await
@@ -195,18 +195,18 @@ impl YieldAgent {
 
         let top_5: Vec<_> = opportunities.into_iter().take(5).collect();
 
-        // 3. Find the best current position net APY (after gas drag)
+        //3. find the best current position net apy (after gas drag)
         let best_current_net = positions
             .iter()
             .map(|p| p.net_apy - p.gas_drag_apy)
             .fold(f64::NEG_INFINITY, f64::max);
 
-        // 4. Check if any opportunity beats current by the delta threshold
+        //4. check if any opportunity beats current by the delta threshold
         let best_opportunity = top_5
             .iter()
             .find(|o| o.apy > best_current_net + DELTA_THRESHOLD);
 
-        // 5. Build prompt context
+        //5. build prompt context
         let positions_summary = if positions.is_empty() {
             "No current Aave V3 positions.".to_string()
         } else {
@@ -253,7 +253,7 @@ impl YieldAgent {
 
         let raw = self.llm.call(SYSTEM_PROMPT, &task).await?;
 
-        // 6. Parse and validate LLM output
+        //6. parse and validate llm output
         let analysis = match serde_json::from_str::<YieldLlmOutput>(&raw) {
             Ok(output) => YieldAnalysis {
                 positions: positions.clone(),
@@ -269,7 +269,7 @@ impl YieldAgent {
                     .unwrap_or_else(|| "no reasoning provided".into()),
             },
             Err(_) => {
-                // Fallback: try parsing as generic Value
+                //fallback: try parsing as generic value
                 let val: serde_json::Value =
                     serde_json::from_str(&raw).map_err(|e| {
                         tracing::warn!(
@@ -285,7 +285,7 @@ impl YieldAgent {
                     .and_then(|v| v.as_str())
                     .unwrap_or("hold");
 
-                // Validate action is one of the expected values
+                //validate action is one of the expected values
                 let valid_actions = ["deposit", "withdraw", "rebalance", "hold"];
                 let action_lower = action.to_lowercase();
                 if !valid_actions.contains(&action_lower.as_str()) {

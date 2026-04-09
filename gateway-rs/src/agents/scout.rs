@@ -25,8 +25,8 @@ Output schema: { \"opportunities\": [ { \"protocol\": \"string\", \"pool_id\": \
 Rules: No transactions, no keys. Analyze LIVE_POOL_DATA only. \
 Return max 5 opportunities sorted by apy descending.";
 
-/// Symbols Scout is allowed to recommend on testnet chains. Anything else
-/// has no real ERC-20 contract on Base Sepolia and is not swappable.
+///symbols scout is allowed to recommend on testnet chains. anything else
+///has no real erc-20 contract on base sepolia and is not swappable.
 const TESTNET_ALLOWED_SYMBOLS: &[&str] = &["WETH", "ETH", "USDC", "USDBC", "DAI", "WBTC"];
 
 const TESTNET_PROMPT_SUFFIX: &str = "\n\n\
@@ -45,12 +45,6 @@ fn chains_include_testnet(chains: &[String]) -> bool {
     })
 }
 
-/// VES-109: parse a pool pair symbol into its two token symbols, regardless
-/// of which delimiter the upstream data source used. Handles `-`, `/`, `//`,
-/// `_`, and `:` (and any combination of them — `//` falls out of splitting on
-/// `/` once and dropping empty fragments). Whitespace is trimmed off each
-/// half. Returns `Err` when the input doesn't yield exactly 2 non-empty
-/// fragments so callers can fail loudly instead of silently mis-classifying.
 fn parse_pool_symbol(raw_symbol: &str) -> Result<(String, String)> {
     let parts: Vec<String> = raw_symbol
         .split(|c: char| matches!(c, '-' | '/' | '_' | ':'))
@@ -66,9 +60,6 @@ fn parse_pool_symbol(raw_symbol: &str) -> Result<(String, String)> {
     Ok((a, b))
 }
 
-/// Check whether a pool symbol like "WETH-USDC" or "USDC-VFY" only references
-/// tokens in the testnet allowlist. Pools whose symbol can't be parsed into
-/// exactly two tokens are rejected (we can't tell what they contain).
 fn pool_symbol_is_testnet_safe(symbol: &str) -> bool {
     let (a, b) = match parse_pool_symbol(symbol) {
         Ok(pair) => pair,
@@ -80,13 +71,13 @@ fn pool_symbol_is_testnet_safe(symbol: &str) -> bool {
     })
 }
 
-/// Expected shape of each opportunity in the LLM response.
+///expected shape of each opportunity in the llm response.
 #[derive(serde::Deserialize)]
 #[allow(dead_code)]
 struct ScoutOutputOpportunity {
     protocol: Option<String>,
     pool_id: Option<String>,
-    // Accept either pool_id or pool for backwards compat
+    //accept either pool_id or pool for backwards compat
     pool: Option<String>,
     chain: Option<String>,
     symbol: Option<String>,
@@ -94,7 +85,7 @@ struct ScoutOutputOpportunity {
     tvl_usd: Option<f64>,
     risk_tier: Option<String>,
     recommended_action: Option<String>,
-    // Legacy fields — tolerate but don't require
+    //legacy fields — tolerate but don't require
     momentum_score: Option<f64>,
     entry_signal: Option<String>,
     price_change_24h_pct: Option<f64>,
@@ -120,7 +111,7 @@ impl ScoutAgent {
         }
     }
 
-    /// Attach a yield provider registry so Scout can fetch live pool data.
+    ///attach a yield provider registry so scout can fetch live pool data.
     pub fn with_yield_registry(
         mut self,
         registry: Arc<ProviderRegistry>,
@@ -131,7 +122,7 @@ impl ScoutAgent {
         self
     }
 
-    /// Build a compact yield context block from live provider data.
+    ///build a compact yield context block from live provider data.
     async fn build_yield_context(&self, chains: &[String]) -> Option<String> {
         let registry = self.yield_registry.as_ref()?;
         let config = self.config.as_ref()?;
@@ -183,7 +174,7 @@ impl ScoutAgent {
     pub async fn analyze(&self, ctx: &ScoutContext) -> Result<ScoutDecision> {
         let pools_json = serde_json::to_string(&ctx.pools)?;
 
-        // Build live yield context if registry is available
+        //build live yield context if registry is available
         let yield_context = self.build_yield_context(&ctx.chains).await;
 
         let testnet_run = chains_include_testnet(&ctx.chains);
@@ -204,7 +195,7 @@ impl ScoutAgent {
 
         let raw = self.llm.call(&system, &task).await?;
 
-        // Validate against expected schema
+        //validate against expected schema
         let opps = match serde_json::from_str::<ScoutOutput>(&raw) {
             Ok(output) => {
                 output
@@ -214,7 +205,7 @@ impl ScoutAgent {
                     .collect::<Vec<_>>()
             }
             Err(_) => {
-                // Fallback: try parsing as Value for backwards compat
+                //fallback: try parsing as value for backwards compat
                 match serde_json::from_str::<serde_json::Value>(&raw) {
                     Ok(val) => {
                         let arr = if let Some(arr) = val.get("opportunities").and_then(|v| v.as_array()) {
@@ -248,11 +239,6 @@ impl ScoutAgent {
             }
         };
 
-        // Deterministic safety net: on testnet runs, drop any opportunity whose
-        // pool symbol references tokens outside the testnet allowlist. This is
-        // belt-and-braces — the prompt asks the LLM not to surface these, but
-        // LLMs are unreliable and the goal runner will otherwise loop forever
-        // re-scouting unswappable pools.
         let opps: Vec<_> = if testnet_run {
             let before = opps.len();
             let filtered: Vec<_> = opps
@@ -298,7 +284,7 @@ impl ScoutAgent {
     }
 }
 
-/// Convert a typed ScoutOutputOpportunity into an Opportunity.
+///convert a typed scoutoutputopportunity into an opportunity.
 fn convert_scout_opportunity(item: ScoutOutputOpportunity) -> Option<Opportunity> {
     let protocol = item.protocol?;
     if protocol.is_empty() {
@@ -358,7 +344,6 @@ fn convert_scout_opportunity(item: ScoutOutputOpportunity) -> Option<Opportunity
     })
 }
 
-/// Parse an Opportunity from a serde_json::Value, using defaults for missing fields.
 fn parse_opportunity(item: &serde_json::Value) -> Option<Opportunity> {
     let protocol = item.get("protocol")?.as_str()?.to_string();
     let pool = item

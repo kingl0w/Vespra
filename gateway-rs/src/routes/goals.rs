@@ -14,7 +14,7 @@ use crate::types::goals::{CreateGoalRequest, GoalSpec, GoalStatus, GoalStrategy}
 
 use super::AppState;
 
-/// Default max concurrent running goals. Override with VESPRA_MAX_CONCURRENT_GOALS.
+///default max concurrent running goals. override with vespra_max_concurrent_goals.
 fn max_concurrent_goals() -> usize {
     std::env::var("VESPRA_MAX_CONCURRENT_GOALS")
         .ok()
@@ -22,7 +22,7 @@ fn max_concurrent_goals() -> usize {
         .unwrap_or(5)
 }
 
-// ── Redis key helpers ───────────────────────────────────────────
+//── redis key helpers ───────────────────────────────────────────
 
 fn goal_key(id: &Uuid) -> String {
     format!("vespra:goal:{id}")
@@ -30,7 +30,7 @@ fn goal_key(id: &Uuid) -> String {
 
 const GOALS_INDEX_KEY: &str = "vespra:goals:index";
 
-// ── Redis storage ───────────────────────────────────────────────
+//── redis storage ───────────────────────────────────────────────
 
 pub async fn save_goal(redis: &redis::Client, goal: &GoalSpec) -> anyhow::Result<()> {
     let mut conn = redis.get_multiplexed_async_connection().await?;
@@ -47,7 +47,7 @@ pub async fn get_goal(redis: &redis::Client, id: Uuid) -> anyhow::Result<GoalSpe
     Ok(serde_json::from_str(&raw)?)
 }
 
-/// Public alias for use from main.rs boot resume.
+///public alias for use from main.rs boot resume.
 pub async fn list_goals_all(redis: &redis::Client) -> anyhow::Result<Vec<GoalSpec>> {
     list_goals(redis).await
 }
@@ -100,7 +100,7 @@ pub async fn update_goal_pnl(redis: &redis::Client, id: Uuid, current_eth: f64) 
     save_goal(redis, &goal).await
 }
 
-/// List goals filtered by status.
+///list goals filtered by status.
 pub async fn list_goals_by_status(
     redis: &redis::Client,
     status: GoalStatus,
@@ -109,19 +109,13 @@ pub async fn list_goals_by_status(
     Ok(all.into_iter().filter(|g| g.status == status).collect())
 }
 
-// ── Wallet label → UUID resolution ─────────────────────────────
+//── wallet label → uuid resolution ─────────────────────────────
 
-/// Resolved wallet info pulled from Keymaster. The address is needed for the
-/// pre-creation balance check (sprint 7); the id is what the goal store
-/// persists for runner lookups.
 pub struct ResolvedWallet {
     pub id: String,
     pub address: String,
 }
 
-/// Look up a wallet by its label via Keymaster's `/wallets` endpoint.
-/// Returns the wallet's UUID and on-chain address on a case-insensitive label
-/// match.
 async fn resolve_wallet_info(
     keymaster_url: &str,
     keymaster_token: &str,
@@ -163,17 +157,12 @@ async fn resolve_wallet_info(
     anyhow::bail!("no wallet with label '{wallet_label}' found in Keymaster")
 }
 
-// ── Wallet safeguards (sprint 7) ───────────────────────────────
+//── wallet safeguards (sprint 7) ───────────────────────────────
 
-/// Reserved gas budget per wallet — capital-eth requests must leave at least
-/// this much native ETH for transaction fees.
+///reserved gas budget per wallet — capital-eth requests must leave at least
+///this much native eth for transaction fees.
 pub const GAS_RESERVE_ETH: f64 = 0.005;
 
-/// Returns the id of an existing in-flight goal owned by `wallet_label`, if
-/// any. "In-flight" means a goal whose status is `Pending`, `Running`, or
-/// `Paused` — anything Cancelled, Completed, or Failed is treated as freed.
-/// The check is case-insensitive on the label, matching how Keymaster
-/// resolves labels.
 pub async fn wallet_has_active_goal(
     redis: &redis::Client,
     wallet_label: &str,
@@ -193,9 +182,6 @@ pub async fn wallet_has_active_goal(
     })
 }
 
-/// Fetch the live ETH balance for `address` over JSON-RPC. Mirrors the
-/// `eth_getBalance` pattern in `data/wallet.rs` but is standalone so the goal
-/// route can call it without dragging in the WalletFetcher's caching layer.
 async fn fetch_wallet_balance_eth(rpc_url: &str, address: &str) -> anyhow::Result<f64> {
     if rpc_url.is_empty() {
         anyhow::bail!("no rpc_url configured");
@@ -232,7 +218,7 @@ async fn fetch_wallet_balance_eth(rpc_url: &str, address: &str) -> anyhow::Resul
     Ok(wei as f64 / 1e18)
 }
 
-// ── Coordinator LLM parsing ─────────────────────────────────────
+//── coordinator llm parsing ─────────────────────────────────────
 
 const GOAL_PARSE_PROMPT: &str = "\
 You are Vespra GoalEngine. Parse the user's natural-language goal into a structured JSON object.\n\
@@ -253,9 +239,6 @@ async fn parse_goal_via_llm(
     let task = format!("Parse this goal:\n\n\"{raw_goal}\"\n\nWallet: {wallet_label}");
     let raw = llm.call(GOAL_PARSE_PROMPT, &task).await?;
 
-    // VES-87: never echo LLM output to clients — it can leak prompt content
-    // or upstream context. Log the raw output at debug for operator triage
-    // and return a generic error from the route handler.
     let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
         let snippet: String = raw.chars().take(500).collect();
         tracing::debug!(
@@ -317,7 +300,7 @@ async fn parse_goal_via_llm(
     })
 }
 
-// ── Route handlers ──────────────────────────────────────────────
+//── route handlers ──────────────────────────────────────────────
 
 async fn create_goal(
     State(state): State<AppState>,
@@ -342,13 +325,9 @@ async fn create_goal(
         );
     }
 
-    // ── Sprint 7: serialize the wallet-active-goal check + insert ─
-    // Holding this lock for the duration of the check, the LLM parse, the
-    // balance check, and the save guarantees two simultaneous submissions
-    // for the same wallet can't both pass `wallet_has_active_goal`.
     let _create_guard = state.goal_creation_lock.lock().await;
 
-    // ── Constraint: one active goal per wallet ────────────────────
+    //── constraint: one active goal per wallet ────────────────────
     if let Some(existing_id) =
         wallet_has_active_goal(&state.redis, &body.wallet_label).await
     {
@@ -369,7 +348,7 @@ async fn create_goal(
         );
     }
 
-    // ── Constraint: max concurrent goals ──────────────────────────
+    //── constraint: max concurrent goals ──────────────────────────
     if let Ok(running) = list_goals_by_status(&state.redis, GoalStatus::Running).await {
         let max = max_concurrent_goals();
         if running.len() >= max {
@@ -385,9 +364,6 @@ async fn create_goal(
         }
     }
 
-    // Resolve wallet_label → wallet info (UUID + address) via Keymaster
-    // before doing any LLM work, so callers get a fast 400 if the label
-    // doesn't exist. The address is needed for the live balance check below.
     let resolved = match resolve_wallet_info(
         &state.config.keymaster_url,
         &state.config.keymaster_token,
@@ -416,9 +392,6 @@ async fn create_goal(
     {
         Ok(g) => g,
         Err(e) => {
-            // VES-87: log the underlying error for operator triage but never
-            // surface it to the client — the LLM raw output may contain
-            // prompt content or upstream context.
             tracing::warn!("[goals] parse_goal_via_llm failed: {e}");
             return (
                 StatusCode::BAD_REQUEST,
@@ -429,9 +402,6 @@ async fn create_goal(
             );
         }
     };
-    // VES-104: reject 0/negative capital up front. Without this guard the LLM
-    // returning a string, omitting the field, or producing 0 silently creates
-    // a goal that can never make progress.
     if !(goal.capital_eth > 0.0) {
         return (
             StatusCode::BAD_REQUEST,
@@ -442,9 +412,6 @@ async fn create_goal(
         );
     }
 
-    // ── Sprint 7: live balance check on the target chain ──────────
-    // A bad RPC must NOT block goal creation — fall through with a warning
-    // so a flaky provider can't permanently brick submissions.
     let rpc_url = state
         .chain_registry
         .get(&goal.chain)
@@ -499,7 +466,7 @@ async fn create_goal(
         );
     }
 
-    // Set status to Running and spawn the GoalRunner
+    //set status to running and spawn the goalrunner
     goal.status = GoalStatus::Running;
     if let Err(e) = save_goal(&state.redis, &goal).await {
         return (
@@ -534,8 +501,8 @@ async fn create_goal(
         goal.capital_eth
     );
 
-    // VES-103: never silently 201 with an empty body — the client needs the
-    // goal_id. Surface a 500 if serialization fails so they can retry.
+    //ves-103: never silently 201 with an empty body — the client needs the
+    //goal_id. surface a 500 if serialization fails so they can retry.
     match serde_json::to_value(&goal) {
         Ok(v) => (StatusCode::CREATED, Json(v)),
         Err(e) => {
@@ -578,7 +545,7 @@ async fn cancel_goal(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    // Send cancel signal to runner
+    //send cancel signal to runner
     {
         let txs = state.goal_cancel_txs.lock().await;
         if let Some(tx) = txs.get(&id) {
@@ -716,7 +683,7 @@ mod tests {
 
     #[test]
     fn test_wallet_uniqueness_gate() {
-        // Simulate: two running goals, check if wallet "safe" has an active goal
+        //simulate: two running goals, check if wallet "safe" has an active goal
         let goals = vec![
             make_goal("safe", GoalStatus::Running, GoalStrategy::Adaptive, 0.1, 0.1),
             make_goal("hot", GoalStatus::Completed, GoalStrategy::Snipe, 0.05, 0.06),
@@ -724,15 +691,15 @@ mod tests {
 
         let running: Vec<_> = goals.iter().filter(|g| g.status == GoalStatus::Running).collect();
 
-        // "safe" wallet has a running goal — should be rejected
+        //"safe" wallet has a running goal — should be rejected
         let conflict = running.iter().find(|g| g.wallet_label == "safe");
         assert!(conflict.is_some(), "should find active goal for wallet 'safe'");
 
-        // "hot" wallet has no running goal — should be allowed
+        //"hot" wallet has no running goal — should be allowed
         let no_conflict = running.iter().find(|g| g.wallet_label == "hot");
         assert!(no_conflict.is_none(), "wallet 'hot' has no running goal");
 
-        // "new" wallet has no goals at all — should be allowed
+        //"new" wallet has no goals at all — should be allowed
         let new_wallet = running.iter().find(|g| g.wallet_label == "new");
         assert!(new_wallet.is_none());
     }
@@ -753,10 +720,10 @@ mod tests {
         let running_count = goals.iter().filter(|g| g.status == GoalStatus::Running).count();
         let max = 5;
 
-        // At max — should reject
+        //at max — should reject
         assert!(running_count >= max, "should be at max capacity");
 
-        // Below max — should allow
+        //below max — should allow
         goals[4].status = GoalStatus::Completed;
         let running_count = goals.iter().filter(|g| g.status == GoalStatus::Running).count();
         assert!(running_count < max, "should have room after completing one");
@@ -780,8 +747,8 @@ mod tests {
             0.0
         };
 
-        // capital = 1.0 + 2.0 = 3.0, current = 1.1 + 1.8 = 2.9
-        // pnl = -0.1, pnl_pct = -0.1/3.0 * 100 = -3.33%
+        //capital = 1.0 + 2.0 = 3.0, current = 1.1 + 1.8 = 2.9
+        //pnl = -0.1, pnl_pct = -0.1/3.0 * 100 = -3.33%
         assert!((total_capital - 3.0).abs() < 1e-10);
         assert!((total_current - 2.9).abs() < 1e-10);
         assert!((total_pnl - (-0.1)).abs() < 1e-10);
@@ -790,7 +757,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_redis_save_get_list() {
-        // Only runs when Redis is available
+        //only runs when redis is available
         let client = match redis::Client::open("redis://127.0.0.1:6379") {
             Ok(c) => c,
             Err(_) => return, // skip if no redis
@@ -825,25 +792,25 @@ mod tests {
             error: None,
         };
 
-        // save
+        //save
         save_goal(&client, &goal).await.expect("save_goal");
 
-        // get
+        //get
         let fetched = get_goal(&client, goal.id).await.expect("get_goal");
         assert_eq!(fetched.id, goal.id);
         assert_eq!(fetched.capital_eth, 0.1);
 
-        // list
+        //list
         let all = list_goals(&client).await.expect("list_goals");
         assert!(all.iter().any(|g| g.id == goal.id));
 
-        // update status
+        //update status
         let updated = update_goal_status(&client, goal.id, GoalStatus::Cancelled)
             .await
             .expect("update_goal_status");
         assert_eq!(updated.status, GoalStatus::Cancelled);
 
-        // cleanup
+        //cleanup
         let mut conn = client.get_multiplexed_async_connection().await.unwrap();
         let _: () = redis::cmd("DEL")
             .arg(goal_key(&goal.id))

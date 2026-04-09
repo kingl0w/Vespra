@@ -11,8 +11,8 @@ use crate::types::opportunity::Opportunity;
 pub struct RiskContext {
     pub opportunity: Opportunity,
     pub protocol_data: ProtocolData,
-    /// Chain the goal is targeting. Used to apply testnet-vs-mainnet gate rules.
-    /// Defaults to the opportunity's chain if not set explicitly by the caller.
+    ///chain the goal is targeting. used to apply testnet-vs-mainnet gate rules.
+    ///defaults to the opportunity's chain if not set explicitly by the caller.
     #[serde(default)]
     pub chain: String,
 }
@@ -61,7 +61,7 @@ impl RiskAgent {
     pub async fn assess(&self, ctx: &RiskContext) -> Result<RiskDecision> {
         let protocol_json = serde_json::to_string(&ctx.protocol_data)?;
 
-        // Prefer the goal's chain (set by the runner); fall back to the opportunity's.
+        //prefer the goal's chain (set by the runner); fall back to the opportunity's.
         let effective_chain = if ctx.chain.is_empty() {
             ctx.opportunity.chain.clone()
         } else {
@@ -90,9 +90,6 @@ impl RiskAgent {
         let score = parse_risk_score(parsed.score.as_deref().unwrap_or("HIGH"));
         let llm_gate_pass = parse_gate_pass(&parsed.gate_pass);
 
-        // Deterministic gate override per chain type. The LLM scores risk; we
-        // decide gate_pass from that score so testnet runs aren't stalled by an
-        // overly cautious LLM. Scoring logic itself is unchanged.
         let gate_pass = if testnet {
             match score {
                 RiskScore::Low | RiskScore::Medium => true,
@@ -100,7 +97,7 @@ impl RiskAgent {
                 RiskScore::Critical => false,
             }
         } else {
-            // Mainnet: strict LOW-only gate.
+            //mainnet: strict low-only gate.
             matches!(score, RiskScore::Low) && llm_gate_pass
         };
 

@@ -77,7 +77,7 @@ impl SentinelAssessment {
     }
 }
 
-// ─── Yield decisions ──────────────────────────────────────────
+//─── yield decisions ──────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
@@ -91,7 +91,7 @@ pub enum YieldDecision {
     Hold { reasoning: String },
 }
 
-// ─── Sniper decisions ─────────────────────────────────────────
+//─── sniper decisions ─────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
@@ -104,7 +104,7 @@ pub enum SniperDecision {
     Pass { reasoning: String },
 }
 
-// ─── Coordinator decisions ────────────────────────────────────
+//─── coordinator decisions ────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandIntent {
@@ -119,7 +119,7 @@ pub struct CommandIntent {
     pub reasoning: String,
 }
 
-// ─── Launcher decisions ───────────────────────────────────────
+//─── launcher decisions ───────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
@@ -131,7 +131,7 @@ pub enum LaunchDecision {
     Rejected { reasoning: String },
 }
 
-// ─── Executor ─────────────────────────────────────────────────
+//─── executor ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutorResult {

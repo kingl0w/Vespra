@@ -12,11 +12,11 @@ use crate::types::goals::GoalStatus;
 use super::AppState;
 
 async fn swarm_kill(State(state): State<AppState>) -> Json<serde_json::Value> {
-    // Set global kill flag
+    //set global kill flag
     state.kill_flag.store(true, Ordering::SeqCst);
     tracing::warn!("KILL SWITCH ACTIVATED");
 
-    // Collect active wallet IDs and stop all loops
+    //collect active wallet ids and stop all loops
     let trade_up_active = state.trade_up_orchestrator.active_wallets().await;
     let yield_active = state.yield_orchestrator.active_wallets().await;
     let mut halted = Vec::new();
@@ -68,10 +68,10 @@ async fn swarm_command(
         }));
     }
 
-    // Build live context from system state
+    //build live context from system state
     let live_context = build_live_context(&state).await;
 
-    // Use ChatHandler for natural language responses
+    //use chathandler for natural language responses
     let chat = ChatHandler::new(state.llm.clone());
     match chat.respond(&user_msg, &live_context).await {
         Ok(response) => Json(serde_json::json!({
@@ -86,11 +86,10 @@ async fn swarm_command(
     }
 }
 
-/// Gather live system state so the chat agent can answer "what are you doing?" accurately.
 async fn build_live_context(state: &AppState) -> String {
     let mut lines = Vec::new();
 
-    // Active goals
+    //active goals
     if let Ok(running) = list_goals_by_status(&state.redis, GoalStatus::Running).await {
         if running.is_empty() {
             lines.push("No goals currently running.".into());
@@ -106,14 +105,14 @@ async fn build_live_context(state: &AppState) -> String {
         }
     }
 
-    // Paused goals
+    //paused goals
     if let Ok(paused) = list_goals_by_status(&state.redis, GoalStatus::Paused).await {
         if !paused.is_empty() {
             lines.push(format!("{} goal(s) paused.", paused.len()));
         }
     }
 
-    // Sentinel status
+    //sentinel status
     {
         let sentinel = state.sentinel_monitor.status.read().await;
         let last_run = sentinel.last_run
@@ -125,7 +124,7 @@ async fn build_live_context(state: &AppState) -> String {
         ));
     }
 
-    // Yield scheduler status
+    //yield scheduler status
     {
         let ys = state.yield_scheduler_status.read().await;
         let last_run = ys.last_run
@@ -137,7 +136,7 @@ async fn build_live_context(state: &AppState) -> String {
         ));
     }
 
-    // Kill flag
+    //kill flag
     let killed = state.kill_flag.load(Ordering::SeqCst);
     if killed {
         lines.push("WARNING: Kill switch is ACTIVE. All loops halted.".into());

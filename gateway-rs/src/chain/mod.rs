@@ -8,8 +8,8 @@ pub struct ChainRegistry {
 }
 
 impl ChainRegistry {
-    /// Create registry with built-in chains. RPC URLs are loaded from the provided map
-    /// (keys are lowercase chain names, e.g. "base", "arbitrum").
+    ///create registry with built-in chains. rpc urls are loaded from the provided map
+    ///(keys are lowercase chain names, e.g. "base", "arbitrum").
     pub fn new(rpc_urls: &HashMap<String, String>) -> Self {
         let builtins = [
             ChainConfig {
@@ -103,7 +103,7 @@ impl ChainRegistry {
 
         let mut chains = HashMap::new();
         for mut chain in builtins {
-            // Set rpc_url from the provided map
+            //set rpc_url from the provided map
             if let Some(url) = rpc_urls.get(&chain.name) {
                 chain.rpc_url = url.clone();
             }
@@ -117,7 +117,7 @@ impl ChainRegistry {
         self.chains.get(name)
     }
 
-    /// Returns only chains that have an RPC URL configured.
+    ///returns only chains that have an rpc url configured.
     pub fn available(&self) -> Vec<&ChainConfig> {
         let mut out: Vec<_> = self.chains.values()
             .filter(|c| !c.rpc_url.is_empty())
@@ -134,7 +134,7 @@ impl ChainRegistry {
         self.chains.get(name).map(|c| c.chain_id)
     }
 
-    /// Reverse lookup: find a chain whose defillama_slug matches (case-insensitive).
+    ///reverse lookup: find a chain whose defillama_slug matches (case-insensitive).
     pub fn from_defillama_slug(&self, slug: &str) -> Option<&ChainConfig> {
         let slug_lower = slug.to_lowercase();
         self.chains.values().find(|c| c.defillama_slug.to_lowercase() == slug_lower)

@@ -1,12 +1,3 @@
-//! Historical data adapters for the backtesting engine.
-//!
-//! Two providers are wired up:
-//! - **DeFiLlama** for historical APY series (`/chart/{pool_id}`)
-//! - **CoinGecko** for historical USD price series (`/coins/{id}/market_chart/range`)
-//!
-//! Both implement the [`HistoricalFeed`] trait so the backtest runner can be
-//! parameterised over the data source. The default `CompositeHistoricalFeed`
-//! delegates APY queries to DeFiLlama and price queries to CoinGecko.
 
 use std::sync::Arc;
 
@@ -30,7 +21,7 @@ pub struct PriceSnapshot {
 
 #[async_trait]
 pub trait HistoricalFeed: Send + Sync {
-    /// Daily APY snapshots for the given DeFiLlama pool ID. Inclusive on both ends.
+    ///daily apy snapshots for the given defillama pool id. inclusive on both ends.
     async fn apy_series(
         &self,
         pool_id: &str,
@@ -38,7 +29,6 @@ pub trait HistoricalFeed: Send + Sync {
         to: NaiveDate,
     ) -> Result<Vec<ApySnapshot>>;
 
-    /// Daily USD price snapshots for the given CoinGecko coin ID. Inclusive on both ends.
     async fn price_series(
         &self,
         coingecko_id: &str,
@@ -47,11 +37,8 @@ pub trait HistoricalFeed: Send + Sync {
     ) -> Result<Vec<PriceSnapshot>>;
 }
 
-// ─── Rate-limit guard ──────────────────────────────────────────────────
+//─── rate-limit guard ──────────────────────────────────────────────────
 
-/// Sleeps at least `min_interval_ms` between successive HTTP requests across
-/// the same `RateGate` instance. Used to be polite to the public DeFiLlama and
-/// CoinGecko APIs when fetching multi-pool series back-to-back.
 #[derive(Debug)]
 struct RateGate {
     min_interval_ms: u64,
@@ -79,7 +66,7 @@ impl RateGate {
     }
 }
 
-// ─── DeFiLlama ─────────────────────────────────────────────────────────
+//─── defillama ─────────────────────────────────────────────────────────
 
 pub struct DeFiLlamaHistorical {
     client: reqwest::Client,
@@ -103,7 +90,7 @@ struct DeFiLlamaChartResponse {
 
 #[derive(Debug, Deserialize)]
 struct DeFiLlamaChartPoint {
-    /// ISO-8601 timestamp string (e.g. "2024-03-01T00:00:00.000Z").
+    ///iso-8601 timestamp string (e.g. "2024-03-01t00:00:00.000z").
     timestamp: String,
     #[serde(default)]
     apy: Option<f64>,
@@ -160,7 +147,7 @@ impl HistoricalFeed for DeFiLlamaHistorical {
     }
 }
 
-// ─── CoinGecko ─────────────────────────────────────────────────────────
+//─── coingecko ─────────────────────────────────────────────────────────
 
 pub struct CoinGeckoHistorical {
     client: reqwest::Client,
@@ -201,7 +188,7 @@ impl HistoricalFeed for CoinGeckoHistorical {
     ) -> Result<Vec<PriceSnapshot>> {
         self.rate_gate.wait().await;
 
-        // Convert to inclusive UTC unix bounds. CoinGecko expects seconds.
+        //convert to inclusive utc unix bounds. coingecko expects seconds.
         let from_ts = Utc
             .from_utc_datetime(&from.and_hms_opt(0, 0, 0).unwrap())
             .timestamp();
@@ -226,7 +213,7 @@ impl HistoricalFeed for CoinGeckoHistorical {
             .await
             .with_context(|| format!("CoinGecko JSON parse failed for coin {coingecko_id}"))?;
 
-        // CoinGecko returns multiple intra-day samples; collapse to last value per day.
+        //coingecko returns multiple intra-day samples; collapse to last value per day.
         let mut by_day: std::collections::BTreeMap<NaiveDate, f64> =
             std::collections::BTreeMap::new();
         for [ts_ms, price] in body.prices {
@@ -247,10 +234,10 @@ impl HistoricalFeed for CoinGeckoHistorical {
     }
 }
 
-// ─── Composite (default wiring) ────────────────────────────────────────
+//─── composite (default wiring) ────────────────────────────────────────
 
-/// Combines a DeFiLlama APY source and a CoinGecko price source into a single
-/// [`HistoricalFeed`]. This is what the runner sees through `AppState`.
+///combines a defillama apy source and a coingecko price source into a single
+///[`historicalfeed`]. this is what the runner sees through `appstate`.
 pub struct CompositeHistoricalFeed {
     apy: Arc<DeFiLlamaHistorical>,
     price: Arc<CoinGeckoHistorical>,

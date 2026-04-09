@@ -17,7 +17,7 @@ pub trait PriceOracle: Send + Sync {
     fn name(&self) -> &str;
 }
 
-// ─── DefiLlama Oracle ────────────────────────────────────────────
+//─── defillama oracle ────────────────────────────────────────────
 
 pub struct DefiLlamaOracle {
     client: reqwest::Client,
@@ -76,7 +76,7 @@ impl PriceOracle for DefiLlamaOracle {
             }
         };
 
-        // Check Redis cache
+        //check redis cache
         let cache_key = format!(
             "vespra:price:{}:{}",
             chain.to_lowercase(),
@@ -95,7 +95,7 @@ impl PriceOracle for DefiLlamaOracle {
 
         let coin_id = format!("{slug}:{token_address}");
 
-        // Fetch price
+        //fetch price
         let price_url = format!("https://coins.llama.fi/prices/current/{coin_id}");
         let price_resp = self
             .client
@@ -113,7 +113,7 @@ impl PriceOracle for DefiLlamaOracle {
             .map(|c| c.price)
             .unwrap_or(0.0);
 
-        // Fetch 24h change
+        //fetch 24h change
         let change_url = format!(
             "https://coins.llama.fi/percentage/{coin_id}?period=24h"
         );
@@ -135,7 +135,7 @@ impl PriceOracle for DefiLlamaOracle {
             timestamp: now,
         };
 
-        // Cache with 300s TTL
+        //cache with 300s ttl
         if let Ok(mut conn) =
             redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await
         {
@@ -150,7 +150,7 @@ impl PriceOracle for DefiLlamaOracle {
     async fn fetch_batch(&self, tokens: &[(String, String)]) -> HashMap<String, PriceData> {
         let mut result = HashMap::new();
 
-        // Group tokens by chain → defillama slug
+        //group tokens by chain → defillama slug
         let mut by_slug: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for (addr, chain) in tokens {
             match self.resolve_slug(chain) {
@@ -208,7 +208,7 @@ impl PriceOracle for DefiLlamaOracle {
     }
 }
 
-// ─── Onchain TWAP Oracle ─────────────────────────────────────────
+//─── onchain twap oracle ─────────────────────────────────────────
 
 pub struct OnchainTwapOracle {
     chain_registry: Arc<ChainRegistry>,
@@ -240,7 +240,7 @@ impl PriceOracle for OnchainTwapOracle {
             });
         }
 
-        // Phase 6.2 — TWAP via alloy eth_call to pool observe() (not yet implemented)
+        //phase 6.2 — twap via alloy eth_call to pool observe() (not yet implemented)
         Ok(PriceData {
             source: "onchain_twap_pending".into(),
             ..PriceData::default()
@@ -261,7 +261,7 @@ impl PriceOracle for OnchainTwapOracle {
     }
 }
 
-// ─── CoinGecko Oracle ────────────────────────────────────────────
+//─── coingecko oracle ────────────────────────────────────────────
 
 pub struct CoinGeckoOracle {
     client: reqwest::Client,
@@ -353,7 +353,7 @@ impl PriceOracle for CoinGeckoOracle {
     }
 }
 
-// ─── Custom Oracle ───────────────────────────────────────────────
+//─── custom oracle ───────────────────────────────────────────────
 
 pub struct CustomOracle {
     client: reqwest::Client,
@@ -429,7 +429,7 @@ impl PriceOracle for CustomOracle {
     }
 }
 
-// ─── Oracle Router ───────────────────────────────────────────────
+//─── oracle router ───────────────────────────────────────────────
 
 pub struct OracleRouter {
     primary: Box<dyn PriceOracle>,
@@ -514,7 +514,7 @@ impl PriceOracle for OracleRouter {
     async fn fetch_batch(&self, tokens: &[(String, String)]) -> HashMap<String, PriceData> {
         let mut result = self.primary.fetch_batch(tokens).await;
 
-        // Find tokens with no price from primary
+        //find tokens with no price from primary
         if let Some(ref fb) = self.fallback {
             let missing: Vec<(String, String)> = tokens
                 .iter()

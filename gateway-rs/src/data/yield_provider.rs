@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::GatewayConfig;
 
-// ── Trait + types ────────────────────────────────────────────────
+//── trait + types ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YieldPool {
@@ -34,7 +34,7 @@ pub trait YieldDataProvider: Send + Sync {
     ) -> Result<Vec<YieldPool>>;
 }
 
-// ── DefiLlama provider ──────────────────────────────────────────
+//── defillama provider ──────────────────────────────────────────
 
 pub struct DefiLlamaProvider {
     client: reqwest::Client,
@@ -47,7 +47,7 @@ impl DefiLlamaProvider {
     }
 }
 
-/// Raw pool entry from the DeFi Llama /pools response.
+///raw pool entry from the defi llama /pools response.
 #[derive(Deserialize)]
 struct LlamaPool {
     pool: Option<String>,
@@ -83,14 +83,14 @@ impl YieldDataProvider for DefiLlamaProvider {
             chain.unwrap_or("all")
         );
 
-        // Check Redis cache
+        //check redis cache
         if let Ok(mut conn) =
             redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await
         {
             let cached: Option<String> = conn.get(&cache_key).await.ok().flatten();
             if let Some(data) = cached {
                 if let Ok(pools) = serde_json::from_str::<Vec<YieldPool>>(&data) {
-                    // Apply filters on cached data (cache stores broader set)
+                    //apply filters on cached data (cache stores broader set)
                     let filtered: Vec<YieldPool> = pools
                         .into_iter()
                         .filter(|p| p.tvl_usd >= min_tvl_usd && p.apy >= min_apy)
@@ -100,7 +100,7 @@ impl YieldDataProvider for DefiLlamaProvider {
             }
         }
 
-        // Fetch from DeFi Llama
+        //fetch from defi llama
         let resp = self
             .client
             .get("https://yields.llama.fi/pools")
@@ -111,8 +111,8 @@ impl YieldDataProvider for DefiLlamaProvider {
 
         let chain_lower = chain.map(|c| c.to_lowercase());
 
-        // Map and filter — cache with a looser filter (min_tvl 10k, min_apy 0.1)
-        // so the cache is reusable across different query thresholds.
+        //map and filter — cache with a looser filter (min_tvl 10k, min_apy 0.1)
+        //so the cache is reusable across different query thresholds.
         let all_pools: Vec<YieldPool> = llama
             .data
             .into_iter()
@@ -125,7 +125,7 @@ impl YieldDataProvider for DefiLlamaProvider {
                 }
                 let tvl = p.tvl_usd.unwrap_or(0.0);
                 let apy = p.apy.unwrap_or(0.0);
-                // Loose filter for caching
+                //loose filter for caching
                 if tvl < 10_000.0 || apy < 0.1 {
                     return None;
                 }
@@ -144,7 +144,7 @@ impl YieldDataProvider for DefiLlamaProvider {
             })
             .collect();
 
-        // Cache in Redis with 300s TTL
+        //cache in redis with 300s ttl
         if let Ok(mut conn) =
             redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await
         {
@@ -153,7 +153,7 @@ impl YieldDataProvider for DefiLlamaProvider {
             }
         }
 
-        // Apply the caller's stricter filters
+        //apply the caller's stricter filters
         let filtered: Vec<YieldPool> = all_pools
             .into_iter()
             .filter(|p| p.tvl_usd >= min_tvl_usd && p.apy >= min_apy)
@@ -163,7 +163,7 @@ impl YieldDataProvider for DefiLlamaProvider {
     }
 }
 
-// ── Provider registry ───────────────────────────────────────────
+//── provider registry ───────────────────────────────────────────
 
 pub struct ProviderRegistry {
     providers: Vec<Arc<dyn YieldDataProvider>>,
@@ -200,8 +200,8 @@ impl ProviderRegistry {
         Self { providers }
     }
 
-    /// Fetch pools from all providers, merge, deduplicate by (protocol+chain+symbol),
-    /// and sort by APY descending.
+    ///fetch pools from all providers, merge, deduplicate by (protocol+chain+symbol),
+    ///and sort by apy descending.
     pub async fn fetch_pools(
         &self,
         chain: Option<&str>,
@@ -212,14 +212,14 @@ impl ProviderRegistry {
             return Ok(vec![]);
         }
 
-        // Single provider fast path
+        //single provider fast path
         if self.providers.len() == 1 {
             return self.providers[0]
                 .fetch_pools(chain, min_tvl_usd, min_apy)
                 .await;
         }
 
-        // Multi-provider: fetch concurrently, merge, deduplicate
+        //multi-provider: fetch concurrently, merge, deduplicate
         let mut handles = Vec::new();
         for provider in &self.providers {
             let p = provider.clone();
@@ -239,7 +239,7 @@ impl ProviderRegistry {
             }
         }
 
-        // Deduplicate by (protocol + chain + symbol) — keep highest APY
+        //deduplicate by (protocol + chain + symbol) — keep highest apy
         let mut seen: HashSet<String> = HashSet::new();
         let mut deduped: HashMap<String, YieldPool> = HashMap::new();
         for pool in all_pools {

@@ -39,10 +39,6 @@ pub struct GoalSpec {
     pub id: Uuid,
     pub raw_goal: String,
     pub wallet_label: String,
-    /// Resolved Keymaster wallet UUID. Set at goal creation by looking up
-    /// `wallet_label` against Keymaster's `/wallets` endpoint. `None` only on
-    /// goals created before this field existed; the runner will fail such
-    /// goals at execution time rather than guess.
     #[serde(default)]
     pub wallet_id: Option<String>,
     pub chain: String,
@@ -68,21 +64,10 @@ pub struct GoalSpec {
     pub pnl_eth: f64,
     #[serde(default)]
     pub pnl_pct: f64,
-    /// Resolved ERC-20 address of the token currently held (set after a
-    /// successful BUY). Persisted so that resumed goals know which token to
-    /// price-monitor instead of falling back to a placeholder.
     #[serde(default)]
     pub token_address: Option<String>,
-    /// Actual amount of `token_address` received from the BUY swap, in wei
-    /// (decimal string). Used at sell time so we don't try to dump more
-    /// tokens than we hold. `None` until a BUY has been recorded.
     #[serde(default)]
     pub token_amount_held: Option<String>,
-    /// Resolved wallet UUID, cached at goal-runner start (VES-91). Set once
-    /// before the first execution step and reused for the entire goal lifetime
-    /// so the BUY and SELL legs can never accidentally land on different
-    /// wallets if `wallet_id` is mutated externally. Persisted to Redis so it
-    /// survives restarts.
     #[serde(default)]
     pub resolved_wallet_uuid: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -146,7 +131,7 @@ mod tests {
     #[test]
     fn goal_strategy_defaults_to_adaptive() {
         let json = r#"{"strategy": null}"#;
-        // When missing, default kicks in
+        //when missing, default kicks in
         #[derive(Deserialize)]
         struct Wrap {
             #[serde(default)]

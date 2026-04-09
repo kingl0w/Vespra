@@ -25,7 +25,7 @@ class MockWorkerHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "not found"}).encode())
             return
 
-        # Read request body
+        #read request body
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length)
 
@@ -47,7 +47,7 @@ class MockWorkerHandler(BaseHTTPRequestHandler):
             file=sys.stderr,
         )
 
-        # Build response
+        #build response
         truncated = message[:50]
         response = {"status": "ok", "response": f"Mock response to: {truncated}"}
 

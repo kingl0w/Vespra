@@ -29,8 +29,8 @@ pub enum PositionStatus {
     Failed,
 }
 
-/// Redis key for the full position history array.
+///redis key for the full position history array.
 pub const REDIS_TRADE_POSITIONS: &str = "vespra:trade_positions";
 
-/// Redis key for the currently active position id.
+///redis key for the currently active position id.
 pub const REDIS_ACTIVE_POSITION: &str = "vespra:trade_up:active_position";

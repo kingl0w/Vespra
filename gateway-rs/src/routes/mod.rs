@@ -75,9 +75,6 @@ pub struct AppState {
     pub coordinator_orchestrator: Arc<CoordinatorOrchestrator>,
     pub goal_runners: Arc<Mutex<HashMap<Uuid, tokio::task::JoinHandle<()>>>>,
     pub goal_cancel_txs: Arc<Mutex<HashMap<Uuid, tokio::sync::watch::Sender<bool>>>>,
-    /// Serializes goal creation so the wallet-active-goal check and the
-    /// subsequent insert can't race against another concurrent submission for
-    /// the same wallet (sprint 7 — wallet safeguards).
     pub goal_creation_lock: Arc<Mutex<()>>,
     pub goal_runner_deps: GoalRunnerDeps,
     pub sentinel_monitor: Arc<SentinelMonitor>,
@@ -85,7 +82,7 @@ pub struct AppState {
     pub historical_feed: Arc<dyn HistoricalFeed>,
 }
 
-/// Middleware: Cloudflare Access check
+///middleware: cloudflare access check
 async fn cf_access_middleware(
     request: Request<Body>,
     next: Next,
@@ -113,7 +110,7 @@ async fn cf_access_middleware(
     next.run(request).await
 }
 
-/// Middleware: inject config into request extensions for cf_access_middleware
+///middleware: inject config into request extensions for cf_access_middleware
 async fn inject_extensions(
     axum::extract::State(state): axum::extract::State<AppState>,
     mut request: Request<Body>,
@@ -124,7 +121,7 @@ async fn inject_extensions(
 }
 
 pub fn router(state: AppState) -> Router {
-    // CORS layer
+    //cors layer
     let cors = if state.config.cors_origin == "*" {
         CorsLayer::new()
             .allow_origin(AllowOrigin::any())

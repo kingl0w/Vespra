@@ -1,14 +1,3 @@
-//! Backtesting engine — two modes available:
-//!
-//! # Rule-based (mode: "rules")
-//! Fast simulation using fixed APY/drawdown thresholds. No LLM calls.
-//! Best for quick iteration and strategy screening. Free to run.
-//!
-//! # Agent-based (mode: "agents")
-//! Runs the full Scout/Risk/Trader/Sentinel agent stack against historical
-//! data feeds. Produces the most realistic simulation of live behavior.
-//! Slower and consumes DeepSeek API credits (4 LLM calls per day simulated).
-//! Recommended for final validation before mainnet deployment.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -29,16 +18,13 @@ const APY_EXIT_THRESHOLD_PCT: f64 = 2.0;
 const PRICE_DRAWDOWN_EXIT_PCT: f64 = 5.0;
 const FEE_PER_TRADE_ETH: f64 = 0.0001;
 
-/// Internal day record produced by zipping APY and price series before
-/// iteration. Days where either feed is missing are dropped to avoid
-/// fabricating values.
 struct DayBar {
     date: NaiveDate,
     apy: f64,
     price: f64,
 }
 
-/// Tracks the state of a hypothetical position across the simulation.
+///tracks the state of a hypothetical position across the simulation.
 struct OpenPosition {
     entry_date: NaiveDate,
     entry_price: f64,
@@ -47,13 +33,10 @@ struct OpenPosition {
 }
 
 struct TradeOutcome {
-    /// Net P&L on the trade as a fraction (e.g. 0.04 for +4%).
+    ///net p&l on the trade as a fraction (e.g. 0.04 for +4%).
     pnl_frac: f64,
 }
 
-/// Run a backtest end-to-end. Always returns a populated `BacktestResult`,
-/// even if the rule mode finds no entry signals (in which case `total_trades`
-/// is 0 and the equity curve is flat).
 pub async fn run_backtest(
     request: &BacktestRequest,
     feed: Arc<dyn HistoricalFeed>,
@@ -104,10 +87,10 @@ pub async fn run_backtest(
     Ok(result)
 }
 
-// ─── Series alignment ──────────────────────────────────────────────────
+//─── series alignment ──────────────────────────────────────────────────
 
-/// Pair APY and price by date. Days missing on either side are dropped so the
-/// simulation never compounds against half-known state.
+///pair apy and price by date. days missing on either side are dropped so the
+///simulation never compounds against half-known state.
 fn zip_series(apy: Vec<ApySnapshot>, price: Vec<PriceSnapshot>) -> Vec<DayBar> {
     let apy_map: BTreeMap<NaiveDate, f64> =
         apy.into_iter().map(|s| (s.date, s.apy)).collect();
@@ -127,10 +110,10 @@ fn zip_series(apy: Vec<ApySnapshot>, price: Vec<PriceSnapshot>) -> Vec<DayBar> {
     out
 }
 
-// ─── Shared bookkeeping ────────────────────────────────────────────────
+//─── shared bookkeeping ────────────────────────────────────────────────
 
-/// Greatest peak-to-trough drawdown across the equity curve, expressed as a
-/// percentage. Returns 0.0 for an empty or monotonically increasing curve.
+///greatest peak-to-trough drawdown across the equity curve, expressed as a
+///percentage. returns 0.0 for an empty or monotonically increasing curve.
 fn max_drawdown_pct(curve: &[EquityPoint]) -> f64 {
     let mut peak = f64::MIN;
     let mut max_dd = 0.0_f64;
@@ -188,7 +171,7 @@ fn build_result(
     }
 }
 
-// ─── Rule-based mode ───────────────────────────────────────────────────
+//─── rule-based mode ───────────────────────────────────────────────────
 
 fn run_rules_mode(request: &BacktestRequest, bars: &[DayBar]) -> BacktestResult {
     let min_apy = std::env::var("BACKTEST_MIN_APY_PCT")
@@ -203,7 +186,7 @@ fn run_rules_mode(request: &BacktestRequest, bars: &[DayBar]) -> BacktestResult 
     let mut wins = 0u32;
 
     for bar in bars {
-        // Compound while a position is open: daily APY accrual.
+        //compound while a position is open: daily apy accrual.
         if let Some(pos) = open.as_mut() {
             let daily_yield = (bar.apy / 100.0) / 365.0;
             capital *= 1.0 + daily_yield;
@@ -212,7 +195,7 @@ fn run_rules_mode(request: &BacktestRequest, bars: &[DayBar]) -> BacktestResult 
             }
         }
 
-        // Check exit conditions on an open position.
+        //check exit conditions on an open position.
         let mut should_exit = false;
         if let Some(pos) = open.as_ref() {
             let drawdown_pct =
@@ -234,7 +217,7 @@ fn run_rules_mode(request: &BacktestRequest, bars: &[DayBar]) -> BacktestResult 
             }
         }
 
-        // Entry signal — only when flat.
+        //entry signal — only when flat.
         if open.is_none() && bar.apy >= min_apy {
             open = Some(OpenPosition {
                 entry_date: bar.date,
@@ -250,8 +233,8 @@ fn run_rules_mode(request: &BacktestRequest, bars: &[DayBar]) -> BacktestResult 
         });
     }
 
-    // Force-close any still-open trade at the final bar so the win-rate
-    // and trade count reflect the full simulation.
+    //force-close any still-open trade at the final bar so the win-rate
+    //and trade count reflect the full simulation.
     if let Some(pos) = open.take() {
         let outcome = TradeOutcome {
             pnl_frac: (capital - pos.entry_capital) / pos.entry_capital,
@@ -280,12 +263,8 @@ fn run_rules_mode(request: &BacktestRequest, bars: &[DayBar]) -> BacktestResult 
     )
 }
 
-// ─── Agent-based mode ──────────────────────────────────────────────────
+//─── agent-based mode ──────────────────────────────────────────────────
 
-/// Runs the full agent stack against historical data, one day at a time.
-/// Each day issues four LLM calls (Scout, Risk, Trader, Sentinel) that mirror
-/// the live agent prompts but with the historical APY/price values substituted
-/// for live feeds. The Sentinel call only fires while a position is open.
 async fn run_agents_mode(
     request: &BacktestRequest,
     bars: &[DayBar],
@@ -311,7 +290,7 @@ async fn run_agents_mode(
              Do not assume current market conditions."
         );
 
-        // Compound any open position by the daily APY accrual.
+        //compound any open position by the daily apy accrual.
         if let Some(pos) = open.as_mut() {
             let daily_yield = (bar.apy / 100.0) / 365.0;
             capital *= 1.0 + daily_yield;
@@ -320,7 +299,7 @@ async fn run_agents_mode(
             }
         }
 
-        // ── Scout: should we be looking at this pool today? ──────────
+        //── scout: should we be looking at this pool today? ──────────
         let scout_system = format!(
             "{date_prefix}\n\nYou are Scout. Respond with JSON only: \
              {{\"signal\": \"enter\"|\"skip\", \"reason\": \"<short>\"}}"
@@ -340,7 +319,7 @@ async fn run_agents_mode(
             .unwrap_or_else(|_| "{\"signal\":\"skip\"}".to_string());
         let scout_signal = parse_signal(&scout_raw, "signal").unwrap_or_else(|| "skip".into());
 
-        // ── Risk: gate the entry on a synthetic risk read. ───────────
+        //── risk: gate the entry on a synthetic risk read. ───────────
         let risk_system = format!(
             "{date_prefix}\n\nYou are Risk. Respond with JSON only: \
              {{\"gate_pass\": true|false, \"score\": \"LOW|MEDIUM|HIGH|CRITICAL\"}}"
@@ -356,7 +335,7 @@ async fn run_agents_mode(
             .unwrap_or_else(|_| "{\"gate_pass\":false,\"score\":\"HIGH\"}".to_string());
         let risk_pass = parse_bool(&risk_raw, "gate_pass").unwrap_or(false);
 
-        // ── Trader: only consulted while flat and gates are open. ────
+        //── trader: only consulted while flat and gates are open. ────
         let mut trader_action = "hold".to_string();
         if open.is_none() && scout_signal == "enter" && risk_pass {
             let trader_system = format!(
@@ -375,7 +354,7 @@ async fn run_agents_mode(
             trader_action = parse_signal(&trader_raw, "action").unwrap_or_else(|| "hold".into());
         }
 
-        // Apply trader's swap decision (entry).
+        //apply trader's swap decision (entry).
         if open.is_none() && trader_action == "swap" {
             open = Some(OpenPosition {
                 entry_date: bar.date,
@@ -385,7 +364,7 @@ async fn run_agents_mode(
             });
         }
 
-        // ── Sentinel: only when a position is open. ──────────────────
+        //── sentinel: only when a position is open. ──────────────────
         if open.is_some() {
             let pos_ref = open.as_ref().unwrap();
             let gain_pct = ((bar.price - pos_ref.entry_price) / pos_ref.entry_price) * 100.0;
@@ -422,7 +401,7 @@ async fn run_agents_mode(
         });
     }
 
-    // Force-close at end of period.
+    //force-close at end of period.
     if let Some(pos) = open.take() {
         let pnl_frac = (capital - pos.entry_capital) / pos.entry_capital;
         total_trades += 1;
@@ -448,11 +427,6 @@ async fn run_agents_mode(
     ))
 }
 
-// ─── JSON sniffing helpers ─────────────────────────────────────────────
-//
-// Agent responses are best-effort JSON; on parse failure we fall back to
-// a safe default ("hold"/"skip"/false) so a flaky LLM call can't crash the
-// backtest mid-run. Successful runs surface real decisions.
 
 fn parse_signal(raw: &str, key: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
@@ -466,7 +440,7 @@ fn parse_bool(raw: &str, key: &str) -> Option<bool> {
     v.get(key).and_then(|b| b.as_bool())
 }
 
-// Silence unused warnings on internal duration helper kept for future use.
+//silence unused warnings on internal duration helper kept for future use.
 #[allow(dead_code)]
 fn day_count(from: NaiveDate, to: NaiveDate) -> i64 {
     (to - from).num_days() + 1

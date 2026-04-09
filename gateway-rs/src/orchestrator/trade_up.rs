@@ -26,7 +26,7 @@ use crate::types::trade_up::{
 };
 use crate::types::wallet::PriceData;
 
-/// Deterministic UUID from wallet+chain for dedup of position loops.
+///deterministic uuid from wallet+chain for dedup of position loops.
 fn make_loop_key(wallet: &str, chain: &str) -> Uuid {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -40,7 +40,7 @@ fn make_loop_key(wallet: &str, chain: &str) -> Uuid {
     Uuid::from_bytes(uuid_bytes)
 }
 
-// ─── Position loop state machine ─────────────────────────────────
+//─── position loop state machine ─────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -68,7 +68,7 @@ impl std::fmt::Display for LoopPhase {
     }
 }
 
-// ─── Result types ────────────────────────────────────────────────
+//─── result types ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CycleResult {
@@ -139,7 +139,7 @@ impl CycleResult {
         }
     }
 
-    /// Fill in capital_eth for non-executed results
+    ///fill in capital_eth for non-executed results
     fn with_capital(mut self, capital_eth: f64) -> Self {
         if self.status != CycleStatus::Executed {
             self.capital_eth = capital_eth;
@@ -148,7 +148,7 @@ impl CycleResult {
     }
 }
 
-// ─── Orchestrator ────────────────────────────────────────────────
+//─── orchestrator ────────────────────────────────────────────────
 
 pub struct TradeUpOrchestrator {
     pub pool_fetcher: Arc<PoolFetcher>,
@@ -205,14 +205,11 @@ impl TradeUpOrchestrator {
         }
     }
 
-    /// Returns true if the global kill switch is active.
+    ///returns true if the global kill switch is active.
     pub fn is_killed(&self) -> bool {
         self.kill_flag.load(Ordering::SeqCst)
     }
 
-    // ═════════════════════════════════════════════════════════════
-    // run_cycle — the core function
-    // ═════════════════════════════════════════════════════════════
 
     pub async fn run_cycle(
         &self,
@@ -221,17 +218,14 @@ impl TradeUpOrchestrator {
         capital_eth: f64,
         chains: &[String],
     ) -> CycleResult {
-        // Kill switch check — top of cycle
+        //kill switch check — top of cycle
         if self.is_killed() {
             tracing::warn!("[cycle {cycle_num}] kill switch active — aborting cycle for wallet {wallet_id}");
             return CycleResult::exit(cycle_num, "kill_switch_active").with_capital(capital_eth);
         }
 
-        // ═══════════════════════════════════════
-        // PHASE 1: DATA FETCH (no agents)
-        // ═══════════════════════════════════════
 
-        // 1. Fetch all pools for requested chains
+        //1. fetch all pools for requested chains
         let pools = match self.pool_fetcher.fetch(chains).await {
             Ok(p) if !p.is_empty() => p,
             Ok(_) => return CycleResult::hold(cycle_num, "no_pools_available").with_capital(capital_eth),
@@ -241,7 +235,7 @@ impl TradeUpOrchestrator {
             }
         };
 
-        // 2. Pre-select top candidate by momentum_score for targeted data fetching
+        //2. pre-select top candidate by momentum_score for targeted data fetching
         let candidate = pools
             .iter()
             .max_by(|a, b| {
@@ -251,38 +245,35 @@ impl TradeUpOrchestrator {
             })
             .unwrap(); // safe: pools is non-empty
 
-        // 3. Fetch protocol data for candidate (non-blocking failure)
+        //3. fetch protocol data for candidate (non-blocking failure)
         let protocol_data = self
             .protocol_fetcher
             .fetch_protocol(&candidate.protocol)
             .await
             .unwrap_or_default();
 
-        // 4. Fetch price data (non-blocking failure)
+        //4. fetch price data (non-blocking failure)
         let _price_data: PriceData = self
             .price_oracle
             .fetch(&candidate.pool, &candidate.chain)
             .await
             .unwrap_or_default();
 
-        // 5. Fetch wallet state (non-blocking failure)
+        //5. fetch wallet state (non-blocking failure)
         let wallets = self
             .wallet_fetcher
             .fetch_wallets(&candidate.chain)
             .await
             .unwrap_or_default();
 
-        // ═══════════════════════════════════════
-        // PHASE 2: AGENT DECISIONS (no data fetching)
-        // ═══════════════════════════════════════
 
-        // Kill switch check — before scout
+        //kill switch check — before scout
         if self.is_killed() {
             tracing::warn!("[cycle {cycle_num}] kill switch active — halting before scout for wallet {wallet_id}");
             return CycleResult::exit(cycle_num, "kill_switch_active").with_capital(capital_eth);
         }
 
-        // 6. Scout decision
+        //6. scout decision
         let scout_ctx = ScoutContext {
             wallet_id,
             mode: "momentum".to_string(),
@@ -329,7 +320,7 @@ impl TradeUpOrchestrator {
             best.momentum_score
         );
 
-        // Volatility gate — reject high 24h price swings
+        //volatility gate — reject high 24h price swings
         if best.price_change_24h_pct.abs() > self.config.volatility_gate_threshold {
             tracing::warn!(
                 "[cycle {cycle_num}] volatility gate: {:.1}% 24h change exceeds {:.1}% — skipping cycle",
@@ -339,13 +330,13 @@ impl TradeUpOrchestrator {
             return CycleResult::hold(cycle_num, "volatility_gate").with_capital(capital_eth);
         }
 
-        // Kill switch check — before risk
+        //kill switch check — before risk
         if self.is_killed() {
             tracing::warn!("[cycle {cycle_num}] kill switch active — halting before risk for wallet {wallet_id}");
             return CycleResult::exit(cycle_num, "kill_switch_active").with_capital(capital_eth);
         }
 
-        // 7. Risk decision
+        //7. risk decision
         let risk_ctx = RiskContext {
             chain: best.chain.clone(),
             opportunity: best.clone(),
@@ -365,13 +356,13 @@ impl TradeUpOrchestrator {
         }
         tracing::info!("[cycle {cycle_num}] risk gate passed: {:?}", risk_decision);
 
-        // Kill switch check — before sentinel
+        //kill switch check — before sentinel
         if self.is_killed() {
             tracing::warn!("[cycle {cycle_num}] kill switch active — halting before sentinel for wallet {wallet_id}");
             return CycleResult::exit(cycle_num, "kill_switch_active").with_capital(capital_eth);
         }
 
-        // 8. Sentinel decision
+        //8. sentinel decision
         let sentinel_ctx = SentinelContext {
             wallets: wallets.clone(),
             stop_loss_pct: self.config.trade_up_stop_loss_pct,
@@ -388,7 +379,7 @@ impl TradeUpOrchestrator {
             return CycleResult::exit(cycle_num, "stop_loss_triggered").with_capital(capital_eth);
         }
 
-        // 9. Get swap quote (1inch real or simulated fallback)
+        //9. get swap quote (1inch real or simulated fallback)
         let chain_id = self
             .chain_registry
             .chain_id(&best.chain.to_lowercase())
@@ -400,18 +391,18 @@ impl TradeUpOrchestrator {
             .await
             .unwrap_or_default();
 
-        // Slippage guard — reject if price impact exceeds config threshold
+        //slippage guard — reject if price impact exceeds config threshold
         if !crate::guards::slippage_ok(quote.price_impact, &self.config) {
             return CycleResult::hold(cycle_num, "slippage_guard").with_capital(capital_eth);
         }
 
-        // Kill switch check — before trader
+        //kill switch check — before trader
         if self.is_killed() {
             tracing::warn!("[cycle {cycle_num}] kill switch active — halting before trader for wallet {wallet_id}");
             return CycleResult::exit(cycle_num, "kill_switch_active").with_capital(capital_eth);
         }
 
-        // 10. Trader decision
+        //10. trader decision
         let trader_ctx = TraderContext {
             chain: best.chain.clone(),
             opportunity: best.clone(),
@@ -429,9 +420,6 @@ impl TradeUpOrchestrator {
             }
         };
 
-        // ═══════════════════════════════════════
-        // PHASE 3: BUSINESS LOGIC (orchestrator owns this)
-        // ═══════════════════════════════════════
 
         match trader_decision {
             TraderDecision::Hold { reason } => {
@@ -447,14 +435,14 @@ impl TradeUpOrchestrator {
                 expected_gain_pct,
                 ..
             } => {
-                // Yield bypass — orchestrator decides this, NOT the agent
+                //yield bypass — orchestrator decides this, not the agent
                 let effective_gain = if expected_gain_pct == 0.0 && best.is_yield_position() {
                     best.expected_yield_gain_pct(self.config.trade_up_cycle_interval_secs)
                 } else {
                     expected_gain_pct
                 };
 
-                // Gain check — yield positions bypass if APY >= 50%
+                //gain check — yield positions bypass if apy >= 50%
                 if !best.is_yield_position()
                     && effective_gain < self.config.trade_up_min_gain_pct
                 {
@@ -476,7 +464,7 @@ impl TradeUpOrchestrator {
                     best.is_yield_position()
                 );
 
-                // Auto-execute gate
+                //auto-execute gate
                 if !self.config.auto_execute_enabled {
                     tracing::info!(
                         "[cycle {cycle_num}] auto_execute disabled — queuing for approval"
@@ -485,7 +473,7 @@ impl TradeUpOrchestrator {
                         .with_capital(capital_eth);
                 }
 
-                // Execute via Keymaster
+                //execute via keymaster
                 let exec_result = match self
                     .executor
                     .execute(wallet_id, &token_in, &token_out, &amount_in_wei, &best.chain)
@@ -509,10 +497,10 @@ impl TradeUpOrchestrator {
                     .with_capital(capital_eth);
                 }
 
-                // Compound capital
+                //compound capital
                 let new_capital = capital_eth * (1.0 + effective_gain / 100.0);
 
-                // Persist to Redis history
+                //persist to redis history
                 let _ = self
                     .persist_cycle_result(
                         wallet_id,
@@ -536,7 +524,7 @@ impl TradeUpOrchestrator {
         }
     }
 
-    // ── Redis persistence ────────────────────────────────────────
+    //── redis persistence ────────────────────────────────────────
 
     async fn persist_cycle_result(
         &self,
@@ -567,7 +555,7 @@ impl TradeUpOrchestrator {
         Ok(())
     }
 
-    /// Persist every cycle result to the per-wallet and global history lists.
+    ///persist every cycle result to the per-wallet and global history lists.
     pub async fn persist_cycle_to_history(&self, wallet_id: Uuid, result: &CycleResult) -> Result<()> {
         let mut conn =
             redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await?;
@@ -592,12 +580,12 @@ impl TradeUpOrchestrator {
 
         let json = serde_json::to_string(&entry)?;
 
-        // Per-wallet history
+        //per-wallet history
         let wallet_key = format!("vespra:trade_up_history:{wallet_id}");
         conn.lpush::<_, _, ()>(&wallet_key, &json).await?;
         conn.ltrim::<_, ()>(&wallet_key, 0, 99).await?;
 
-        // Global history
+        //global history
         conn.lpush::<_, _, ()>("vespra:trade_up_history", &json).await?;
         conn.ltrim::<_, ()>("vespra:trade_up_history", 0, 99).await?;
 
@@ -630,7 +618,7 @@ impl TradeUpOrchestrator {
         }
     }
 
-    // ── Loop management ──────────────────────────────────────────
+    //── loop management ──────────────────────────────────────────
 
     pub async fn start_loop(
         self: &Arc<Self>,
@@ -683,7 +671,7 @@ impl TradeUpOrchestrator {
         loops.keys().copied().collect()
     }
 
-    // ── Position Redis helpers ───────────────────────────────────
+    //── position redis helpers ───────────────────────────────────
 
     async fn save_position(&self, position: &TradePosition) -> Result<()> {
         let mut conn =
@@ -742,7 +730,7 @@ impl TradeUpOrchestrator {
     async fn update_position_in_redis(&self, position: &TradePosition) -> Result<()> {
         let mut conn =
             redis::Client::get_multiplexed_async_connection(self.redis.as_ref()).await?;
-        // Read all, replace matching id, rewrite
+        //read all, replace matching id, rewrite
         let raw: Vec<String> = conn.lrange(REDIS_TRADE_POSITIONS, 0, 199).await?;
         let mut entries: Vec<String> = Vec::with_capacity(raw.len());
         for entry in &raw {
@@ -761,14 +749,14 @@ impl TradeUpOrchestrator {
         Ok(())
     }
 
-    // ── Position-based loop ──────────────────────────────────────
+    //── position-based loop ──────────────────────────────────────
 
     pub async fn start_position_loop(
         self: &Arc<Self>,
         wallet_label: String,
         chain: String,
     ) -> Result<()> {
-        // Use a synthetic UUID derived from wallet+chain for dedup
+        //use a synthetic uuid derived from wallet+chain for dedup
         let loop_key = make_loop_key(&wallet_label, &chain);
 
         let mut loops = self.active_loops.lock().await;
@@ -826,7 +814,7 @@ impl TradeUpOrchestrator {
     }
 }
 
-// ─── Background loop task ────────────────────────────────────────
+//─── background loop task ────────────────────────────────────────
 
 async fn run_loop_task(
     orch: Arc<TradeUpOrchestrator>,
@@ -841,18 +829,18 @@ async fn run_loop_task(
     let mut cycle: u32 = 0;
     let mut peak_capital = initial_capital;
 
-    // Persist initial state
+    //persist initial state
     orch.persist_loop_state(wallet_id, 0, capital, "started", true)
         .await;
 
     loop {
-        // Check kill switch
+        //check kill switch
         if orch.is_killed() {
             tracing::warn!("kill switch active — halting loop for wallet {wallet_id}");
             break;
         }
 
-        // Check cancellation
+        //check cancellation
         if *cancel_rx.borrow() {
             tracing::info!("trade-up loop cancelled for wallet {wallet_id}");
             break;
@@ -878,7 +866,7 @@ async fn run_loop_task(
             peak_capital = capital;
         }
 
-        // Persist state after each cycle
+        //persist state after each cycle
         let status_str = match result.status {
             CycleStatus::Executed => "executed",
             CycleStatus::Hold => "hold",
@@ -888,10 +876,10 @@ async fn run_loop_task(
         orch.persist_loop_state(wallet_id, cycle, capital, status_str, true)
             .await;
 
-        // Persist cycle to history list (every cycle, not just executed swaps)
+        //persist cycle to history list (every cycle, not just executed swaps)
         let _ = orch.persist_cycle_to_history(wallet_id, &result).await;
 
-        // Stop-loss: check drawdown from peak
+        //stop-loss: check drawdown from peak
         let drawdown_pct = if peak_capital > 0.0 {
             ((peak_capital - capital) / peak_capital) * 100.0
         } else {
@@ -908,12 +896,12 @@ async fn run_loop_task(
             break;
         }
 
-        // Exit status ends the loop
+        //exit status ends the loop
         if result.status == CycleStatus::Exit {
             break;
         }
 
-        // Wait for next cycle or cancellation
+        //wait for next cycle or cancellation
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(interval_secs)) => {}
             _ = cancel_rx.changed() => {
@@ -925,11 +913,11 @@ async fn run_loop_task(
         }
     }
 
-    // Persist final state
+    //persist final state
     orch.persist_loop_state(wallet_id, cycle, capital, "stopped", false)
         .await;
 
-    // Clean up from active loops
+    //clean up from active loops
     let mut loops = orch.active_loops.lock().await;
     loops.remove(&wallet_id);
     tracing::info!(
@@ -942,7 +930,7 @@ async fn run_loop_task(
     );
 }
 
-// ─── Position-based state machine loop ──────────────────────────
+//─── position-based state machine loop ──────────────────────────
 
 async fn run_position_loop(
     orch: Arc<TradeUpOrchestrator>,
@@ -964,7 +952,7 @@ async fn run_position_loop(
             break;
         }
 
-        // ── SCOUTING ─────────────────────────────────────────
+        //── scouting ─────────────────────────────────────────
         orch.set_loop_phase(&LoopPhase::Scouting).await;
         tracing::info!("[{wallet_label}] SCOUTING on {chain}");
 
@@ -1015,7 +1003,7 @@ async fn run_position_loop(
             best.momentum_score
         );
 
-        // ── RISK_CHECK ───────────────────────────────────────
+        //── risk_check ───────────────────────────────────────
         if orch.is_killed() || *cancel_rx.borrow() { break; }
         orch.set_loop_phase(&LoopPhase::RiskCheck).await;
         tracing::info!("[{wallet_label}] RISK_CHECK for {}", best.protocol);
@@ -1047,12 +1035,12 @@ async fn run_position_loop(
         }
         tracing::info!("[{wallet_label}] risk passed: {:?}", risk_decision);
 
-        // ── ENTERING ─────────────────────────────────────────
+        //── entering ─────────────────────────────────────────
         if orch.is_killed() || *cancel_rx.borrow() { break; }
         orch.set_loop_phase(&LoopPhase::Entering).await;
         tracing::info!("[{wallet_label}] ENTERING position");
 
-        // Check wallet balance
+        //check wallet balance
         let wallets = orch
             .wallet_fetcher
             .fetch_wallets(&chain)
@@ -1074,7 +1062,7 @@ async fn run_position_loop(
         let max_eth = orch.config.trade_up_max_eth;
         let position_eth = f64::min(wallet_balance - gas_reserve, max_eth);
 
-        // Get quote for entry
+        //get quote for entry
         let chain_id = orch
             .chain_registry
             .chain_id(&chain.to_lowercase())
@@ -1086,7 +1074,7 @@ async fn run_position_loop(
             .await
             .unwrap_or_default();
 
-        // Execute entry swap via trader + executor
+        //execute entry swap via trader + executor
         let trader_ctx = TraderContext {
             chain: best.chain.clone(),
             opportunity: best.clone(),
@@ -1121,7 +1109,7 @@ async fn run_position_loop(
             }
         };
 
-        // Execute entry
+        //execute entry
         let wallet_uuid = wallet_state
             .map(|w| w.wallet_id)
             .unwrap_or_else(Uuid::new_v4);
@@ -1147,7 +1135,7 @@ async fn run_position_loop(
             continue;
         }
 
-        // Create position
+        //create position
         let token_amount = quote.amount_out_wei.parse::<f64>().unwrap_or(0.0);
         let position_id = Uuid::new_v4().to_string();
         let mut position = TradePosition {
@@ -1179,7 +1167,7 @@ async fn run_position_loop(
             best.price_usd
         );
 
-        // ── MONITORING (poll every 5 min) ────────────────────
+        //── monitoring (poll every 5 min) ────────────────────
         orch.set_loop_phase(&LoopPhase::Monitoring).await;
         #[allow(unused_assignments)]
         let mut exit_reason: Option<String> = None;
@@ -1192,7 +1180,7 @@ async fn run_position_loop(
                 break;
             }
 
-            // Wait 5min between checks
+            //wait 5min between checks
             if wait_or_cancel(&mut cancel_rx, 300).await {
                 exit_reason = Some("cancelled".into());
                 break;
@@ -1200,7 +1188,7 @@ async fn run_position_loop(
 
             tracing::info!("[{wallet_label}] MONITORING position {position_id}");
 
-            // Fetch current price
+            //fetch current price
             let price_data = orch
                 .price_oracle
                 .fetch(&position.token_address, &chain)
@@ -1223,7 +1211,7 @@ async fn run_position_loop(
                 gain_pct
             );
 
-            // Check gain/loss thresholds
+            //check gain/loss thresholds
             if gain_pct >= target_gain_pct {
                 exit_reason = Some("target_gain".into());
                 break;
@@ -1233,7 +1221,7 @@ async fn run_position_loop(
                 break;
             }
 
-            // Sentinel assessment
+            //sentinel assessment
             if let Ok(assessment) = orch
                 .sentinel
                 .monitor_position(&position, current_price)
@@ -1250,7 +1238,7 @@ async fn run_position_loop(
                 }
             }
 
-            // Check for better opportunity
+            //check for better opportunity
             let scout_check = ScoutContext {
                 wallet_id: loop_key,
                 mode: "momentum".to_string(),
@@ -1283,7 +1271,7 @@ async fn run_position_loop(
             }
         }
 
-        // ── EXITING ──────────────────────────────────────────
+        //── exiting ──────────────────────────────────────────
         if orch.is_killed() && exit_reason.is_none() {
             break;
         }
@@ -1294,7 +1282,7 @@ async fn run_position_loop(
         position.status = PositionStatus::Exiting;
         let _ = orch.update_position_in_redis(&position).await;
 
-        // Get exit quote TOKEN→ETH
+        //get exit quote token→eth
         let exit_amount_wei = format!("{:.0}", position.token_amount);
         let exit_quote = orch
             .quote_fetcher
@@ -1302,7 +1290,7 @@ async fn run_position_loop(
             .await
             .unwrap_or_default();
 
-        // Execute exit swap
+        //execute exit swap
         let exit_result = orch
             .executor
             .execute(
@@ -1346,7 +1334,7 @@ async fn run_position_loop(
             net_gain
         );
 
-        // ── COMPOUNDING ──────────────────────────────────────
+        //── compounding ──────────────────────────────────────
         orch.set_loop_phase(&LoopPhase::Compounding).await;
         tracing::info!(
             "[{wallet_label}] COMPOUNDING — P&L: {:.4} ETH ({:.2}%) — looping back in 30s",
@@ -1363,14 +1351,14 @@ async fn run_position_loop(
         }
     }
 
-    // Final cleanup
+    //final cleanup
     orch.set_loop_phase(&LoopPhase::Idle).await;
     let mut loops = orch.active_loops.lock().await;
     loops.remove(&loop_key);
     tracing::info!("position loop ended for {wallet_label} on {chain}");
 }
 
-/// Wait for `secs` seconds or until cancel signal. Returns true if cancelled.
+///wait for `secs` seconds or until cancel signal. returns true if cancelled.
 async fn wait_or_cancel(cancel_rx: &mut watch::Receiver<bool>, secs: u64) -> bool {
     tokio::select! {
         _ = tokio::time::sleep(std::time::Duration::from_secs(secs)) => false,

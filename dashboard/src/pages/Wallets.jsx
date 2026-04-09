@@ -33,7 +33,7 @@ function CopyButton({ text }) {
       if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(text);
       } else {
-        // Fallback for insecure contexts
+        //fallback for insecure contexts
         const ta = document.createElement("textarea");
         ta.value = text;
         ta.style.cssText = "position:fixed;left:-9999px";
@@ -77,7 +77,7 @@ function useWalletBalances() {
   const fetchBalances = useCallback((wallets) => {
     if (!wallets || !Array.isArray(wallets)) return;
     const active = wallets.filter((w) => w.active && w.chain && w.address);
-    // Throttle: fetch 3 at a time to avoid API overload
+    //throttle: fetch 3 at a time to avoid api overload
     let i = 0;
     const next = () => {
       if (i >= active.length) return;
@@ -96,7 +96,7 @@ function useWalletBalances() {
           next();
         });
     };
-    // Start up to 3 concurrent fetches
+    //start up to 3 concurrent fetches
     const concurrency = Math.min(3, active.length);
     for (let c = 0; c < concurrency; c++) next();
   }, []);
@@ -309,7 +309,7 @@ function WalletDetail({ wallet, onClose, onBalanceUpdate }) {
   const [sweeping, setSweeping] = useState(false);
   const [sweepResult, setSweepResult] = useState(null);
 
-  // Propagate balance to table whenever it updates
+  //propagate balance to table whenever it updates
   const prevBalRef = useRef(null);
   useEffect(() => {
     if (!balance) return;

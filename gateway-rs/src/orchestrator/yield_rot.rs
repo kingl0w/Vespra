@@ -16,7 +16,7 @@ use crate::data::pool::PoolFetcher;
 use crate::data::protocol::ProtocolFetcher;
 use crate::types::decisions::YieldDecision;
 
-// ─── Result types ────────────────────────────────────────────────
+//─── result types ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YieldCycleResult {
@@ -71,7 +71,7 @@ impl YieldCycleResult {
     }
 }
 
-// ─── Position state (Redis-persisted) ────────────────────────────
+//─── position state (redis-persisted) ────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YieldPosition {
@@ -83,7 +83,7 @@ pub struct YieldPosition {
     pub entered_at: i64,
 }
 
-// ─── Orchestrator ────────────────────────────────────────────────
+//─── orchestrator ────────────────────────────────────────────────
 
 pub struct YieldOrchestrator {
     pool_fetcher: Arc<PoolFetcher>,
@@ -126,9 +126,6 @@ impl YieldOrchestrator {
         self.kill_flag.load(Ordering::SeqCst)
     }
 
-    // ═════════════════════════════════════════════════════════════
-    // run_cycle
-    // ═════════════════════════════════════════════════════════════
 
     pub async fn run_cycle(
         &self,
@@ -141,10 +138,10 @@ impl YieldOrchestrator {
             return YieldCycleResult::hold(cycle_num, "kill_switch_active", capital_eth);
         }
 
-        // 1. Fetch current position from Redis
+        //1. fetch current position from redis
         let current_position = self.load_position(wallet_id).await;
 
-        // 2. Fetch top pools for this chain
+        //2. fetch top pools for this chain
         let pools = match self.pool_fetcher.fetch(&[chain.to_string()]).await {
             Ok(p) if !p.is_empty() => p,
             Ok(_) => return YieldCycleResult::hold(cycle_num, "no_pools_available", capital_eth),
@@ -154,7 +151,7 @@ impl YieldOrchestrator {
             }
         };
 
-        // 3. Build top 5 candidates sorted by APY
+        //3. build top 5 candidates sorted by apy
         let mut candidates: Vec<YieldCandidate> = pools
             .iter()
             .filter(|p| p.apy > 0.0)
@@ -174,7 +171,7 @@ impl YieldOrchestrator {
             return YieldCycleResult::hold(cycle_num, "no_yield_candidates", capital_eth);
         }
 
-        // 4. Risk check on the top candidate
+        //4. risk check on the top candidate
         let best = &candidates[0];
         let protocol_data = self.protocol_fetcher
             .fetch_protocol(&best.protocol)
@@ -206,7 +203,7 @@ impl YieldOrchestrator {
             return YieldCycleResult::hold(cycle_num, "risk_gate_blocked", capital_eth);
         }
 
-        // 5. Run yield agent
+        //5. run yield agent
         let current = current_position.as_ref().map(|p| CurrentPosition {
             protocol: p.protocol.clone(),
             apy_pct: p.apy_pct,
@@ -252,7 +249,7 @@ impl YieldOrchestrator {
                     reasoning
                 );
 
-                // Withdraw from current position (if any)
+                //withdraw from current position (if any)
                 if let Some(ref pos) = current_position {
                     let amount_wei = format!("{:.0}", pos.amount_eth * 1e18);
                     if let Err(e) = self.executor
@@ -264,7 +261,7 @@ impl YieldOrchestrator {
                     }
                 }
 
-                // Deposit to new position
+                //deposit to new position
                 let amount_wei = format!("{:.0}", capital_eth * 1e18);
                 match self.executor
                     .execute(wallet_id, "WETH", &target_pool_id, &amount_wei, chain)
@@ -288,7 +285,7 @@ impl YieldOrchestrator {
                     }
                 }
 
-                // Update position in Redis
+                //update position in redis
                 let new_pos = YieldPosition {
                     protocol: target_protocol,
                     pool_id: target_pool_id,
@@ -304,7 +301,7 @@ impl YieldOrchestrator {
         }
     }
 
-    // ── Redis persistence ────────────────────────────────────────
+    //── redis persistence ────────────────────────────────────────
 
     async fn load_position(&self, wallet_id: Uuid) -> Option<YieldPosition> {
         let mut conn = redis::Client::get_multiplexed_async_connection(self.redis.as_ref())
@@ -367,7 +364,7 @@ impl YieldOrchestrator {
         }
     }
 
-    // ── Loop management ──────────────────────────────────────────
+    //── loop management ──────────────────────────────────────────
 
     pub async fn start_loop(
         self: &Arc<Self>,
@@ -411,7 +408,7 @@ impl YieldOrchestrator {
     }
 }
 
-// ─── Background loop task ────────────────────────────────────────
+//─── background loop task ────────────────────────────────────────
 
 async fn run_yield_loop(
     orch: Arc<YieldOrchestrator>,

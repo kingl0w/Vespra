@@ -42,7 +42,7 @@ pub async fn send_tx(
             .map_err(|e| AppError::BadRequest(format!("Invalid to address: {e}")))?;
         tx = tx.to(to_addr);
     }
-    // to=None means contract deployment (CREATE)
+    //to=none means contract deployment (create)
 
     if let Some(calldata) = data {
         tx = tx.input(Bytes::from(calldata).into());
@@ -53,9 +53,6 @@ pub async fn send_tx(
     Ok(format!("{:?}", pending.tx_hash()))
 }
 
-/// Send a transaction and wait for its receipt (1 confirmation). Returns the
-/// tx hash on success. Use this when subsequent transactions depend on the
-/// state changes from this one (e.g. wrap → approve → swap).
 pub async fn send_tx_and_wait(
     chain: &ChainConfig,
     private_key_bytes: &[u8],
@@ -102,7 +99,7 @@ pub async fn send_tx_and_wait(
     Ok(format!("{:?}", receipt.transaction_hash))
 }
 
-/// Low-level eth_call: returns the raw return data from a contract view.
+///low-level eth_call: returns the raw return data from a contract view.
 pub async fn eth_call(
     chain: &ChainConfig,
     to: Address,

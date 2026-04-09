@@ -1,9 +1,3 @@
-//! Swap orchestration: ETH wrap → ERC-20 approve → Uniswap V3 exactInputSingle.
-//!
-//! Keymaster previously only knew how to send native ETH and arbitrary calldata.
-//! This module owns the contract-call ABI encoding and the multi-step swap
-//! choreography so the gateway executor can issue a single `/swap` call and
-//! get back a tx hash.
 
 use alloy::primitives::{Address, U256};
 use alloy::sol;
@@ -16,7 +10,7 @@ use crate::error::{AppError, AppResult};
 use crate::keystore::WalletRecord;
 use crate::rpc;
 
-// ─── Solidity bindings ─────────────────────────────────────────────
+//─── solidity bindings ─────────────────────────────────────────────
 
 sol! {
     interface IWETH9 {
@@ -45,7 +39,7 @@ sol! {
     }
 }
 
-// ─── Per-chain swap config ─────────────────────────────────────────
+//─── per-chain swap config ─────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
 pub struct ChainSwapConfig {
@@ -53,10 +47,10 @@ pub struct ChainSwapConfig {
     pub weth: Address,
 }
 
-/// Hardcoded router/WETH addresses per chain. Returns `None` for chains
-/// where the swap path isn't wired up yet.
+///hardcoded router/weth addresses per chain. returns `none` for chains
+///where the swap path isn't wired up yet.
 pub fn swap_config(chain_name: &str) -> Option<ChainSwapConfig> {
-    // Both Base and Base Sepolia use the same canonical WETH9 address.
+    //both base and base sepolia use the same canonical weth9 address.
     let weth = Address::from_str("0x4200000000000000000000000000000000000006").ok()?;
     match chain_name {
         "base_sepolia" => Some(ChainSwapConfig {
@@ -71,7 +65,7 @@ pub fn swap_config(chain_name: &str) -> Option<ChainSwapConfig> {
     }
 }
 
-// ─── ABI encode helpers ────────────────────────────────────────────
+//─── abi encode helpers ────────────────────────────────────────────
 
 pub fn encode_weth_deposit() -> Vec<u8> {
     IWETH9::depositCall {}.abi_encode()
@@ -99,7 +93,7 @@ pub fn encode_exact_input_single(
     ISwapRouter02::exactInputSingleCall { params }.abi_encode()
 }
 
-// ─── ERC-20 read helpers ───────────────────────────────────────────
+//─── erc-20 read helpers ───────────────────────────────────────────
 
 pub async fn read_balance(
     chain: &ChainConfig,
@@ -126,22 +120,16 @@ pub async fn read_allowance(
     Ok(decoded._0)
 }
 
-// ─── Swap orchestration ────────────────────────────────────────────
+//─── swap orchestration ────────────────────────────────────────────
 
-/// Outcome of a successful `/swap` request. Hashes are populated only for the
-/// steps that actually ran (wrap and approve are skipped when not needed).
+///outcome of a successful `/swap` request. hashes are populated only for the
+///steps that actually ran (wrap and approve are skipped when not needed).
 pub struct SwapResult {
     pub swap_tx_hash: String,
     pub wrap_tx_hash: Option<String>,
     pub approve_tx_hash: Option<String>,
 }
 
-/// Orchestrate ETH wrap → approve → exactInputSingle. Each step waits for
-/// receipt before the next so subsequent calls observe the new state.
-///
-/// `token_in_input` accepts `"ETH"` (case-insensitive) as a synonym for the
-/// chain's WETH address; in that case the wallet's native ETH balance is
-/// wrapped first.
 pub async fn execute_swap(
     chain_name: &str,
     chain: &ChainConfig,
@@ -155,8 +143,8 @@ pub async fn execute_swap(
         AppError::BadRequest(format!("Swap not configured for chain '{chain_name}'"))
     })?;
 
-    // Resolve token_in: "ETH" → WETH address. Caller is allowed to pass either
-    // the literal string "ETH" or the WETH address directly.
+    //resolve token_in: "eth" → weth address. caller is allowed to pass either
+    //the literal string "eth" or the weth address directly.
     let token_in_lower = token_in_input.trim().to_lowercase();
     let is_eth_input = token_in_lower == "eth";
     let token_in: Address = if is_eth_input {
@@ -176,7 +164,7 @@ pub async fn execute_swap(
         ));
     }
 
-    // Decrypt the private key once and reuse it across all sub-transactions.
+    //decrypt the private key once and reuse it across all sub-transactions.
     let mut pk_bytes = crypto::decrypt_key(&wallet.encrypted_key, master_password)?;
     let result = execute_swap_inner(
         chain,
@@ -207,12 +195,6 @@ async fn execute_swap_inner(
     let mut wrap_tx_hash: Option<String> = None;
     let mut approve_tx_hash: Option<String> = None;
 
-    // ── Step 1: wrap ETH → WETH if needed ────────────────────────────
-    // VES-95: only attempt the wrap when the wallet's existing WETH balance
-    // is below `amount_in_wei`. If a wrap is needed and fails (e.g. transient
-    // RPC error), re-read the balance: a concurrent top-up may have already
-    // covered the requirement, in which case the swap can still proceed.
-    // Only abort when the balance is *still* insufficient after the failure.
     if token_in_is_weth {
         let weth_balance = read_balance(chain, cfg.weth, wallet_addr).await?;
         if weth_balance >= amount_in_wei {
@@ -245,8 +227,8 @@ async fn execute_swap_inner(
                     wrap_tx_hash = Some(hash);
                 }
                 Err(e) => {
-                    // Re-check balance — a concurrent top-up may have made
-                    // the wrap unnecessary even though our attempt errored.
+                    //re-check balance — a concurrent top-up may have made
+                    //the wrap unnecessary even though our attempt errored.
                     let post_failure_balance =
                         read_balance(chain, cfg.weth, wallet_addr).await.unwrap_or(weth_balance);
                     if post_failure_balance >= amount_in_wei {
@@ -266,7 +248,7 @@ async fn execute_swap_inner(
         }
     }
 
-    // ── Step 2: approve router for token_in if allowance is too low ──
+    //── step 2: approve router for token_in if allowance is too low ──
     let current_allowance = read_allowance(chain, token_in, wallet_addr, cfg.router).await?;
     if current_allowance < amount_in_wei {
         tracing::info!(
@@ -297,7 +279,7 @@ async fn execute_swap_inner(
         );
     }
 
-    // ── Step 3: exactInputSingle on Uniswap V3 SwapRouter02 ──────────
+    //── step 3: exactinputsingle on uniswap v3 swaprouter02 ──────────
     tracing::info!(
         token_in = %token_in.to_checksum(None),
         token_out = %token_out.to_checksum(None),

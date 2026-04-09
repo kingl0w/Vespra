@@ -38,10 +38,10 @@ async fn patch_config(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    // Persist config overrides to Redis — applied on next service restart
+    //persist config overrides to redis — applied on next service restart
     match redis::Client::get_multiplexed_async_connection(state.redis.as_ref()).await {
         Ok(mut conn) => {
-            // Merge incoming fields into existing overrides
+            //merge incoming fields into existing overrides
             let existing: serde_json::Value = conn
                 .get::<_, Option<String>>("vespra:config_overrides")
                 .await

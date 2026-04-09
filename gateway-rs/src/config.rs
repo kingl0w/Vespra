@@ -167,7 +167,7 @@ impl GatewayConfig {
             .merge(Env::prefixed("VESPRA_"))
             .extract()?;
 
-        // Scan env vars for RPC_URL_{CHAIN} and populate rpc_urls map
+        //scan env vars for rpc_url_{chain} and populate rpc_urls map
         for (key, val) in std::env::vars() {
             if let Some(chain) = key.strip_prefix("RPC_URL_") {
                 let chain_name = chain.to_lowercase();
@@ -175,9 +175,6 @@ impl GatewayConfig {
             }
         }
 
-        // VES-110: explicit GATEWAY_HOST / GATEWAY_PORT env-var overrides on
-        // top of whatever Figment merged from TOML / VESPRA_*. This makes
-        // container deployments configurable without a config.toml file.
         if let Ok(host) = std::env::var("GATEWAY_HOST") {
             if !host.is_empty() {
                 config.host = host;

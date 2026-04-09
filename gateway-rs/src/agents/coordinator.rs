@@ -109,7 +109,7 @@ impl CoordinatorAgent {
         })
     }
 
-    /// Respond to a general chat query in plain prose.
+    ///respond to a general chat query in plain prose.
     pub async fn query(&self, question: &str) -> Result<String> {
         let task = format!("MODE: chat\n\n[QUERY] {question}");
         self.llm.call(BASE_PROMPT, &task).await
