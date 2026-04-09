@@ -7,6 +7,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::agents::sentinel::SentinelAgent;
+use crate::chain::ChainRegistry;
 use crate::data::price::PriceOracle;
 use crate::routes::goals::{get_goal, list_goals_by_status, save_goal};
 use crate::types::goals::GoalStatus;
@@ -67,6 +68,7 @@ impl SentinelMonitor {
         redis: Arc<redis::Client>,
         sentinel: Arc<SentinelAgent>,
         price_oracle: Arc<dyn PriceOracle>,
+        chain_registry: Arc<ChainRegistry>,
     ) {
         let interval_secs: u64 = std::env::var("SENTINEL_INTERVAL_SECS")
             .ok()
@@ -88,6 +90,7 @@ impl SentinelMonitor {
                 &redis,
                 &sentinel,
                 &price_oracle,
+                &chain_registry,
             )
             .await;
 
@@ -105,6 +108,7 @@ impl SentinelMonitor {
         redis: &Arc<redis::Client>,
         sentinel: &Arc<SentinelAgent>,
         price_oracle: &Arc<dyn PriceOracle>,
+        chain_registry: &Arc<ChainRegistry>,
     ) -> anyhow::Result<()> {
         use redis::AsyncCommands;
 
@@ -135,11 +139,29 @@ impl SentinelMonitor {
                 active.insert(goal.id);
             }
 
-            let current_price = price_oracle
-                .fetch(&goal.id.to_string(), &goal.chain)
-                .await
-                .map(|p| p.price_usd)
-                .unwrap_or(0.0);
+            //ves-fix: use the goal's tracked token address; fall back to the
+            //chain's native (wrapped) token if the goal hasn't recorded one yet.
+            //previously this passed goal.id.to_string() (a uuid) which the
+            //defillama oracle treated as a contract address and always returned 0.
+            let token_addr = goal
+                .token_address
+                .clone()
+                .or_else(|| {
+                    chain_registry
+                        .get(&goal.chain)
+                        .map(|c| c.native_token_address.clone())
+                })
+                .unwrap_or_default();
+
+            let current_price = if token_addr.is_empty() {
+                0.0
+            } else {
+                price_oracle
+                    .fetch(&token_addr, &goal.chain)
+                    .await
+                    .map(|p| p.price_usd)
+                    .unwrap_or(0.0)
+            };
 
             //ves-93: validate current_price before any sentinel comparison.
             //nan/inf/<=0 disables every downstream gain/loss check silently.

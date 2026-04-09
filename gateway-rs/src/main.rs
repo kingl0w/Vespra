@@ -442,6 +442,7 @@ async fn main() -> anyhow::Result<()> {
         state.redis.clone(),
         sentinel.clone(),
         state.goal_runner_deps.price_oracle.clone(),
+        state.chain_registry.clone(),
     ));
 
     //10c. spawn yieldrotationscheduler background task

@@ -114,6 +114,7 @@ pub async fn list_goals_by_status(
 pub struct ResolvedWallet {
     pub id: String,
     pub address: String,
+    pub cap_eth: Option<f64>,
 }
 
 async fn resolve_wallet_info(
@@ -147,7 +148,14 @@ async fn resolve_wallet_info(
                 .ok_or_else(|| anyhow::anyhow!("wallet {label} has no id field"))?
                 .to_string();
             let address = w["address"].as_str().unwrap_or("").to_string();
-            return Ok(ResolvedWallet { id, address });
+            //ves-fix: surface cap_wei so create_goal can clamp capital_eth
+            //against the wallet's spend cap and avoid CapExceeded rejections.
+            let cap_eth = w["cap_wei"]
+                .as_str()
+                .and_then(|s| s.parse::<u128>().ok())
+                .filter(|c| *c > 0)
+                .map(|c| c as f64 / 1e18);
+            return Ok(ResolvedWallet { id, address, cap_eth });
         }
     }
 
@@ -410,6 +418,23 @@ async fn create_goal(
                 "error": "capital_eth must be greater than zero"
             })),
         );
+    }
+
+    //ves-fix: clamp capital_eth against the wallet cap so an LLM that
+    //hallucinates a large default (e.g. 1.0 ETH for "compound my ETH")
+    //can't trip the keymaster CapExceeded check downstream. uses 90% of
+    //the cap to leave headroom for fees and slippage.
+    if let Some(cap) = resolved.cap_eth {
+        let ceiling = cap * 0.9;
+        if goal.capital_eth > ceiling {
+            tracing::info!(
+                "[goals] clamping capital_eth from {} to {} (wallet {} cap {})",
+                goal.capital_eth, ceiling, body.wallet_label, cap
+            );
+            goal.capital_eth = ceiling;
+            goal.entry_eth = ceiling;
+            goal.current_eth = ceiling;
+        }
     }
 
     let rpc_url = state
