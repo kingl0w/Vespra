@@ -59,6 +59,7 @@ pub struct AppState {
     pub config: Arc<GatewayConfig>,
     pub chain_registry: Arc<ChainRegistry>,
     pub redis: Arc<redis::Client>,
+    pub http_client: reqwest::Client,
     pub llm: Arc<dyn AgentClient>,
     pub trade_up_orchestrator: Arc<TradeUpOrchestrator>,
     pub yield_orchestrator: Arc<YieldOrchestrator>,

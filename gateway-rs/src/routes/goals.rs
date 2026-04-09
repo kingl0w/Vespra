@@ -117,15 +117,12 @@ pub struct ResolvedWallet {
 }
 
 async fn resolve_wallet_info(
+    http_client: &reqwest::Client,
     keymaster_url: &str,
     keymaster_token: &str,
     wallet_label: &str,
 ) -> anyhow::Result<ResolvedWallet> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
-
-    let resp = client
+    let resp = http_client
         .get(format!("{keymaster_url}/wallets"))
         .header("Authorization", format!("Bearer {keymaster_token}"))
         .send()
@@ -182,7 +179,11 @@ pub async fn wallet_has_active_goal(
     })
 }
 
-async fn fetch_wallet_balance_eth(rpc_url: &str, address: &str) -> anyhow::Result<f64> {
+async fn fetch_wallet_balance_eth(
+    http_client: &reqwest::Client,
+    rpc_url: &str,
+    address: &str,
+) -> anyhow::Result<f64> {
     if rpc_url.is_empty() {
         anyhow::bail!("no rpc_url configured");
     }
@@ -190,9 +191,7 @@ async fn fetch_wallet_balance_eth(rpc_url: &str, address: &str) -> anyhow::Resul
         anyhow::bail!("wallet address is empty");
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()?;
+    let client = http_client;
 
     let payload = serde_json::json!({
         "jsonrpc": "2.0",
@@ -365,6 +364,7 @@ async fn create_goal(
     }
 
     let resolved = match resolve_wallet_info(
+        &state.http_client,
         &state.config.keymaster_url,
         &state.config.keymaster_token,
         &body.wallet_label,
@@ -424,7 +424,7 @@ async fn create_goal(
             goal.chain
         );
     } else {
-        match fetch_wallet_balance_eth(&rpc_url, &resolved.address).await {
+        match fetch_wallet_balance_eth(&state.http_client, &rpc_url, &resolved.address).await {
             Ok(balance_eth) => {
                 if goal.capital_eth > (balance_eth - GAS_RESERVE_ETH) {
                     tracing::warn!(
@@ -481,8 +481,14 @@ async fn create_goal(
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let goal_id = goal.id;
     let deps = state.goal_runner_deps.clone();
+    let runners_for_cleanup = state.goal_runners.clone();
+    let txs_for_cleanup = state.goal_cancel_txs.clone();
     let handle = tokio::spawn(async move {
         crate::goal_runner::run_goal(goal_id, cancel_rx, deps).await;
+        //ves-mem: drop runner + cancel sender from shared maps so they
+        //don't accumulate across the gateway's lifetime.
+        runners_for_cleanup.lock().await.remove(&goal_id);
+        txs_for_cleanup.lock().await.remove(&goal_id);
     });
 
     {

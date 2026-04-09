@@ -77,7 +77,8 @@ async fn main() -> anyhow::Result<()> {
     //5. build shared http client
     let http_client = reqwest::Client::builder()
         .user_agent("vespra-gateway-rs/0.1.0")
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(30))
+        .pool_max_idle_per_host(5)
         .build()?;
 
     //6. build data fetchers
@@ -302,6 +303,7 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
         chain_registry,
         redis: redis_client,
+        http_client: http_client.clone(),
         llm: llm.clone(),
         trade_up_orchestrator,
         yield_orchestrator,
@@ -379,11 +381,16 @@ async fn main() -> anyhow::Result<()> {
                     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
                     let goal_id = goal.id;
                     let deps = state.goal_runner_deps.clone();
+                    let runners_for_cleanup = state.goal_runners.clone();
+                    let txs_for_cleanup = state.goal_cancel_txs.clone();
                     let handle = tokio::spawn(async move {
                         gateway_rs::goal_runner::run_goal_with_resume(
                             goal_id, cancel_rx, deps, resume_step,
                         )
                         .await;
+                        //ves-mem: clean up shared maps when the runner exits.
+                        runners_for_cleanup.lock().await.remove(&goal_id);
+                        txs_for_cleanup.lock().await.remove(&goal_id);
                     });
 
                     {

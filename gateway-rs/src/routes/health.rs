@@ -30,10 +30,7 @@ async fn health_check(State(state): State<AppState>) -> Json<serde_json::Value> 
 ///get /api/health — aggregated health from gateway + nullboiler + keymaster
 ///(called from proxy router, path is "/health" under the /api nest)
 pub async fn api_health_aggregate(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap_or_default();
+    let client = state.http_client.clone();
 
     let services = [
         ("gateway", format!("http://127.0.0.1:{}/health", state.config.port)),

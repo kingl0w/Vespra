@@ -294,8 +294,13 @@ async fn alchemy_webhook(
                     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
                     let goal_id = goal.id;
                     let deps = state.goal_runner_deps.clone();
+                    let runners_for_cleanup = state.goal_runners.clone();
+                    let txs_for_cleanup = state.goal_cancel_txs.clone();
                     let handle = tokio::spawn(async move {
                         crate::goal_runner::run_goal(goal_id, cancel_rx, deps).await;
+                        //ves-mem: clean up shared maps when the runner exits.
+                        runners_for_cleanup.lock().await.remove(&goal_id);
+                        txs_for_cleanup.lock().await.remove(&goal_id);
                     });
 
                     {

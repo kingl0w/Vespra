@@ -42,10 +42,7 @@ async fn yield_protocols(
     }
 
     //fetch pools from defi llama
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .unwrap_or_default();
+    let client = state.http_client.clone();
 
     let resp = match client.get("https://yields.llama.fi/pools").send().await {
         Ok(r) => r,
@@ -261,7 +258,7 @@ async fn yield_positions(
 ) -> Json<serde_json::Value> {
     //resolve wallet label/id to address via keymaster
     let address = match aave::resolve_wallet_address(
-        &reqwest::Client::new(),
+        &state.http_client,
         &state.config.keymaster_url,
         &state.config.keymaster_token,
         &params.wallet,
@@ -285,7 +282,7 @@ async fn yield_positions(
             &address,
             &state.config.keymaster_url,
             &state.config.keymaster_token,
-            &reqwest::Client::new(),
+            &state.http_client,
         )
         .await
     {
@@ -320,7 +317,7 @@ async fn yield_analyze(
 ) -> Json<serde_json::Value> {
     //resolve wallet label/id to address
     let address = match aave::resolve_wallet_address(
-        &reqwest::Client::new(),
+        &state.http_client,
         &state.config.keymaster_url,
         &state.config.keymaster_token,
         &body.wallet,

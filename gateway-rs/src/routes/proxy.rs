@@ -89,7 +89,7 @@ async fn api_proxy_handler(
     };
 
     //build upstream request
-    let client = reqwest::Client::new();
+    let client = state.http_client.clone();
     let mut upstream_req = match method {
         Method::GET => client.get(&url),
         Method::POST => client.post(&url),
