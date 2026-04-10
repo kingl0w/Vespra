@@ -1,0 +1,6 @@
+nullboiler.db
+.zig-cache/
+zig-out/
+deps/sqlite/sqlite3.c
+deps/sqlite/sqlite3.h
+deps/sqlite/sqlite3ext.h
