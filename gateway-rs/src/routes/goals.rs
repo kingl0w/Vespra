@@ -238,6 +238,29 @@ Extract these fields from the text:\n\
 Respond with ONLY valid JSON matching this schema, no prose:\n\
 {\"capital_eth\": float, \"target_gain_pct\": float, \"stop_loss_pct\": float, \"strategy\": string, \"chain\": string}";
 
+fn classify_by_keyword(raw_goal: &str) -> Option<GoalStrategy> {
+    let lower = raw_goal.to_lowercase();
+    // yield_rotate keywords — checked first
+    for kw in &["earn yield", "yield farm", "yield", "rotate"] {
+        if lower.contains(kw) {
+            return Some(GoalStrategy::YieldRotate);
+        }
+    }
+    // compound keywords
+    for kw in &["compound", "reinvest", "auto-compound"] {
+        if lower.contains(kw) {
+            return Some(GoalStrategy::Compound);
+        }
+    }
+    // snipe keywords
+    for kw in &["snipe", "new pool", "new pair", "launch"] {
+        if lower.contains(kw) {
+            return Some(GoalStrategy::Snipe);
+        }
+    }
+    None
+}
+
 async fn parse_goal_via_llm(
     llm: &dyn AgentClient,
     raw_goal: &str,
@@ -260,15 +283,22 @@ async fn parse_goal_via_llm(
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
 
-    let strategy_str = val
-        .get("strategy")
-        .and_then(|v| v.as_str())
-        .unwrap_or("adaptive");
-    let strategy = match strategy_str {
-        "compound" => GoalStrategy::Compound,
-        "yield_rotate" => GoalStrategy::YieldRotate,
-        "snipe" => GoalStrategy::Snipe,
-        _ => GoalStrategy::Adaptive,
+    let strategy = if let Some(kw_strategy) = classify_by_keyword(raw_goal) {
+        tracing::info!("[goals] strategy classified by keyword: {:?}", kw_strategy);
+        kw_strategy
+    } else {
+        let strategy_str = val
+            .get("strategy")
+            .and_then(|v| v.as_str())
+            .unwrap_or("adaptive");
+        let llm_strategy = match strategy_str {
+            "compound" => GoalStrategy::Compound,
+            "yield_rotate" => GoalStrategy::YieldRotate,
+            "snipe" => GoalStrategy::Snipe,
+            _ => GoalStrategy::Adaptive,
+        };
+        tracing::info!("[goals] strategy classified by LLM: {:?}", llm_strategy);
+        llm_strategy
     };
 
     Ok(GoalSpec {
