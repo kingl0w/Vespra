@@ -1067,6 +1067,16 @@ where
         match f().await {
             Ok(val) => return Ok(val),
             Err(e) => {
+                let msg = e.to_string().to_lowercase();
+                let permanent = msg.contains("chain not found")
+                    || msg.contains("no rpc_url")
+                    || msg.contains("unsupported chain");
+                if permanent {
+                    tracing::warn!(
+                        "[goal {goal_id}] {step} permanent failure — not retrying: {e}"
+                    );
+                    return Err(e);
+                }
                 tracing::warn!(
                     "[goal {goal_id}] {step} attempt {attempt}/{MAX_RETRIES} failed: {e}"
                 );

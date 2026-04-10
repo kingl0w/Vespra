@@ -421,6 +421,19 @@ async fn create_goal(
         }
     };
 
+    // Extract the user's literal ETH amount from the raw goal text before the LLM
+    // has a chance to pre-clamp it against wallet context.
+    let user_stated_eth: Option<f64> = {
+        let words: Vec<&str> = body.raw_goal.split_whitespace().collect();
+        words.windows(2).find_map(|pair| {
+            if pair[1].eq_ignore_ascii_case("ETH") {
+                pair[0].parse::<f64>().ok()
+            } else {
+                None
+            }
+        })
+    };
+
     let mut goal = match parse_goal_via_llm(
         state.llm.as_ref(),
         &body.raw_goal,
@@ -440,6 +453,11 @@ async fn create_goal(
             );
         }
     };
+    tracing::info!(
+        "[goals] LLM parsed capital_eth={} from raw_goal={:?} (user_stated_eth={:?})",
+        goal.capital_eth, body.raw_goal, user_stated_eth
+    );
+
     if !(goal.capital_eth > 0.0) {
         return (
             StatusCode::BAD_REQUEST,
@@ -454,6 +472,7 @@ async fn create_goal(
     //hallucinates a large default (e.g. 1.0 ETH for "compound my ETH")
     //can't trip the keymaster CapExceeded check downstream. uses 90% of
     //the cap to leave headroom for fees and slippage.
+    let original_capital_eth = goal.capital_eth;
     if let Some(cap) = resolved.cap_eth {
         let ceiling = cap * 0.9;
         if goal.capital_eth > ceiling {
@@ -508,14 +527,23 @@ async fn create_goal(
                         goal.capital_eth,
                         balance_eth
                     );
+                    let stated = user_stated_eth.unwrap_or(original_capital_eth);
+                    let detail = if stated > goal.capital_eth {
+                        format!(
+                            "insufficient wallet balance — you requested {:.4} ETH (clamped to {:.4} ETH by wallet cap), but wallet holds {:.4} ETH (reserve: {:.3} ETH)",
+                            stated, goal.capital_eth, balance_eth, GAS_RESERVE_ETH
+                        )
+                    } else {
+                        format!(
+                            "insufficient wallet balance — requested {:.4} ETH but wallet holds {:.4} ETH (reserve: {:.3} ETH)",
+                            goal.capital_eth, balance_eth, GAS_RESERVE_ETH
+                        )
+                    };
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(serde_json::json!({
                             "status": "error",
-                            "error": format!(
-                                "insufficient wallet balance — requested {:.4} ETH but wallet holds {:.4} ETH (reserve: {:.3} ETH)",
-                                goal.capital_eth, balance_eth, GAS_RESERVE_ETH
-                            )
+                            "error": detail
                         })),
                     );
                 }
