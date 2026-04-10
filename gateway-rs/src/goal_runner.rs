@@ -237,6 +237,16 @@ pub async fn run_goal_with_resume(
                     let _ = update_goal_step(&deps.redis, goal_id, "SCOUTING").await;
                     continue;
                 }
+                MonitorResult::TestnetTimeout => {
+                    tracing::info!("[goal {goal_id}] testnet goal completed after monitoring period (resumed)");
+                    if let Ok(mut g) = get_goal(&deps.redis, goal_id).await {
+                        g.status = GoalStatus::Completed;
+                        g.error = Some("testnet goal completed after monitoring period".to_string());
+                        g.updated_at = Utc::now();
+                        let _ = save_goal(&deps.redis, &g).await;
+                    }
+                    break;
+                }
                 MonitorResult::ExitSignal => {
                     //exiting from resumed monitoring
                     tracing::info!("[goal {goal_id}] MONITORING → EXITING (resumed)");
@@ -653,6 +663,16 @@ pub async fn run_goal_with_resume(
                 let _ = update_goal_step(&deps.redis, goal_id, "SCOUTING").await;
                 continue;
             }
+            MonitorResult::TestnetTimeout => {
+                tracing::info!("[goal {goal_id}] testnet goal completed after monitoring period");
+                if let Ok(mut g) = get_goal(&deps.redis, goal_id).await {
+                    g.status = GoalStatus::Completed;
+                    g.error = Some("testnet goal completed after monitoring period".to_string());
+                    g.updated_at = Utc::now();
+                    let _ = save_goal(&deps.redis, &g).await;
+                }
+                break;
+            }
             MonitorResult::NoExit => continue,
             MonitorResult::ExitSignal => {
                 //fall through to step 6 — exiting
@@ -823,6 +843,7 @@ enum MonitorResult {
     ExitSignal,
     YieldRotate,
     Cancelled,
+    TestnetTimeout,
     NoExit,
 }
 
@@ -886,13 +907,23 @@ async fn run_monitoring_loop(
         //ves-94: testnet chains have no real price feeds (defillama returns
         //0 for sepolia tokens), which would otherwise trip the price-zero
         //abort below and kill every testnet goal at the start of monitoring.
-        //on testnet, skip pnl evaluation entirely — keep the monitoring loop
-        //running so the goal stays in MONITORING and can exit via cancel,
-        //yield rotation, or external sentinel pub/sub signals.
+        //on testnet, skip pnl evaluation — instead use a time-based
+        //completion: after TESTNET_MONITOR_TIMEOUT_MINUTES, complete the goal.
         let chain_lc = position.chain.to_lowercase();
         if chain_lc.contains("sepolia") || chain_lc.contains("testnet") {
+            let timeout_mins = deps.config.testnet_monitor_timeout_minutes;
+            let elapsed = Utc::now().signed_duration_since(goal.updated_at);
+            let elapsed_mins = elapsed.num_seconds().max(0) as u64 / 60;
+
+            if elapsed_mins >= timeout_mins {
+                tracing::info!(
+                    "[goal {goal_id}] testnet monitoring period complete ({elapsed_mins}m >= {timeout_mins}m)"
+                );
+                return MonitorResult::TestnetTimeout;
+            }
+
             tracing::info!(
-                "[goal {goal_id}] testnet chain detected, skipping price evaluation"
+                "[goal {goal_id}] testnet chain detected, skipping price evaluation ({elapsed_mins}m / {timeout_mins}m)"
             );
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(MONITOR_INTERVAL_SECS)) => {}

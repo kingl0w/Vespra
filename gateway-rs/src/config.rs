@@ -43,6 +43,7 @@ fn default_yield_providers() -> String { "defillama".into() }
 fn default_yield_min_tvl_usd() -> f64 { 500_000.0 }
 fn default_yield_min_apy() -> f64 { 1.0 }
 fn default_yield_top_n() -> usize { 20 }
+fn default_testnet_monitor_timeout_minutes() -> u64 { 5 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GatewayConfig {
@@ -154,6 +155,8 @@ pub struct GatewayConfig {
     pub rate_limit_wallet_create_rph: u32,
     #[serde(default = "default_rate_limit_tx_send_rph")]
     pub rate_limit_tx_send_rph: u32,
+    #[serde(default = "default_testnet_monitor_timeout_minutes")]
+    pub testnet_monitor_timeout_minutes: u64,
     #[serde(default)]
     pub rpc_url_override: Option<String>,
     #[serde(default)]

@@ -140,15 +140,34 @@ impl SentinelMonitor {
             }
 
             //ves-94: testnet chains have no real price feeds — defillama
-            //returns 0 for sepolia tokens, which would otherwise trip the
-            //price-zero abort below and kill every testnet goal. on testnet,
-            //skip pnl evaluation entirely and let the goal keep monitoring.
+            //returns 0 for sepolia tokens. on testnet, use time-based
+            //completion instead of price evaluation.
             let chain_lc = goal.chain.to_lowercase();
             if chain_lc.contains("sepolia") || chain_lc.contains("testnet") {
-                tracing::info!(
-                    "[sentinel] goal {} testnet chain detected, skipping price evaluation",
-                    goal.id
-                );
+                let timeout_mins: u64 = std::env::var("VESPRA_TESTNET_MONITOR_TIMEOUT_MINUTES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(5);
+                let elapsed = Utc::now().signed_duration_since(goal.updated_at);
+                let elapsed_mins = elapsed.num_seconds().max(0) as u64 / 60;
+
+                if elapsed_mins >= timeout_mins {
+                    tracing::info!(
+                        "[sentinel] goal {} testnet monitoring period complete ({elapsed_mins}m >= {timeout_mins}m) — completing",
+                        goal.id
+                    );
+                    complete_goal_inline(
+                        redis,
+                        goal.id,
+                        "testnet goal completed after monitoring period",
+                    )
+                    .await;
+                } else {
+                    tracing::info!(
+                        "[sentinel] goal {} testnet chain detected, skipping price evaluation ({elapsed_mins}m / {timeout_mins}m)",
+                        goal.id
+                    );
+                }
                 continue;
             }
 
@@ -320,6 +339,18 @@ impl SentinelMonitor {
 }
 
 //── helpers ────────────────────────────────────────────────────
+
+async fn complete_goal_inline(redis: &Arc<redis::Client>, goal_id: Uuid, reason: &str) {
+    tracing::info!("[sentinel] goal {goal_id} COMPLETED: {reason}");
+    if let Ok(mut goal) = get_goal(redis, goal_id).await {
+        goal.status = GoalStatus::Completed;
+        goal.error = Some(reason.to_string());
+        goal.updated_at = Utc::now();
+        if let Err(e) = save_goal(redis, &goal).await {
+            tracing::warn!("[sentinel] failed to persist Completed status for goal {goal_id}: {e}");
+        }
+    }
+}
 
 async fn fail_goal_inline(redis: &Arc<redis::Client>, goal_id: Uuid, error: &str) {
     tracing::error!("[sentinel] goal {goal_id} FAILED: {error}");
