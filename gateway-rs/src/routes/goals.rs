@@ -437,11 +437,31 @@ async fn create_goal(
         }
     }
 
-    let rpc_url = state
-        .chain_registry
-        .get(&goal.chain)
-        .map(|c| c.rpc_url.clone())
-        .unwrap_or_default();
+    //── constraint: chain must be in the registry ─────────────────
+    let chain_config = match state.chain_registry.get(&goal.chain) {
+        Some(c) => c,
+        None => {
+            let configured: Vec<String> = state
+                .chain_registry
+                .available()
+                .iter()
+                .map(|c| c.name.clone())
+                .collect();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!(
+                        "chain '{}' is not supported. Configured chains: {}",
+                        goal.chain,
+                        configured.join(", ")
+                    )
+                })),
+            );
+        }
+    };
+
+    let rpc_url = chain_config.rpc_url.clone();
     if rpc_url.is_empty() {
         tracing::warn!(
             "balance check skipped for wallet {} — no rpc_url for chain '{}'",
