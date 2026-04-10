@@ -139,6 +139,19 @@ impl SentinelMonitor {
                 active.insert(goal.id);
             }
 
+            //ves-94: testnet chains have no real price feeds — defillama
+            //returns 0 for sepolia tokens, which would otherwise trip the
+            //price-zero abort below and kill every testnet goal. on testnet,
+            //skip pnl evaluation entirely and let the goal keep monitoring.
+            let chain_lc = goal.chain.to_lowercase();
+            if chain_lc.contains("sepolia") || chain_lc.contains("testnet") {
+                tracing::info!(
+                    "[sentinel] goal {} testnet chain detected, skipping price evaluation",
+                    goal.id
+                );
+                continue;
+            }
+
             //ves-fix: use the goal's tracked token address; fall back to the
             //chain's native (wrapped) token if the goal hasn't recorded one yet.
             //previously this passed goal.id.to_string() (a uuid) which the

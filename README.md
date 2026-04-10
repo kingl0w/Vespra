@@ -138,35 +138,28 @@ git clone https://github.com/your-org/vespra.git
 cd vespra
 
 cp .env.example .env
-# edit .env — at minimum fill in:
-#   LLM_API_KEY=...
-#   ALCHEMY_API_KEY=...
-#   PARASWAP_MODE=true   (or ONEINCH_API_KEY=...)
-#   KEYMASTER_MASTER_PASSWORD=something-long-and-random
+# edit .env — at minimum fill in these three:
+#   VESPRA_MASTER_PASSWORD=something-long-and-random   (>=16 chars)
+#   VESPRA_KM_AUTH_TOKEN=$(openssl rand -base64 32)
+#   LLM_API_KEY=sk-...
 
 docker compose up -d
 
-# wait 10 seconds, then verify everything came up
+# wait ~30 seconds for the Rust services to build the first time
 curl http://localhost:9001/health
 curl http://localhost:9100/health
 ```
 
 The dashboard is at <http://localhost:9200>.
 
-The first time keymaster boots, it generates a bearer token and prints it to its logs. Grab it:
-
-```bash
-docker compose logs keymaster | grep AUTH_TOKEN
-```
-
-Paste that token into `.env` as `KEYMASTER_BEARER_TOKEN`, then `docker compose restart gateway`.
+`VESPRA_KM_AUTH_TOKEN` is shared between keymaster (which enforces it) and gateway (which presents it on every call). Generate one once and put it in `.env` before `docker compose up` — both services read the same value.
 
 ### Creating a wallet
 
 The dashboard has a setup wizard. Or via curl:
 
 ```bash
-TOKEN=$(grep KEYMASTER_BEARER_TOKEN .env | cut -d= -f2-)
+TOKEN=$(grep VESPRA_KM_AUTH_TOKEN .env | cut -d= -f2-)
 
 curl -X POST http://localhost:9100/wallets \
   -H "Content-Type: application/json" \
@@ -209,15 +202,16 @@ Most of the env vars in `.env` have sensible defaults. The ones you'll probably 
 |---|---|---|
 | `LLM_PROVIDER` | `deepseek`, `openai`, or `anthropic` | `deepseek` |
 | `LLM_MODEL` | model name | `deepseek-chat` |
-| `PARASWAP_MODE` | use ParaSwap (no API key) for quotes | `false` |
-| `ONEINCH_API_KEY` | alternative to ParaSwap | unset |
+| `VESPRA_PARASWAP_MODE` | use ParaSwap (no API key) for quotes | `true` |
+| `VESPRA_ONEINCH_API_KEY` | alternative to ParaSwap | unset |
 | `RPC_URL_BASE` | RPC for Base mainnet | unset |
 | `RPC_URL_BASE_SEPOLIA` | RPC for Base Sepolia testnet | unset |
 | `RPC_URL_ARBITRUM` | RPC for Arbitrum | unset |
 | `VESPRA_AUTO_EXECUTE_ENABLED` | actually broadcast txs (vs dry-run) | `false` |
 | `SENTINEL_INTERVAL_SECS` | how often the sentinel polls | `300` |
 | `YIELD_CHECK_INTERVAL_SECS` | how often the yield scheduler runs | `1800` |
-| `VESPRA_KM_AUTH_TOKEN` | bearer token for keymaster | auto-generated |
+| `VESPRA_KM_AUTH_TOKEN` | bearer token for keymaster (shared with gateway) | required |
+| `VESPRA_MASTER_PASSWORD` | encrypts the keystore (>=16 chars) | required |
 
 RPC URLs follow the pattern `RPC_URL_{CHAIN}` — the suffix is lowercased and used as the chain key. So `RPC_URL_BASE_SEPOLIA` populates the `base_sepolia` chain, `RPC_URL_ARBITRUM` populates `arbitrum`, etc.
 

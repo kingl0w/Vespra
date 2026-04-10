@@ -102,6 +102,16 @@ impl QuoteFetcher {
         amount_in_wei: &str,
         chain_id: u64,
     ) -> anyhow::Result<SwapQuote> {
+        //ves-94: paraswap/1inch don't index testnet pools; "no route" responses
+        //fail the TRADING step. on sepolia chains use the simulated quote so
+        //the goal can progress through trading and into monitoring.
+        if is_testnet_chain_id(chain_id) {
+            tracing::info!(
+                "testnet chain {chain_id} detected — using simulated quote (no DEX coverage on testnets)"
+            );
+            return Ok(self.fallback_quote(token_in, token_out, amount_in_wei));
+        }
+
         if self.paraswap_mode {
             return self
                 .fetch_paraswap_quote(token_in, token_out, amount_in_wei, chain_id)
@@ -269,6 +279,19 @@ impl QuoteFetcher {
             route: "simulated".into(),
         }
     }
+}
+
+///ves-94: well-known sepolia/testnet evm chain ids. dex aggregators
+///(1inch, paraswap) don't index these, so route lookups always fail.
+fn is_testnet_chain_id(chain_id: u64) -> bool {
+    matches!(
+        chain_id,
+        11155111  //ethereum sepolia
+        | 84532   //base sepolia
+        | 11155420//optimism sepolia
+        | 421614  //arbitrum sepolia
+        | 80002   //polygon amoy
+    )
 }
 
 fn calc_price_impact(amount_in_wei: &str, amount_out_wei: &str) -> f64 {

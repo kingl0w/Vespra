@@ -883,6 +883,40 @@ async fn run_monitoring_loop(
             }
         }
 
+        //ves-94: testnet chains have no real price feeds (defillama returns
+        //0 for sepolia tokens), which would otherwise trip the price-zero
+        //abort below and kill every testnet goal at the start of monitoring.
+        //on testnet, skip pnl evaluation entirely — keep the monitoring loop
+        //running so the goal stays in MONITORING and can exit via cancel,
+        //yield rotation, or external sentinel pub/sub signals.
+        let chain_lc = position.chain.to_lowercase();
+        if chain_lc.contains("sepolia") || chain_lc.contains("testnet") {
+            tracing::info!(
+                "[goal {goal_id}] testnet chain detected, skipping price evaluation"
+            );
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(MONITOR_INTERVAL_SECS)) => {}
+                _ = cancel_rx.changed() => {}
+                signal = sentinel_rx.recv() => {
+                    if let Some(signal) = signal {
+                        tracing::info!("[goal {goal_id}] sentinel pub/sub exit: {} — {}", signal.signal, signal.reason);
+                        exit_signal = true;
+                        break;
+                    }
+                }
+                rotation = yield_rx.recv() => {
+                    if let Some(rotation) = rotation {
+                        if matches!(goal.strategy, GoalStrategy::YieldRotate | GoalStrategy::Adaptive) {
+                            tracing::info!("[goal {goal_id}] yield rotation (testnet): {} → {} (Δ{:.2}%)", rotation.from_protocol, rotation.to_protocol, rotation.delta_apy);
+                            yield_rotate_signal = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
         let current_price = deps
             .price_oracle
             .fetch(&position.token_address, &position.chain)
