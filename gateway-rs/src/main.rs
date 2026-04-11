@@ -367,13 +367,33 @@ async fn main() -> anyhow::Result<()> {
                             Some(gateway_rs::goal_runner::GoalStep::Monitoring)
                         }
                         "EXECUTING" => {
-                            from_monitoring += 1;
-                            tracing::warn!(
-                                "[boot] goal {} crashed mid-execution, resuming from MONITORING \
-                                 - verify position manually",
-                                goal.id
-                            );
-                            Some(gateway_rs::goal_runner::GoalStep::Monitoring)
+                            //ves-fix: if token_address is already persisted the BUY
+                            //landed before the crash — safe to skip to MONITORING.
+                            //otherwise the BUY never recorded, so re-enter the goal
+                            //loop from the top (scouting → … → executing) and let
+                            //token_address serve as the idempotency guard against
+                            //double-spend.
+                            match goal.token_address.as_deref() {
+                                Some(addr) if !addr.is_empty() => {
+                                    from_monitoring += 1;
+                                    tracing::info!(
+                                        "[boot] goal {} crashed mid-execution but BUY \
+                                         already recorded (token={}), resuming from MONITORING",
+                                        goal.id, addr
+                                    );
+                                    Some(gateway_rs::goal_runner::GoalStep::Monitoring)
+                                }
+                                _ => {
+                                    from_scouting += 1;
+                                    tracing::warn!(
+                                        "[boot] goal {} crashed mid-execution with no \
+                                         persisted token_address — re-entering EXECUTING \
+                                         from the top to re-attempt BUY",
+                                        goal.id
+                                    );
+                                    None
+                                }
+                            }
                         }
                         _ => {
                             //scouting, risk, trading, or unknown → start from beginning

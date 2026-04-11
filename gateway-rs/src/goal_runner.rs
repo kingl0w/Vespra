@@ -1217,35 +1217,58 @@ mod tests {
 
     #[test]
     fn test_goal_step_resume_routing() {
-        //goals in monitoring/exiting should resume from monitoring
-        let step_monitoring = "MONITORING";
-        let step_exiting = "EXITING";
-        let step_executing = "EXECUTING";
-        let step_scouting = "SCOUTING";
-        let step_risk = "RISK";
-        let step_trading = "TRADING";
-
-        fn route_step(step: &str) -> Option<GoalStep> {
+        //monitoring/exiting always resume from monitoring; executing depends
+        //on whether token_address landed before the crash.
+        fn route_step(step: &str, token_address: Option<&str>) -> Option<GoalStep> {
             match step {
                 "MONITORING" | "EXITING" => Some(GoalStep::Monitoring),
-                "EXECUTING" => Some(GoalStep::Monitoring), // crash recovery
+                "EXECUTING" => match token_address {
+                    Some(a) if !a.is_empty() => Some(GoalStep::Monitoring),
+                    _ => None,
+                },
                 _ => None,
             }
         }
 
-        assert_eq!(route_step(step_monitoring), Some(GoalStep::Monitoring));
-        assert_eq!(route_step(step_exiting), Some(GoalStep::Monitoring));
-        assert_eq!(route_step(step_executing), Some(GoalStep::Monitoring));
-        assert_eq!(route_step(step_scouting), None);
-        assert_eq!(route_step(step_risk), None);
-        assert_eq!(route_step(step_trading), None);
+        assert_eq!(route_step("MONITORING", None), Some(GoalStep::Monitoring));
+        assert_eq!(route_step("EXITING", None), Some(GoalStep::Monitoring));
+        assert_eq!(route_step("EXECUTING", Some("0xabc")), Some(GoalStep::Monitoring));
+        assert_eq!(route_step("EXECUTING", None), None);
+        assert_eq!(route_step("EXECUTING", Some("")), None);
+        assert_eq!(route_step("SCOUTING", None), None);
+        assert_eq!(route_step("RISK", None), None);
+        assert_eq!(route_step("TRADING", None), None);
     }
 
     #[test]
-    fn test_mid_execution_crash_routes_to_monitoring() {
+    fn test_mid_execution_crash_with_no_token_restarts() {
+        //if EXECUTING crashed before token_address was persisted, the BUY
+        //never landed — re-enter the loop from the top (None).
         let crash_step = "EXECUTING";
+        let token_address: Option<&str> = None;
         let resume = match crash_step {
-            "MONITORING" | "EXITING" | "EXECUTING" => Some(GoalStep::Monitoring),
+            "MONITORING" | "EXITING" => Some(GoalStep::Monitoring),
+            "EXECUTING" => match token_address {
+                Some(a) if !a.is_empty() => Some(GoalStep::Monitoring),
+                _ => None,
+            },
+            _ => None,
+        };
+        assert_eq!(resume, None);
+    }
+
+    #[test]
+    fn test_mid_execution_crash_with_token_skips_to_monitoring() {
+        //if token_address was persisted, the BUY landed — resume monitoring
+        //and let the persisted address guard against double-spend.
+        let crash_step = "EXECUTING";
+        let token_address: Option<&str> = Some("0xdeadbeef");
+        let resume = match crash_step {
+            "MONITORING" | "EXITING" => Some(GoalStep::Monitoring),
+            "EXECUTING" => match token_address {
+                Some(a) if !a.is_empty() => Some(GoalStep::Monitoring),
+                _ => None,
+            },
             _ => None,
         };
         assert_eq!(resume, Some(GoalStep::Monitoring));
