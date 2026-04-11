@@ -77,10 +77,14 @@ pub async fn execute_traced(
         .await
     {
         Ok(r) => r,
-        Err(e) => {
-            tracing::error!("[exec-trace] keymaster call failed: {e}");
+        Err(_) => {
+            //ves-fix: the executor now retries transient errors internally and
+            //maps transport failures to clean, URL-free messages in
+            //ExecutorResult.error, so this branch is only hit on logic bugs.
+            //keep a generic message to avoid leaking internal details.
+            tracing::error!("[exec-trace] unexpected executor error");
             return TxStatus::Failed {
-                error: format!("keymaster error: {e}"),
+                error: "swap service request failed".to_string(),
             };
         }
     };

@@ -561,67 +561,93 @@ pub async fn run_goal_with_resume(
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
         }
 
-        //ves-91: use the wallet uuid cached at goal-runner start. never
-        //re-resolve mid-lifecycle — that's the bug this fix prevents.
-        let buy_tx_status = execution_gate::execute_traced(
-            &deps.executor,
-            &deps.config,
-            &deps.chain_registry,
-            &deps.http_client,
-            cached_wallet_uuid_val,
-            &token_in,
-            &token_out,
-            &swap_amount_wei,
-            &goal.chain,
-            deps.dry_run,
-        )
-        .await;
+        //ves-fix: idempotency guard — if a prior attempt already recorded a
+        //BUY on this goal, skip re-issuing it and reuse the stored token so
+        //we can't double-spend. the retry loop inside the executor only
+        //retries transport errors that happen before the tx is broadcast, so
+        //this check is the defense-in-depth for anything that slips past the
+        //boot-time resume routing in main.rs.
+        let prior_buy: Option<(String, Option<String>)> =
+            match get_goal(&deps.redis, goal_id).await {
+                Ok(fresh) => match fresh.token_address.as_deref() {
+                    Some(addr) if !addr.is_empty() => {
+                        Some((addr.to_string(), fresh.token_amount_held.clone()))
+                    }
+                    _ => None,
+                },
+                Err(_) => None,
+            };
 
-        match &buy_tx_status {
-            TxStatus::Confirmed { tx_hash, .. } => {
-                tracing::info!("[goal {goal_id}] BUY confirmed, tx={tx_hash}");
-            }
-            TxStatus::DryRun { .. } => {
-                tracing::info!("[goal {goal_id}] BUY dry-run complete");
-            }
-            TxStatus::Reverted { tx_hash, .. } => {
-                fail_goal(&deps.redis, goal_id, &format!("BUY tx reverted: {tx_hash}")).await;
-                break;
-            }
-            TxStatus::Timeout { tx_hash, .. } => {
-                fail_goal(&deps.redis, goal_id, &format!("BUY tx timeout: {tx_hash}")).await;
-                break;
-            }
-            TxStatus::Failed { error } => {
-                fail_goal(&deps.redis, goal_id, &format!("BUY failed: {error}")).await;
-                break;
-            }
-        }
+        let (token_out, token_amount_out) = if let Some((addr, amt)) = prior_buy {
+            tracing::warn!(
+                "[goal {goal_id}] BUY already recorded (token={addr}) — skipping BUY and advancing to MONITORING"
+            );
+            (addr, amt)
+        } else {
+            //ves-91: use the wallet uuid cached at goal-runner start. never
+            //re-resolve mid-lifecycle — that's the bug this fix prevents.
+            let buy_tx_status = execution_gate::execute_traced(
+                &deps.executor,
+                &deps.config,
+                &deps.chain_registry,
+                &deps.http_client,
+                cached_wallet_uuid_val,
+                &token_in,
+                &token_out,
+                &swap_amount_wei,
+                &goal.chain,
+                deps.dry_run,
+            )
+            .await;
 
-        let token_amount_out = deps
-            .quote_fetcher
-            .fetch_quote(&token_in, &token_out, &swap_amount_wei, chain_id)
-            .await
-            .ok()
-            .map(|q| q.amount_out_wei)
-            .filter(|s| !s.is_empty() && s != "0");
-        match token_amount_out.as_ref() {
-            Some(amt) => tracing::info!(
-                "[goal {goal_id}] recording token_amount_held={} for token={}",
-                amt, token_out
-            ),
-            None => tracing::warn!(
-                "[goal {goal_id}] could not determine token_amount_held after BUY — SELL will fail-fast"
-            ),
-        }
-        if let Ok(mut g) = get_goal(&deps.redis, goal_id).await {
-            g.token_address = Some(token_out.clone());
-            g.token_amount_held = token_amount_out.clone();
-            g.updated_at = Utc::now();
-            if let Err(e) = save_goal(&deps.redis, &g).await {
-                tracing::warn!("[goal {goal_id}] failed to persist token_address/amount: {e}");
+            match &buy_tx_status {
+                TxStatus::Confirmed { tx_hash, .. } => {
+                    tracing::info!("[goal {goal_id}] BUY confirmed, tx={tx_hash}");
+                }
+                TxStatus::DryRun { .. } => {
+                    tracing::info!("[goal {goal_id}] BUY dry-run complete");
+                }
+                TxStatus::Reverted { tx_hash, .. } => {
+                    fail_goal(&deps.redis, goal_id, &format!("BUY tx reverted: {tx_hash}")).await;
+                    break;
+                }
+                TxStatus::Timeout { tx_hash, .. } => {
+                    fail_goal(&deps.redis, goal_id, &format!("BUY tx timeout: {tx_hash}")).await;
+                    break;
+                }
+                TxStatus::Failed { error } => {
+                    fail_goal(&deps.redis, goal_id, &format!("BUY failed: {error}")).await;
+                    break;
+                }
             }
-        }
+
+            let token_amount_out = deps
+                .quote_fetcher
+                .fetch_quote(&token_in, &token_out, &swap_amount_wei, chain_id)
+                .await
+                .ok()
+                .map(|q| q.amount_out_wei)
+                .filter(|s| !s.is_empty() && s != "0");
+            match token_amount_out.as_ref() {
+                Some(amt) => tracing::info!(
+                    "[goal {goal_id}] recording token_amount_held={} for token={}",
+                    amt, token_out
+                ),
+                None => tracing::warn!(
+                    "[goal {goal_id}] could not determine token_amount_held after BUY — SELL will fail-fast"
+                ),
+            }
+            if let Ok(mut g) = get_goal(&deps.redis, goal_id).await {
+                g.token_address = Some(token_out.clone());
+                g.token_amount_held = token_amount_out.clone();
+                g.updated_at = Utc::now();
+                if let Err(e) = save_goal(&deps.redis, &g).await {
+                    tracing::warn!("[goal {goal_id}] failed to persist token_address/amount: {e}");
+                }
+            }
+
+            (token_out.clone(), token_amount_out)
+        };
 
         if *cancel_rx.borrow() { continue; }
 
