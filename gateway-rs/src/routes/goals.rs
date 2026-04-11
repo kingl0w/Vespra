@@ -153,7 +153,6 @@ async fn resolve_wallet_info(
             let cap_eth = w["cap_wei"]
                 .as_str()
                 .and_then(|s| s.parse::<u128>().ok())
-                .filter(|c| *c > 0)
                 .map(|c| c as f64 / 1e18);
             return Ok(ResolvedWallet { id, address, cap_eth });
         }
@@ -420,6 +419,16 @@ async fn create_goal(
             );
         }
     };
+
+    if resolved.cap_eth == Some(0.0) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": "wallet cap is set to zero — no spending allowed on this wallet"
+            })),
+        );
+    }
 
     // Extract the user's literal ETH amount from the raw goal text before the LLM
     // has a chance to pre-clamp it against wallet context.
