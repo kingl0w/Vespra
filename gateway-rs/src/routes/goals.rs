@@ -333,6 +333,7 @@ async fn parse_goal_via_llm(
         created_at: now,
         updated_at: now,
         error: None,
+        failed_at_step: None,
     })
 }
 
@@ -796,6 +797,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             error: None,
+            failed_at_step: None,
         }
     }
 
@@ -908,6 +910,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             error: None,
+            failed_at_step: None,
         };
 
         //save
