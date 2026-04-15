@@ -235,12 +235,13 @@ async fn alchemy_webhook(
 
             let custody_label = state.config.default_custody.clone();
             if let Some(existing_id) =
-                wallet_has_active_goal(&state.redis, &custody_label).await
+                wallet_has_active_goal(&state.redis, &custody_label, &chain).await
             {
                 tracing::info!(
-                    "[sniper] auto-entry rejected — wallet {} already has active goal {} (pool {})",
+                    "[sniper] auto-entry rejected — wallet {} already has active goal {} on chain {} (pool {})",
                     custody_label,
                     existing_id,
+                    chain,
                     pool_address
                 );
                 //drop the guard before continuing the loop so the next pool
