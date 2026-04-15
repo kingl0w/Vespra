@@ -167,18 +167,26 @@ async fn resolve_wallet_info(
 ///this much native eth for transaction fees.
 pub const GAS_RESERVE_ETH: f64 = 0.005;
 
+///ves: returns the id of an active goal on `wallet_label` + `chain`, if any.
+///concurrency is scoped per (wallet, chain) so a single wallet can run
+///goals on Base and Arbitrum simultaneously without colliding.
 pub async fn wallet_has_active_goal(
     redis: &redis::Client,
     wallet_label: &str,
+    chain: &str,
 ) -> Option<Uuid> {
     let goals = list_goals(redis).await.ok()?;
     let label_lower = wallet_label.to_lowercase();
+    let chain_lower = chain.to_lowercase();
     goals.into_iter().find_map(|g| {
         let active = matches!(
             g.status,
             GoalStatus::Pending | GoalStatus::Running | GoalStatus::Paused
         );
-        if active && g.wallet_label.to_lowercase() == label_lower {
+        if active
+            && g.wallet_label.to_lowercase() == label_lower
+            && g.chain.to_lowercase() == chain_lower
+        {
             Some(g.id)
         } else {
             None
@@ -363,26 +371,10 @@ async fn create_goal(
 
     let _create_guard = state.goal_creation_lock.lock().await;
 
-    //── constraint: one active goal per wallet ────────────────────
-    if let Some(existing_id) =
-        wallet_has_active_goal(&state.redis, &body.wallet_label).await
-    {
-        tracing::info!(
-            "goal rejected — wallet {} already has active goal {}",
-            body.wallet_label,
-            existing_id
-        );
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "status": "error",
-                "error": format!(
-                    "wallet {} already has an active goal — cancel or wait for it to complete before submitting a new one",
-                    body.wallet_label
-                )
-            })),
-        );
-    }
+    //ves: the (wallet, chain) conflict check is deferred until after
+    //parse_goal_via_llm resolves the target chain. the guard above still
+    //serialises submission attempts, so moving the check later doesn't
+    //introduce a race.
 
     //── constraint: max concurrent goals ──────────────────────────
     if let Ok(running) = list_goals_by_status(&state.redis, GoalStatus::Running).await {
@@ -473,6 +465,28 @@ async fn create_goal(
             Json(serde_json::json!({
                 "status": "error",
                 "error": "capital_eth must be greater than zero"
+            })),
+        );
+    }
+
+    //── constraint: one active goal per (wallet, chain) ───────────
+    if let Some(existing_id) =
+        wallet_has_active_goal(&state.redis, &body.wallet_label, &goal.chain).await
+    {
+        tracing::info!(
+            "goal rejected — wallet {} already has active goal {} on chain {}",
+            body.wallet_label,
+            existing_id,
+            goal.chain
+        );
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": format!(
+                    "wallet {} already has an active goal on chain {} — cancel or wait for it to complete before submitting another on the same chain",
+                    body.wallet_label, goal.chain
+                )
             })),
         );
     }
@@ -801,25 +815,82 @@ mod tests {
 
     #[test]
     fn test_wallet_uniqueness_gate() {
-        //simulate: two running goals, check if wallet "safe" has an active goal
+        //same-wallet / same-chain still conflicts; other chains & other
+        //wallets do not.
         let goals = vec![
             make_goal("safe", GoalStatus::Running, GoalStrategy::Adaptive, 0.1, 0.1),
             make_goal("hot", GoalStatus::Completed, GoalStrategy::Snipe, 0.05, 0.06),
         ];
 
-        let running: Vec<_> = goals.iter().filter(|g| g.status == GoalStatus::Running).collect();
+        let active = |label: &str, chain: &str| {
+            goals.iter().find(|g| {
+                matches!(
+                    g.status,
+                    GoalStatus::Pending | GoalStatus::Running | GoalStatus::Paused
+                ) && g.wallet_label == label
+                    && g.chain == chain
+            })
+        };
 
-        //"safe" wallet has a running goal — should be rejected
-        let conflict = running.iter().find(|g| g.wallet_label == "safe");
-        assert!(conflict.is_some(), "should find active goal for wallet 'safe'");
+        //same wallet + same chain → conflict
+        assert!(active("safe", "base").is_some());
+        //same wallet + different chain → no conflict
+        assert!(active("safe", "arbitrum").is_none());
+        //completed goal doesn't count even on the same chain
+        assert!(active("hot", "base").is_none());
+        //unknown wallet → no conflict
+        assert!(active("new", "base").is_none());
+    }
 
-        //"hot" wallet has no running goal — should be allowed
-        let no_conflict = running.iter().find(|g| g.wallet_label == "hot");
-        assert!(no_conflict.is_none(), "wallet 'hot' has no running goal");
+    #[test]
+    fn test_multi_chain_allows_same_wallet() {
+        //base + arbitrum on the same wallet should both pass the per-(wallet,
+        //chain) gate.
+        let goals = vec![
+            {
+                let mut g = make_goal("shared", GoalStatus::Running, GoalStrategy::YieldRotate, 0.1, 0.1);
+                g.chain = "base_sepolia".into();
+                g
+            },
+        ];
 
-        //"new" wallet has no goals at all — should be allowed
-        let new_wallet = running.iter().find(|g| g.wallet_label == "new");
-        assert!(new_wallet.is_none());
+        let has_conflict = |chain: &str| {
+            goals.iter().any(|g| {
+                matches!(
+                    g.status,
+                    GoalStatus::Pending | GoalStatus::Running | GoalStatus::Paused
+                ) && g.wallet_label == "shared"
+                    && g.chain.eq_ignore_ascii_case(chain)
+            })
+        };
+
+        assert!(has_conflict("base_sepolia"), "base_sepolia should still conflict");
+        assert!(
+            !has_conflict("arbitrum_sepolia"),
+            "arbitrum_sepolia must not conflict with a base_sepolia goal on the same wallet"
+        );
+    }
+
+    #[test]
+    fn test_same_wallet_same_chain_still_blocks() {
+        let goals = vec![
+            {
+                let mut g = make_goal("shared", GoalStatus::Paused, GoalStrategy::Compound, 0.1, 0.1);
+                g.chain = "base_sepolia".into();
+                g
+            },
+        ];
+
+        //a paused goal on the same (wallet, chain) still blocks — paused is
+        //an active state that can be resumed.
+        let blocked = goals.iter().any(|g| {
+            matches!(
+                g.status,
+                GoalStatus::Pending | GoalStatus::Running | GoalStatus::Paused
+            ) && g.wallet_label == "shared"
+                && g.chain == "base_sepolia"
+        });
+        assert!(blocked, "paused goal on same (wallet, chain) should still block");
     }
 
     #[test]
