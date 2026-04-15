@@ -117,7 +117,7 @@ pub struct ResolvedWallet {
     pub cap_eth: Option<f64>,
 }
 
-async fn resolve_wallet_info(
+pub async fn resolve_wallet_info(
     http_client: &reqwest::Client,
     keymaster_url: &str,
     keymaster_token: &str,
