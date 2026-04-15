@@ -30,13 +30,33 @@ fn goal_key(id: &Uuid) -> String {
 
 const GOALS_INDEX_KEY: &str = "vespra:goals:index";
 
+///30-day TTL applied to terminal goal records so they age out rather than
+///accumulating forever. list_goals() already skips ids whose GET returns
+///None, so expiry is self-cleaning on the read path; the startup sweep
+///handles index-side orphans.
+const TERMINAL_GOAL_TTL_SECS: i64 = 30 * 24 * 60 * 60;
+
+fn is_terminal(status: &GoalStatus) -> bool {
+    matches!(
+        status,
+        GoalStatus::Completed | GoalStatus::Failed | GoalStatus::Cancelled
+    )
+}
+
 //── redis storage ───────────────────────────────────────────────
 
 pub async fn save_goal(redis: &redis::Client, goal: &GoalSpec) -> anyhow::Result<()> {
     let mut conn = redis.get_multiplexed_async_connection().await?;
     let json = serde_json::to_string(goal)?;
-    conn.set::<_, _, ()>(goal_key(&goal.id), &json).await?;
+    let key = goal_key(&goal.id);
+    conn.set::<_, _, ()>(&key, &json).await?;
     conn.sadd::<_, _, ()>(GOALS_INDEX_KEY, goal.id.to_string()).await?;
+    if is_terminal(&goal.status) {
+        //EXPIRE is idempotent — subsequent saves of an already-terminal goal
+        //just reset the 30-day window. keys remain visible to list_goals()
+        //until TTL fires, giving the dashboard a rolling-30-day history.
+        conn.expire::<_, ()>(&key, TERMINAL_GOAL_TTL_SECS).await?;
+    }
     Ok(())
 }
 
@@ -50,6 +70,71 @@ pub async fn get_goal(redis: &redis::Client, id: Uuid) -> anyhow::Result<GoalSpe
 ///public alias for use from main.rs boot resume.
 pub async fn list_goals_all(redis: &redis::Client) -> anyhow::Result<Vec<GoalSpec>> {
     list_goals(redis).await
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+pub struct GoalSweepReport {
+    pub scanned: usize,
+    ///index entries whose underlying key was already gone (TTL fired or
+    ///manually deleted). SREMed to keep the index truthful.
+    pub orphan_index_entries_removed: usize,
+    ///terminal goals older than the 30-day window — removed from both the
+    ///index and the key store immediately.
+    pub expired_terminal_purged: usize,
+    ///terminal goals within the 30-day window that didn't have a TTL yet
+    ///(pre-existing records from before this migration) — TTL applied.
+    pub terminal_ttl_backfilled: usize,
+}
+
+///ves: startup sweep. walks the goals index once at boot and brings every
+///entry into compliance with the 30-day terminal retention policy:
+/// - drops index entries pointing at already-expired keys
+/// - purges terminal goals older than 30d (key + index)
+/// - backfills the TTL on terminal goals that pre-date this migration
+///non-terminal goals are left untouched.
+pub async fn sweep_terminal_goals(
+    redis: &redis::Client,
+) -> anyhow::Result<GoalSweepReport> {
+    let mut conn = redis.get_multiplexed_async_connection().await?;
+    let ids: Vec<String> = conn.smembers(GOALS_INDEX_KEY).await?;
+    let mut report = GoalSweepReport { scanned: ids.len(), ..Default::default() };
+    let cutoff = Utc::now() - chrono::Duration::seconds(TERMINAL_GOAL_TTL_SECS);
+
+    for id_str in ids {
+        let key = format!("vespra:goal:{id_str}");
+        let raw: Option<String> = conn.get(&key).await.unwrap_or(None);
+        let Some(raw) = raw else {
+            //key gone but index stale — clean the index pointer.
+            let _: Result<(), _> = conn.srem::<_, _, ()>(GOALS_INDEX_KEY, &id_str).await;
+            report.orphan_index_entries_removed += 1;
+            continue;
+        };
+        let Ok(goal) = serde_json::from_str::<GoalSpec>(&raw) else {
+            //undeserializable blob — leave it alone; surfacing via logs is
+            //enough, and blind deletion risks losing a record we could
+            //recover after a schema fix.
+            tracing::warn!("[sweep] skip undeserializable goal {id_str}");
+            continue;
+        };
+        if !is_terminal(&goal.status) {
+            continue;
+        }
+        if goal.updated_at < cutoff {
+            let _: Result<(), _> = conn.srem::<_, _, ()>(GOALS_INDEX_KEY, &id_str).await;
+            let _: Result<(), _> = conn.del::<_, ()>(&key).await;
+            report.expired_terminal_purged += 1;
+        } else {
+            //EXPIRE returns 0 if no TTL was applied (already set). we can't
+            //distinguish "already had TTL" from "just set one" cheaply in
+            //async redis, so count every backfill attempt — the value is
+            //still useful as an upper bound on migration work.
+            if conn.expire::<_, ()>(&key, TERMINAL_GOAL_TTL_SECS).await.is_ok() {
+                report.terminal_ttl_backfilled += 1;
+            }
+        }
+    }
+
+    Ok(report)
 }
 
 async fn list_goals(redis: &redis::Client) -> anyhow::Result<Vec<GoalSpec>> {
@@ -941,5 +1026,168 @@ mod tests {
             .query_async(&mut conn)
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn test_is_terminal_classification() {
+        assert!(is_terminal(&GoalStatus::Completed));
+        assert!(is_terminal(&GoalStatus::Failed));
+        assert!(is_terminal(&GoalStatus::Cancelled));
+        assert!(!is_terminal(&GoalStatus::Pending));
+        assert!(!is_terminal(&GoalStatus::Running));
+        assert!(!is_terminal(&GoalStatus::Paused));
+    }
+
+    #[tokio::test]
+    async fn test_save_goal_applies_ttl_for_terminal_status() {
+        let client = match redis::Client::open("redis://127.0.0.1:6379") {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if client.get_multiplexed_async_connection().await.is_err() {
+            return;
+        }
+
+        let now = Utc::now();
+        let mut goal = GoalSpec {
+            id: Uuid::new_v4(),
+            raw_goal: "ttl test".into(),
+            wallet_label: "ttl-test".into(),
+            wallet_id: None,
+            chain: "base_sepolia".into(),
+            capital_eth: 0.01,
+            target_gain_pct: 10.0,
+            stop_loss_pct: 5.0,
+            strategy: GoalStrategy::Adaptive,
+            status: GoalStatus::Running,
+            cycles: 0,
+            current_step: "SCOUTING".into(),
+            entry_eth: 0.01,
+            current_eth: 0.01,
+            pnl_eth: 0.0,
+            pnl_pct: 0.0,
+            token_address: None,
+            token_amount_held: None,
+            resolved_wallet_uuid: None,
+            created_at: now,
+            updated_at: now,
+            error: None,
+        };
+
+        save_goal(&client, &goal).await.unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(goal_key(&goal.id))
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        //non-terminal save must NOT set a TTL.
+        assert_eq!(ttl, -1, "running goal should have no TTL");
+
+        goal.status = GoalStatus::Completed;
+        save_goal(&client, &goal).await.unwrap();
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(goal_key(&goal.id))
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(ttl > 0 && ttl <= TERMINAL_GOAL_TTL_SECS,
+            "terminal goal should have a positive TTL within the 30-day window, got {ttl}");
+
+        //cleanup
+        let _: () = redis::cmd("DEL")
+            .arg(goal_key(&goal.id)).query_async(&mut conn).await.unwrap();
+        let _: () = redis::cmd("SREM")
+            .arg(GOALS_INDEX_KEY).arg(goal.id.to_string())
+            .query_async(&mut conn).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sweep_purges_and_backfills() {
+        let client = match redis::Client::open("redis://127.0.0.1:6379") {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if client.get_multiplexed_async_connection().await.is_err() {
+            return;
+        }
+
+        let now = Utc::now();
+        let make = |status: GoalStatus, age_days: i64| {
+            let ts = now - chrono::Duration::days(age_days);
+            GoalSpec {
+                id: Uuid::new_v4(),
+                raw_goal: "sweep test".into(),
+                wallet_label: "sweep-test".into(),
+                wallet_id: None,
+                chain: "base_sepolia".into(),
+                capital_eth: 0.01, target_gain_pct: 10.0, stop_loss_pct: 5.0,
+                strategy: GoalStrategy::Adaptive,
+                status,
+                cycles: 0,
+                current_step: "SCOUTING".into(),
+                entry_eth: 0.01, current_eth: 0.01, pnl_eth: 0.0, pnl_pct: 0.0,
+                token_address: None, token_amount_held: None, resolved_wallet_uuid: None,
+                created_at: ts,
+                updated_at: ts,
+                error: None,
+            }
+        };
+
+        //recent terminal → backfilled (within 30d)
+        let recent = make(GoalStatus::Completed, 5);
+        //old terminal → purged (>30d)
+        let old = make(GoalStatus::Failed, 45);
+        //active → left alone
+        let active = make(GoalStatus::Running, 5);
+
+        //write raw so we can bypass save_goal's TTL logic and simulate a
+        //pre-migration record with no TTL.
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        for g in [&recent, &old, &active] {
+            let json = serde_json::to_string(g).unwrap();
+            let _: () = conn.set(goal_key(&g.id), &json).await.unwrap();
+            let _: () = conn.sadd(GOALS_INDEX_KEY, g.id.to_string()).await.unwrap();
+        }
+
+        //also add an orphan index entry (pointing at a non-existent key)
+        let orphan_id = Uuid::new_v4();
+        let _: () = conn.sadd(GOALS_INDEX_KEY, orphan_id.to_string()).await.unwrap();
+
+        let report = sweep_terminal_goals(&client).await.unwrap();
+        assert!(report.scanned >= 4);
+        assert!(report.orphan_index_entries_removed >= 1);
+        assert!(report.expired_terminal_purged >= 1);
+        assert!(report.terminal_ttl_backfilled >= 1);
+
+        //old terminal goal: key gone, index entry gone
+        let exists_old: i64 = redis::cmd("EXISTS").arg(goal_key(&old.id))
+            .query_async(&mut conn).await.unwrap();
+        assert_eq!(exists_old, 0, "old terminal goal should be purged");
+        let in_index_old: bool = redis::cmd("SISMEMBER").arg(GOALS_INDEX_KEY).arg(old.id.to_string())
+            .query_async(&mut conn).await.unwrap();
+        assert!(!in_index_old);
+
+        //recent terminal goal: key still present, TTL now set
+        let ttl_recent: i64 = redis::cmd("TTL").arg(goal_key(&recent.id))
+            .query_async(&mut conn).await.unwrap();
+        assert!(ttl_recent > 0);
+
+        //active goal: untouched, no TTL
+        let ttl_active: i64 = redis::cmd("TTL").arg(goal_key(&active.id))
+            .query_async(&mut conn).await.unwrap();
+        assert_eq!(ttl_active, -1);
+
+        //orphan index entry gone
+        let in_index_orphan: bool = redis::cmd("SISMEMBER").arg(GOALS_INDEX_KEY).arg(orphan_id.to_string())
+            .query_async(&mut conn).await.unwrap();
+        assert!(!in_index_orphan);
+
+        //cleanup surviving records
+        for g in [&recent, &active] {
+            let _: () = redis::cmd("DEL").arg(goal_key(&g.id)).query_async(&mut conn).await.unwrap();
+            let _: () = redis::cmd("SREM").arg(GOALS_INDEX_KEY).arg(g.id.to_string())
+                .query_async(&mut conn).await.unwrap();
+        }
     }
 }

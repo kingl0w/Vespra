@@ -331,6 +331,21 @@ async fn main() -> anyhow::Result<()> {
         historical_feed,
     };
 
+    //10a-pre. sweep terminal goals past the 30-day retention window so
+    //auto-resume (and later list_goals calls) don't pay to re-scan them.
+    match gateway_rs::routes::goals::sweep_terminal_goals(&state.redis).await {
+        Ok(report) => {
+            tracing::info!(
+                "[boot] goal sweep: scanned={}, orphans_removed={}, purged={}, ttl_backfilled={}",
+                report.scanned,
+                report.orphan_index_entries_removed,
+                report.expired_terminal_purged,
+                report.terminal_ttl_backfilled,
+            );
+        }
+        Err(e) => tracing::warn!("[boot] goal sweep failed: {e}"),
+    }
+
     //10a. auto-resume running/paused goals from previous boot
     let auto_resume = std::env::var("VESPRA_AUTO_RESUME_GOALS")
         .map(|v| v != "false" && v != "0")
