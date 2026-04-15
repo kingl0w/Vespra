@@ -1146,6 +1146,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             error: None,
+            failed_at_step: None,
         };
 
         save_goal(&client, &goal).await.unwrap();
@@ -1205,6 +1206,7 @@ mod tests {
                 created_at: ts,
                 updated_at: ts,
                 error: None,
+                failed_at_step: None,
             }
         };
 
