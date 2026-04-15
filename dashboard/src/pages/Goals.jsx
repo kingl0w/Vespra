@@ -187,7 +187,7 @@ function GoalRow({ goal, onAction, onOpen }) {
           )}
         </div>
       </td>
-      <td class="px-3 py-2 text-xs text-vespra-muted font-mono">{goal.current_step || "--"}</td>
+      <td class="px-3 py-2 text-xs text-vespra-muted font-mono">{(statusKey === "failed" ? goal.failed_at_step : null) || goal.current_step || "--"}</td>
       <td class="px-3 py-2 text-sm font-mono">{goal.entry_eth != null ? `${goal.entry_eth} ETH` : "--"}</td>
       <td class="px-3 py-2 text-sm font-mono">{goal.current_eth != null ? `${goal.current_eth} ETH` : "--"}</td>
       <td class={`px-3 py-2 text-sm font-mono ${positive ? "text-vespra-green" : "text-vespra-red"}`}>
@@ -279,7 +279,11 @@ function GoalDetailModal({ goalId, onClose }) {
 
               <section>
                 <h4 class="text-[11px] uppercase tracking-wider text-vespra-accent mb-1">Progress</h4>
-                <DetailRow label="Current Step" value={goal.current_step} mono />
+                <DetailRow
+                  label={(goal.status || "").toLowerCase() === "failed" ? "Failed At Step" : "Current Step"}
+                  value={(goal.status || "").toLowerCase() === "failed" ? (goal.failed_at_step || goal.current_step) : goal.current_step}
+                  mono
+                />
                 <DetailRow label="Cycles" value={goal.cycles} mono />
                 <DetailRow label="Entry" value={goal.entry_eth != null ? `${goal.entry_eth} ETH` : null} mono />
                 <DetailRow label="Current" value={goal.current_eth != null ? `${goal.current_eth} ETH` : null} mono />
