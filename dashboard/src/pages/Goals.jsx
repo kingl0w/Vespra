@@ -154,7 +154,7 @@ function GoalRow({ goal, onAction }) {
         </div>
       </td>
       <td class="px-3 py-2"><StatusBadge status={goal.status} /></td>
-      <td class="px-3 py-2 text-xs text-vespra-muted font-mono">{goal.current_step || "--"}</td>
+      <td class="px-3 py-2 text-xs text-vespra-muted font-mono">{(statusKey === "failed" ? goal.failed_at_step : null) || goal.current_step || "--"}</td>
       <td class="px-3 py-2 text-sm font-mono">{goal.entry_eth != null ? `${goal.entry_eth} ETH` : "--"}</td>
       <td class="px-3 py-2 text-sm font-mono">{goal.current_eth != null ? `${goal.current_eth} ETH` : "--"}</td>
       <td class={`px-3 py-2 text-sm font-mono ${positive ? "text-vespra-green" : "text-vespra-red"}`}>
