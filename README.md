@@ -4,9 +4,9 @@ Vespra is a self-hosted AI agent system that grows your crypto for you. You give
 
 It runs on your own machine. Your keys stay on your machine. There's no SaaS, no shared backend, no surprise fees.
 
-## What it actually does
+## What it does
 
-You point it at a wallet you control and tell it what you want. From there, Vespra:
+Point it at a wallet you control and tell it what you want. From there, Vespra:
 
 1. **Reads your goal** with an LLM and turns it into a structured plan (capital, target gain, stop loss, strategy, chain).
 2. **Scouts** for the best pool or token matching your goal — APY, liquidity, age, all that.
