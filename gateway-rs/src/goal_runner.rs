@@ -851,6 +851,7 @@ pub async fn run_goal_with_resume(
             );
             updated_goal.status = GoalStatus::Failed;
             updated_goal.error = Some(format!("stop loss triggered at {pnl_pct_total:.2}%"));
+            updated_goal.failed_at_step = Some(updated_goal.current_step.clone());
             let _ = save_goal(&deps.redis, &updated_goal).await;
             break;
         }
@@ -1190,6 +1191,7 @@ async fn fail_goal(redis: &redis::Client, goal_id: Uuid, error: &str) {
     if let Ok(mut goal) = get_goal(redis, goal_id).await {
         goal.status = GoalStatus::Failed;
         goal.error = Some(error.to_string());
+        goal.failed_at_step = Some(goal.current_step.clone());
         goal.updated_at = Utc::now();
         let _ = save_goal(redis, &goal).await;
     }

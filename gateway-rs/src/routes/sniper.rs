@@ -277,6 +277,7 @@ async fn alchemy_webhook(
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
                     error: None,
+                    failed_at_step: None,
                 };
 
                 if let Err(e) = save_goal(&state.redis, &goal).await {

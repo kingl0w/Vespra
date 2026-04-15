@@ -357,6 +357,7 @@ async fn fail_goal_inline(redis: &Arc<redis::Client>, goal_id: Uuid, error: &str
     if let Ok(mut goal) = get_goal(redis, goal_id).await {
         goal.status = GoalStatus::Failed;
         goal.error = Some(error.to_string());
+        goal.failed_at_step = Some(goal.current_step.clone());
         goal.updated_at = Utc::now();
         if let Err(e) = save_goal(redis, &goal).await {
             tracing::warn!("[sentinel] failed to persist Failed status for goal {goal_id}: {e}");
