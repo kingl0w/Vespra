@@ -69,6 +69,7 @@ impl SentinelMonitor {
         sentinel: Arc<SentinelAgent>,
         price_oracle: Arc<dyn PriceOracle>,
         chain_registry: Arc<ChainRegistry>,
+        telegram: Option<crate::notifications::TelegramClient>,
     ) {
         let interval_secs: u64 = std::env::var("SENTINEL_INTERVAL_SECS")
             .ok()
@@ -91,6 +92,7 @@ impl SentinelMonitor {
                 &sentinel,
                 &price_oracle,
                 &chain_registry,
+                &telegram,
             )
             .await;
 
@@ -109,6 +111,7 @@ impl SentinelMonitor {
         sentinel: &Arc<SentinelAgent>,
         price_oracle: &Arc<dyn PriceOracle>,
         chain_registry: &Arc<ChainRegistry>,
+        telegram: &Option<crate::notifications::TelegramClient>,
     ) -> anyhow::Result<()> {
         use redis::AsyncCommands;
 
@@ -162,6 +165,19 @@ impl SentinelMonitor {
                         "testnet goal completed after monitoring period",
                     )
                     .await;
+                    if let Some(tg) = telegram {
+                        let tg = tg.clone();
+                        let gid = goal.id;
+                        let label = crate::notifications::escape_markdown(&goal.wallet_label);
+                        let chain = crate::notifications::escape_markdown(&goal.chain);
+                        let msg = format!(
+                            "Goal {} completed \u{2014} wallet {}, chain {}",
+                            gid, label, chain
+                        );
+                        tokio::spawn(async move {
+                            let _ = tg.send(&msg).await;
+                        });
+                    }
                 } else {
                     tracing::info!(
                         "[sentinel] goal {} testnet chain detected, skipping price evaluation ({elapsed_mins}m / {timeout_mins}m)",
@@ -209,6 +225,7 @@ impl SentinelMonitor {
                         "invalid current_price ({}) — sentinel cannot evaluate, goal aborted",
                         current_price
                     ),
+                    telegram,
                 )
                 .await;
                 continue;
@@ -234,6 +251,7 @@ impl SentinelMonitor {
                         "invalid entry_price ({}) — sentinel cannot evaluate, goal aborted",
                         entry_price_derived
                     ),
+                    telegram,
                 )
                 .await;
                 continue;
@@ -302,6 +320,18 @@ impl SentinelMonitor {
                     sig,
                     a.reasoning
                 );
+
+                if let Some(tg) = telegram {
+                    let tg = tg.clone();
+                    let reason = crate::notifications::escape_markdown(&a.reasoning);
+                    let msg = format!(
+                        "Sentinel exit signal \u{2014} goal {}, reason: {}, price: {:.4}",
+                        goal.id, reason, current_price
+                    );
+                    tokio::spawn(async move {
+                        let _ = tg.send(&msg).await;
+                    });
+                }
             } else if let Ok(a) = &assessment {
                 tracing::debug!(
                     "[sentinel] goal {} → HOLD — {}",
@@ -352,7 +382,12 @@ async fn complete_goal_inline(redis: &Arc<redis::Client>, goal_id: Uuid, reason:
     }
 }
 
-async fn fail_goal_inline(redis: &Arc<redis::Client>, goal_id: Uuid, error: &str) {
+async fn fail_goal_inline(
+    redis: &Arc<redis::Client>,
+    goal_id: Uuid,
+    error: &str,
+    telegram: &Option<crate::notifications::TelegramClient>,
+) {
     tracing::error!("[sentinel] goal {goal_id} FAILED: {error}");
     if let Ok(mut goal) = get_goal(redis, goal_id).await {
         goal.status = GoalStatus::Failed;
@@ -361,6 +396,17 @@ async fn fail_goal_inline(redis: &Arc<redis::Client>, goal_id: Uuid, error: &str
         goal.updated_at = Utc::now();
         if let Err(e) = save_goal(redis, &goal).await {
             tracing::warn!("[sentinel] failed to persist Failed status for goal {goal_id}: {e}");
+        }
+        if let Some(tg) = telegram {
+            let tg = tg.clone();
+            let step = crate::notifications::escape_markdown(
+                goal.failed_at_step.as_deref().unwrap_or("unknown"),
+            );
+            let err = crate::notifications::escape_markdown(error);
+            let msg = format!("Goal {} failed at {} \u{2014} {}", goal_id, step, err);
+            tokio::spawn(async move {
+                let _ = tg.send(&msg).await;
+            });
         }
     }
 }

@@ -11,6 +11,7 @@ pub mod fees;
 pub mod goal_runner;
 pub mod guards;
 pub mod middleware;
+pub mod notifications;
 pub mod orchestrator;
 pub mod routes;
 pub mod sentinel_monitor;

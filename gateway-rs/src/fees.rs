@@ -68,6 +68,7 @@ pub async fn collect_exit_fee(
     http_client: &reqwest::Client,
     redis: &redis::Client,
     dry_run: bool,
+    telegram: &Option<crate::notifications::TelegramClient>,
 ) {
     let rate = fee_rate_bps();
     let fee = calculate_fee(entry_eth, current_eth, rate);
@@ -157,6 +158,18 @@ pub async fn collect_exit_fee(
             let _: Result<(), _> = conn.lpush("fees:recent", &json).await;
             let _: Result<(), _> = conn.ltrim("fees:recent", 0, 99).await;
         }
+    }
+
+    //telegram notification
+    if let Some(tg) = telegram {
+        let tg = tg.clone();
+        let msg = format!(
+            "Fee collected \u{2014} goal {}, amount: {:.6} ETH",
+            goal_id, fee
+        );
+        tokio::spawn(async move {
+            let _ = tg.send(&msg).await;
+        });
     }
 }
 

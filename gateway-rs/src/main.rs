@@ -180,6 +180,23 @@ async fn main() -> anyhow::Result<()> {
     if dry_run {
         tracing::info!("VESPRA_DRY_RUN=true — GoalRunner will skip Keymaster calls");
     }
+    let telegram = match (
+        config.telegram_bot_token.as_deref(),
+        config.telegram_chat_id.as_deref(),
+    ) {
+        (Some(token), Some(chat_id)) if !token.is_empty() && !chat_id.is_empty() => {
+            tracing::info!("telegram notifications enabled");
+            Some(gateway_rs::notifications::TelegramClient::new(
+                token.to_string(),
+                chat_id.to_string(),
+            ))
+        }
+        _ => {
+            tracing::warn!("telegram notifications disabled — VESPRA_TELEGRAM_BOT_TOKEN and/or VESPRA_TELEGRAM_CHAT_ID not set");
+            None
+        }
+    };
+
     let goal_runner_deps = gateway_rs::goal_runner::GoalRunnerDeps {
         pool_fetcher: pool_fetcher.clone(),
         protocol_fetcher: protocol_fetcher.clone(),
@@ -196,6 +213,7 @@ async fn main() -> anyhow::Result<()> {
         redis: redis_client.clone(),
         http_client: http_client.clone(),
         dry_run,
+        telegram: telegram.clone(),
     };
 
     //9. build shared kill flag + orchestrator
@@ -329,6 +347,7 @@ async fn main() -> anyhow::Result<()> {
         sentinel_monitor: Arc::new(SentinelMonitor::new()),
         yield_scheduler_status: gateway_rs::yield_scheduler::default_status(),
         historical_feed,
+        telegram,
     };
 
     //10a-pre. sweep terminal goals past the 30-day retention window so
@@ -482,6 +501,7 @@ async fn main() -> anyhow::Result<()> {
         sentinel.clone(),
         state.goal_runner_deps.price_oracle.clone(),
         state.chain_registry.clone(),
+        state.telegram.clone(),
     ));
 
     //10c. spawn yieldrotationscheduler background task
@@ -492,6 +512,19 @@ async fn main() -> anyhow::Result<()> {
         state.aave_fetcher.clone(),
         state.yield_registry.clone(),
     ));
+
+    //10d. boot notification
+    {
+        let n_chains = state.chain_registry.available().len();
+        let n_goals = state.goal_runners.lock().await.len();
+        gateway_rs::notifications::notify(
+            &state,
+            format!(
+                "Vespra gateway online \u{2014} {} chains, {} goals resumed",
+                n_chains, n_goals
+            ),
+        );
+    }
 
     let app = routes::router(state);
 
