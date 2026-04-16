@@ -228,6 +228,22 @@ Vespra is built so that nothing can lose you more money than you've explicitly a
 
 It is still your money. Start small, run on testnet first, watch the logs, and don't trust an LLM with more capital than you'd be okay losing.
 
+## Fees
+
+Vespra is **free by default** with no fees and no wallet addresses baked into the code. Self-hosted users pay nothing.
+
+If you're running a managed deployment and want to enable fees, set `FEES_ENABLED=true` in both Keymaster and Gateway `.env` files. You **must** also set `TREASURY_ADDRESS` to your own EVM wallet address. Keymaster will refuse to start if fees are enabled without a valid treasury address.
+
+When enabled:
+
+| Fee | Rate | How it works |
+|-----|------|-------------|
+| Per-transaction performance fee | 500 bps (5%) | Deducted from native sends in Keymaster before the main transaction. Below-dust amounts (< 0.0001 ETH) are skipped. |
+| AUM fee | 50 bps (0.5%) annual | Swept weekly by a background thread in Keymaster. Accrued daily, collected from the highest-balance wallet. |
+| Goal exit fee | Configurable via `FEE_RATE_BPS` (default 10 bps) | Collected by the Gateway on profitable goal exits only. No fee on losses or breakeven. |
+
+When fees are disabled (the default), no treasury transactions are created, no fee deductions happen, and the AUM sweep thread is not started.
+
 ## Project layout
 
 ```

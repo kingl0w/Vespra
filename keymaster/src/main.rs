@@ -62,6 +62,21 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     });
 
+    //validate fee config before proceeding
+    if let Err(msg) = config::validate_fee_config(&config) {
+        tracing::error!("{msg}");
+        std::process::exit(1);
+    }
+
+    if config.fees_enabled {
+        let treasury = config.treasury_address.as_deref().unwrap_or("");
+        tracing::info!(
+            "[fees] enabled — per-tx=500bps, aum=50bps annual, treasury={treasury}"
+        );
+    } else {
+        tracing::info!("[fees] disabled — running in free/self-hosted mode");
+    }
+
     let active_chains = config.active_chains();
     tracing::info!(
         chains = ?active_chains.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
@@ -123,10 +138,14 @@ async fn main() -> anyhow::Result<()> {
         })?;
 
     //aum fee sweep background task — ves-56
-    tokio::spawn(async move {
-        routes::aum_sweep_loop(aum_state).await;
-    });
-    tracing::info!("[aum_fee] sweep thread spawned (interval=7d)");
+    if config.fees_enabled {
+        tokio::spawn(async move {
+            routes::aum_sweep_loop(aum_state).await;
+        });
+        tracing::info!("[aum_fee] sweep thread spawned (interval=7d)");
+    } else {
+        tracing::info!("[aum_fee] sweep thread disabled — fees off");
+    }
 
     tracing::info!(%addr, "Vespra Keymaster listening");
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| {

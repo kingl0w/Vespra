@@ -19,8 +19,6 @@ use crate::swap;
 
 //─── treasury fee constants ──────────────────────────────────────
 
-///hardcoded treasury — swap for prod wallet before mainnet launch, then recompile.
-const TREASURY_ADDRESS: &str = "0x10d2db399137b01a814162d49b1f1ca693747c0a";
 const PERF_FEE_BPS: u64 = 500;       // 500 basis points = 5%
 const MIN_FEE_WEI: u128 = 100_000_000_000_000; // 0.0001 ETH dust threshold
 
@@ -320,8 +318,12 @@ pub async fn send_native(
         }
     };
 
-    //── treasury fee calculation ─────────────────────────────────
-    let (fee_wei, net_wei) = calculate_fee(value);
+    //── treasury fee calculation (gated by fees_enabled) ──────────
+    let (fee_wei, net_wei) = if state.config.fees_enabled {
+        calculate_fee(value)
+    } else {
+        (U256::ZERO, value)
+    };
     let fee_wei_str = fee_wei.to_string();
     let mut fee_tx_hash_str: String = String::new();
     let mut fee_sent = false;
@@ -330,18 +332,20 @@ pub async fn send_native(
     let mut pk_bytes = crypto::decrypt_key(&wallet.encrypted_key, &state.master_password)?;
 
     if !fee_wei.is_zero() {
+        let treasury = state.config.treasury_address.as_deref()
+            .expect("treasury_address must be set when fees_enabled=true");
         tracing::info!(
             wallet_id = %req.wallet_id,
             fee_wei = %fee_wei_str,
-            treasury = TREASURY_ADDRESS,
+            treasury = treasury,
             "Sending treasury fee"
         );
-        match rpc::send_native(chain, &pk_bytes, TREASURY_ADDRESS, fee_wei).await {
+        match rpc::send_native(chain, &pk_bytes, treasury, fee_wei).await {
             Ok(hash) => {
                 tracing::info!(fee_tx_hash = %hash, fee_wei = %fee_wei_str, "Treasury fee sent");
                 let _ = state.keystore.log_tx(
                     &req.wallet_id, &wallet.chain, Some(&hash),
-                    "treasury_fee", TREASURY_ADDRESS, &fee_wei_str,
+                    "treasury_fee", treasury, &fee_wei_str,
                     "confirmed", None,
                 );
                 fee_tx_hash_str = hash;
@@ -1126,6 +1130,9 @@ async fn run_aum_sweep(state: &Arc<AppState>) -> Result<(), Box<dyn std::error::
     let mut tx_hash: Option<String> = None;
     let mut swept = false;
 
+    let treasury = state.config.treasury_address.as_deref()
+        .expect("treasury_address must be set when fees_enabled=true");
+
     if accrual_wei >= MIN_AUM_SWEEP_WEI {
         if let Some((wallet_id, chain_name)) = sweep_wallet_info {
             if let Some(chain) = state.config.get_chain(chain_name) {
@@ -1137,7 +1144,7 @@ async fn run_aum_sweep(state: &Arc<AppState>) -> Result<(), Box<dyn std::error::
                                 match rpc::send_native(
                                     chain,
                                     &pk_bytes,
-                                    TREASURY_ADDRESS,
+                                    treasury,
                                     U256::from(accrual_wei),
                                 ).await {
                                     Ok(hash) => {
@@ -1150,7 +1157,7 @@ async fn run_aum_sweep(state: &Arc<AppState>) -> Result<(), Box<dyn std::error::
                                         );
                                         let _ = state.keystore.log_tx(
                                             wallet_id, chain_name, Some(&hash),
-                                            "aum_fee_sweep", TREASURY_ADDRESS,
+                                            "aum_fee_sweep", treasury,
                                             &accrual_wei.to_string(), "confirmed", None,
                                         );
                                     }
@@ -1243,6 +1250,6 @@ pub async fn fees_summary(State(state): State<Arc<AppState>>) -> impl IntoRespon
         "aum_fee_total_eth": aum_total,
         "perf_fee_total_eth": perf_total,
         "grand_total_eth": aum_total + perf_total,
-        "treasury": TREASURY_ADDRESS,
+        "treasury": state.config.treasury_address.as_deref().unwrap_or("(not set)"),
     })).into_response()
 }
