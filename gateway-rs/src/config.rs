@@ -3,6 +3,60 @@ use std::collections::HashMap;
 use figment::{Figment, providers::{Env, Format, Toml}};
 use serde::{Deserialize, Serialize};
 
+/// Deserializes a value that may arrive as a string or an integer into Option<String>.
+/// Needed because env vars like VESPRA_TELEGRAM_CHAT_ID contain numeric values that
+/// Figment parses as integers, but we store them as strings.
+fn deserialize_string_or_int<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrInt;
+
+    impl<'de> de::Visitor<'de> for StringOrInt {
+        type Value = Option<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string or integer")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            if v.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(v.to_string()))
+            }
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+            if v.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(v))
+            }
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrInt)
+}
+
 fn default_host() -> String { "127.0.0.1".into() }
 fn default_port() -> u16 { 9000 }
 fn default_redis_url() -> String { "redis://127.0.0.1:6379".into() }
@@ -163,7 +217,7 @@ pub struct GatewayConfig {
     pub rpc_urls: HashMap<String, String>,
     #[serde(default)]
     pub telegram_bot_token: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_int")]
     pub telegram_chat_id: Option<String>,
 }
 
