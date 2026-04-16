@@ -37,6 +37,7 @@ use crate::agents::AgentClient;
 use crate::agents::yield_agent::YieldAgent;
 use crate::chain::ChainRegistry;
 use crate::goal_runner::GoalRunnerDeps;
+use crate::notifications::TelegramClient;
 use crate::sentinel_monitor::SentinelMonitor;
 use crate::yield_scheduler::SharedSchedulerStatus;
 use crate::config::GatewayConfig;
@@ -81,6 +82,7 @@ pub struct AppState {
     pub sentinel_monitor: Arc<SentinelMonitor>,
     pub yield_scheduler_status: SharedSchedulerStatus,
     pub historical_feed: Arc<dyn HistoricalFeed>,
+    pub telegram: Option<TelegramClient>,
 }
 
 ///middleware: cloudflare access check

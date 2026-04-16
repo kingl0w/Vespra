@@ -15,6 +15,7 @@ async fn swarm_kill(State(state): State<AppState>) -> Json<serde_json::Value> {
     //set global kill flag
     state.kill_flag.store(true, Ordering::SeqCst);
     tracing::warn!("KILL SWITCH ACTIVATED");
+    crate::notifications::notify(&state, "Kill switch activated \u{2014} all goals paused".to_string());
 
     //collect active wallet ids and stop all loops
     let trade_up_active = state.trade_up_orchestrator.active_wallets().await;

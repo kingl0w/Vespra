@@ -69,6 +69,7 @@ impl SentinelMonitor {
         sentinel: Arc<SentinelAgent>,
         price_oracle: Arc<dyn PriceOracle>,
         chain_registry: Arc<ChainRegistry>,
+        telegram: Option<crate::notifications::TelegramClient>,
     ) {
         let interval_secs: u64 = std::env::var("SENTINEL_INTERVAL_SECS")
             .ok()
@@ -91,6 +92,7 @@ impl SentinelMonitor {
                 &sentinel,
                 &price_oracle,
                 &chain_registry,
+                &telegram,
             )
             .await;
 
@@ -109,6 +111,7 @@ impl SentinelMonitor {
         sentinel: &Arc<SentinelAgent>,
         price_oracle: &Arc<dyn PriceOracle>,
         chain_registry: &Arc<ChainRegistry>,
+        telegram: &Option<crate::notifications::TelegramClient>,
     ) -> anyhow::Result<()> {
         use redis::AsyncCommands;
 
@@ -302,6 +305,18 @@ impl SentinelMonitor {
                     sig,
                     a.reasoning
                 );
+
+                if let Some(tg) = telegram {
+                    let tg = tg.clone();
+                    let reason = crate::notifications::escape_markdown(&a.reasoning);
+                    let msg = format!(
+                        "Sentinel exit signal \u{2014} goal {}, reason: {}, price: {:.4}",
+                        goal.id, reason, current_price
+                    );
+                    tokio::spawn(async move {
+                        let _ = tg.send(&msg).await;
+                    });
+                }
             } else if let Ok(a) = &assessment {
                 tracing::debug!(
                     "[sentinel] goal {} → HOLD — {}",

@@ -161,6 +161,10 @@ pub struct GatewayConfig {
     pub rpc_url_override: Option<String>,
     #[serde(default)]
     pub rpc_urls: HashMap<String, String>,
+    #[serde(default)]
+    pub telegram_bot_token: Option<String>,
+    #[serde(default)]
+    pub telegram_chat_id: Option<String>,
 }
 
 impl GatewayConfig {
