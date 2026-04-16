@@ -33,7 +33,7 @@ impl TelegramClient {
         let body = serde_json::json!({
             "chat_id": self.chat_id,
             "text": text,
-            "parse_mode": "Markdown",
+            "parse_mode": "MarkdownV2",
         });
 
         match self.client.post(&url).json(&body).send().await {

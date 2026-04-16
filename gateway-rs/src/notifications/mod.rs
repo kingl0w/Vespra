@@ -4,7 +4,7 @@ pub use telegram::TelegramClient;
 
 use crate::routes::AppState;
 
-/// Markdown-escape characters that Telegram's MarkdownV1 treats as special.
+/// Markdown-escape characters that Telegram's MarkdownV2 treats as special.
 /// Covers: _ * [ ] ( ) ~ ` > # + - = | { } . !
 pub fn escape_markdown(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
