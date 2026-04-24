@@ -555,6 +555,29 @@ async fn create_goal(
         );
     }
 
+    //── constraint: global wallet cap across all chains ──────────
+    if let Some(cap) = state.config.max_global_wallet_value_eth {
+        let current = crate::safeguards::sum_global_wallet_value_eth(
+            &state.goal_runner_deps.wallet_fetcher,
+            &state.config.chains,
+        )
+        .await;
+        if current + goal.capital_eth > cap {
+            let msg = format!(
+                "global wallet cap exceeded: {current:.6} + {:.6} > {cap:.6} ETH",
+                goal.capital_eth
+            );
+            tracing::warn!("[goals] {msg}");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": msg,
+                })),
+            );
+        }
+    }
+
     //── constraint: one active goal per (wallet, chain) ───────────
     if let Some(existing_id) =
         wallet_has_active_goal(&state.redis, &body.wallet_label, &goal.chain).await

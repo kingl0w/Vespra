@@ -613,6 +613,15 @@ pub async fn run_goal_with_resume(
             );
             (addr, amt)
         } else {
+            //rate-limit: increment + check before each keymaster call.
+            if let Err(msg) =
+                crate::safeguards::check_tx_rate_limit(&deps.redis, deps.config.max_tx_per_hour)
+                    .await
+            {
+                fail_goal(&deps.redis, goal_id, &msg, &deps.telegram).await;
+                break;
+            }
+
             //ves-91: use the wallet uuid cached at goal-runner start. never
             //re-resolve mid-lifecycle — that's the bug this fix prevents.
             let buy_tx_status = execution_gate::execute_traced(
@@ -788,6 +797,14 @@ pub async fn run_goal_with_resume(
                 break;
             }
         };
+        //rate-limit: increment + check before each keymaster call.
+        if let Err(msg) =
+            crate::safeguards::check_tx_rate_limit(&deps.redis, deps.config.max_tx_per_hour).await
+        {
+            fail_goal(&deps.redis, goal_id, &msg, &deps.telegram).await;
+            break;
+        }
+
         let sell_tx_status = execution_gate::execute_traced(
             &deps.executor,
             &deps.config,

@@ -11,6 +11,7 @@ pub mod launcher;
 pub mod portfolio;
 pub mod proxy;
 pub mod ratelimit;
+pub mod safeguards;
 pub mod sentinel;
 pub mod sniper;
 pub mod swarm;
@@ -161,6 +162,7 @@ pub fn router(state: AppState) -> Router {
         .merge(agent_config::router())
         .merge(backtest::router())
         .merge(proxy::router())
+        .merge(safeguards::router())
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
             route_limiters,

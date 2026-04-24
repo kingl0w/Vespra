@@ -14,6 +14,7 @@ pub mod middleware;
 pub mod notifications;
 pub mod orchestrator;
 pub mod routes;
+pub mod safeguards;
 pub mod sentinel_monitor;
 pub mod types;
 pub mod yield_scheduler;
