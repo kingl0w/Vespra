@@ -365,26 +365,20 @@ pub async fn run_goal_with_resume(
         let best = match scout_result {
             Ok(opp) => opp,
             Err(e) => {
-                let chain_lower = goal.chain.to_lowercase();
-                let is_testnet = chain_lower.contains("sepolia")
-                    || chain_lower.contains("testnet")
-                    || chain_lower.contains("goerli");
-                if is_testnet {
-                    tracing::warn!(
-                        "[goal {goal_id}] injecting synthetic WETH/USDC fallback opportunity — no real testnet pools found from DeFiLlama (scout error: {e})"
-                    );
-                    crate::types::opportunity::Opportunity {
-                        protocol: "uniswap-v3".to_string(),
-                        pool: "WETH-USDC".to_string(),
-                        chain: goal.chain.clone(),
-                        apy: 5.0,
-                        tvl_usd: 1_000_000,
-                        momentum_score: 1.0,
-                        ..Default::default()
+                match scout_fallback_decision(deps.config.is_testnet(), &goal.chain) {
+                    ScoutFallback::Inject(opp) => {
+                        tracing::warn!(
+                            "[goal {goal_id}] injecting synthetic WETH/USDC fallback opportunity — no real testnet pools found from DeFiLlama (scout error: {e})"
+                        );
+                        opp
                     }
-                } else {
-                    fail_goal(&deps.redis, goal_id, &format!("SCOUTING failed: {e}"), &deps.telegram).await;
-                    break;
+                    ScoutFallback::Fail(reason) => {
+                        tracing::error!(
+                            "[goal {goal_id}] no opportunities found on mainnet — failing goal (synthetic fallback is testnet-only)"
+                        );
+                        fail_goal(&deps.redis, goal_id, reason, &deps.telegram).await;
+                        break;
+                    }
                 }
             }
         };
@@ -1270,6 +1264,28 @@ fn notify_goal(deps: &GoalRunnerDeps, message: String) {
     }
 }
 
+#[derive(Debug)]
+enum ScoutFallback {
+    Inject(crate::types::opportunity::Opportunity),
+    Fail(&'static str),
+}
+
+fn scout_fallback_decision(is_testnet: bool, chain: &str) -> ScoutFallback {
+    if is_testnet {
+        ScoutFallback::Inject(crate::types::opportunity::Opportunity {
+            protocol: "uniswap-v3".to_string(),
+            pool: "WETH-USDC".to_string(),
+            chain: chain.to_string(),
+            apy: 5.0,
+            tvl_usd: 1_000_000,
+            momentum_score: 1.0,
+            ..Default::default()
+        })
+    } else {
+        ScoutFallback::Fail("no real pool opportunities available")
+    }
+}
+
 async fn fail_goal(
     redis: &redis::Client,
     goal_id: Uuid,
@@ -1459,6 +1475,34 @@ mod tests {
         assert!(msg.contains("base\\-test\\-1")); // dash escaped
         assert!(msg.contains("base\\_sepolia")); // underscore escaped
         assert!(msg.contains("completed"));
+    }
+
+    #[test]
+    fn scout_fallback_testnet_injects_synthetic() {
+        let decision = scout_fallback_decision(true, "base_sepolia");
+        match decision {
+            ScoutFallback::Inject(opp) => {
+                assert_eq!(opp.protocol, "uniswap-v3");
+                assert_eq!(opp.pool, "WETH-USDC");
+                assert_eq!(opp.chain, "base_sepolia");
+                assert_eq!(opp.tvl_usd, 1_000_000);
+                assert!(opp.momentum_score > 0.0);
+            }
+            ScoutFallback::Fail(r) => panic!("testnet must inject fallback, got Fail({r})"),
+        }
+    }
+
+    #[test]
+    fn scout_fallback_mainnet_fails_with_clear_error() {
+        let decision = scout_fallback_decision(false, "base");
+        match decision {
+            ScoutFallback::Fail(reason) => {
+                assert_eq!(reason, "no real pool opportunities available");
+            }
+            ScoutFallback::Inject(_) => {
+                panic!("mainnet must not inject synthetic fallback")
+            }
+        }
     }
 
     #[test]
