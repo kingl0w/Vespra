@@ -161,8 +161,8 @@ async fn main() -> anyhow::Result<()> {
         ScoutAgent::new(llm.clone())
             .with_yield_registry(yield_registry.clone(), config.clone()),
     );
-    let risk = Arc::new(RiskAgent::new(llm.clone()));
-    let trader = Arc::new(TraderAgent::new(llm.clone()));
+    let risk = Arc::new(RiskAgent::new(llm.clone(), config.clone()));
+    let trader = Arc::new(TraderAgent::new(llm.clone(), config.clone()));
     let sentinel = Arc::new(SentinelAgent::new(
         llm.clone(),
         config.keymaster_url.clone(),
