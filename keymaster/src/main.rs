@@ -3,6 +3,7 @@ mod config;
 mod crypto;
 mod error;
 mod keystore;
+mod kill_switch;
 mod routes;
 mod rpc;
 mod state;
@@ -20,6 +21,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
 use crate::keystore::Keystore;
+use crate::kill_switch::KillSwitch;
 use crate::state::AppState;
 
 #[tokio::main]
@@ -84,8 +86,13 @@ async fn main() -> anyhow::Result<()> {
         "Vespra Keymaster starting"
     );
 
+    let kill_switch_path = std::env::var("VESPRA_KM_KILL_SWITCH_STATE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/opt/vespra-keymaster/kill-switch.state"));
+    let kill_switch = KillSwitch::load(kill_switch_path);
+
     let state = Arc::new(AppState {
-        config: config.clone(), keystore, master_password, auth_token,
+        config: config.clone(), keystore, master_password, auth_token, kill_switch,
     });
 
     //public read-only routes — no auth required
@@ -113,6 +120,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/dispatch", post(routes::dispatch))
         .route("/settings/safes", get(routes::get_safes))
         .route("/settings/safes/:chain", put(routes::set_safe))
+        .route("/kill-switch/activate", post(routes::kill_switch_activate))
+        .route("/kill-switch/deactivate", post(routes::kill_switch_deactivate))
+        .route("/kill-switch/status", get(routes::kill_switch_status))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require_auth));
 
     //clone state for aum fee background task before moving into router

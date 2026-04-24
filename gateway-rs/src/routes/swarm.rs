@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -11,11 +12,62 @@ use crate::types::goals::GoalStatus;
 
 use super::AppState;
 
-async fn swarm_kill(State(state): State<AppState>) -> Json<serde_json::Value> {
-    //set global kill flag
+pub(crate) async fn propagate_kill_switch_to_keymaster(
+    client: &reqwest::Client,
+    keymaster_url: &str,
+    auth_token: &str,
+    activate: bool,
+) -> Result<(), String> {
+    let action = if activate { "activate" } else { "deactivate" };
+    let url = format!(
+        "{}/kill-switch/{action}",
+        keymaster_url.trim_end_matches('/')
+    );
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {auth_token}"))
+        .send()
+        .await
+        .map_err(|e| format!("keymaster unreachable: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("keymaster returned {status}: {body}"));
+    }
+    Ok(())
+}
+
+async fn swarm_kill(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    //keymaster is the source of truth — if it can't be reached, refuse to
+    //claim the swarm is killed. gateway compromise alone must not be able
+    //to enable or disable signing.
+    if let Err(e) = propagate_kill_switch_to_keymaster(
+        &state.http_client,
+        &state.config.keymaster_url,
+        &state.config.keymaster_token,
+        true,
+    )
+    .await
+    {
+        tracing::error!("[kill_switch] keymaster propagation failed: {e}");
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": "keymaster unreachable — kill switch not activated",
+                "detail": e,
+            })),
+        ));
+    }
+
+    //keymaster accepted — now mirror locally so gateway loops stop too.
     state.kill_flag.store(true, Ordering::SeqCst);
     tracing::warn!("KILL SWITCH ACTIVATED");
-    crate::notifications::notify(&state, "Kill switch activated \u{2014} all goals paused".to_string());
+    crate::notifications::notify(
+        &state,
+        "\u{1F6D1} Kill switch ACTIVATED \u{2014} signing disabled at Keymaster".to_string(),
+    );
 
     //collect active wallet ids and stop all loops
     let trade_up_active = state.trade_up_orchestrator.active_wallets().await;
@@ -30,21 +82,47 @@ async fn swarm_kill(State(state): State<AppState>) -> Json<serde_json::Value> {
         halted.push(format!("yield:{wallet_id}"));
     }
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "status": "killed",
         "kill_flag": true,
+        "keymaster_kill_switch": "activated",
         "loops_halted": halted,
-    }))
+    })))
 }
 
-async fn swarm_resume(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn swarm_resume(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if let Err(e) = propagate_kill_switch_to_keymaster(
+        &state.http_client,
+        &state.config.keymaster_url,
+        &state.config.keymaster_token,
+        false,
+    )
+    .await
+    {
+        tracing::error!("[kill_switch] keymaster propagation failed: {e}");
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": "keymaster unreachable — kill switch not deactivated",
+                "detail": e,
+            })),
+        ));
+    }
+
     state.kill_flag.store(false, Ordering::SeqCst);
     tracing::info!("KILL SWITCH DEACTIVATED — swarm resumed");
+    crate::notifications::notify(
+        &state,
+        "\u{2705} Kill switch DEACTIVATED \u{2014} signing re-enabled at Keymaster".to_string(),
+    );
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "status": "resumed",
         "kill_flag": false,
-    }))
+        "keymaster_kill_switch": "deactivated",
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,4 +245,95 @@ pub fn router() -> Router<AppState> {
         .route("/swarm/resume", post(swarm_resume))
         .route("/swarm/command", post(swarm_command))
         .route("/swarm/status", get(swarm_status))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn propagate_returns_err_when_keymaster_unreachable() {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap();
+        //127.0.0.1:1 has no listener — connection refused immediately.
+        let result =
+            propagate_kill_switch_to_keymaster(&client, "http://127.0.0.1:1", "token", true).await;
+        let err = result.expect_err("expected err when keymaster unreachable");
+        assert!(
+            err.contains("keymaster unreachable"),
+            "error should mention unreachable keymaster, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn propagate_calls_activate_path_on_keymaster() {
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = hits.clone();
+
+        let app = Router::new().route(
+            "/kill-switch/activate",
+            post(move || {
+                let hits = hits_clone.clone();
+                async move {
+                    hits.fetch_add(1, AtomicOrdering::SeqCst);
+                    Json(serde_json::json!({ "active": true }))
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}");
+        let result = propagate_kill_switch_to_keymaster(&client, &base, "token", true).await;
+        assert!(result.is_ok(), "expected ok, got: {result:?}");
+        assert_eq!(hits.load(AtomicOrdering::SeqCst), 1);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn propagate_calls_deactivate_path_on_keymaster() {
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = hits.clone();
+
+        let app = Router::new().route(
+            "/kill-switch/deactivate",
+            post(move || {
+                let hits = hits_clone.clone();
+                async move {
+                    hits.fetch_add(1, AtomicOrdering::SeqCst);
+                    Json(serde_json::json!({ "active": false }))
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}");
+        let result = propagate_kill_switch_to_keymaster(&client, &base, "token", false).await;
+        assert!(result.is_ok(), "expected ok, got: {result:?}");
+        assert_eq!(hits.load(AtomicOrdering::SeqCst), 1);
+
+        server.abort();
+    }
 }

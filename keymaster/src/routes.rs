@@ -234,6 +234,7 @@ pub async fn send_native(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SendNativeRequest>,
 ) -> AppResult<Json<Value>> {
+    state.kill_switch.check()?;
     let wallet = state.keystore.get_wallet(&req.wallet_id)?;
     if !wallet.active {
         return Err(AppError::BadRequest("Wallet is deactivated".into()));
@@ -450,6 +451,7 @@ pub async fn send_tx_with_data(
 ) -> AppResult<Json<Value>> {
     use alloy::primitives::keccak256;
 
+    state.kill_switch.check()?;
     let wallet = state.keystore.get_wallet(&req.wallet_id)?;
     if !wallet.active {
         return Err(AppError::BadRequest("Wallet is deactivated".into()));
@@ -591,6 +593,7 @@ pub async fn swap_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SwapRequest>,
 ) -> AppResult<Json<Value>> {
+    state.kill_switch.check()?;
     let wallet = state.keystore.get_wallet(&req.wallet_id)?;
     if !wallet.active {
         return Err(AppError::BadRequest("Wallet is deactivated".into()));
@@ -727,6 +730,7 @@ pub async fn sweep_to_safe(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SweepRequest>,
 ) -> AppResult<Json<Value>> {
+    state.kill_switch.check()?;
     let wallet = state.keystore.get_wallet(&req.wallet_id)?;
     let chain = state.config.get_chain(&wallet.chain)
         .ok_or_else(|| AppError::ChainNotConfigured(wallet.chain.clone()))?;
@@ -1252,4 +1256,36 @@ pub async fn fees_summary(State(state): State<Arc<AppState>>) -> impl IntoRespon
         "grand_total_eth": aum_total + perf_total,
         "treasury": state.config.treasury_address.as_deref().unwrap_or("(not set)"),
     })).into_response()
+}
+
+//─── kill switch ─────────────────────────────────────────────────
+
+pub async fn kill_switch_activate(
+    State(state): State<Arc<AppState>>,
+) -> Json<Value> {
+    let status = state.kill_switch.activate().await;
+    Json(json!({
+        "active": status.active,
+        "activated_at": status.activated_at,
+    }))
+}
+
+pub async fn kill_switch_deactivate(
+    State(state): State<Arc<AppState>>,
+) -> Json<Value> {
+    let status = state.kill_switch.deactivate().await;
+    Json(json!({
+        "active": status.active,
+        "activated_at": status.activated_at,
+    }))
+}
+
+pub async fn kill_switch_status(
+    State(state): State<Arc<AppState>>,
+) -> Json<Value> {
+    let status = state.kill_switch.status().await;
+    Json(json!({
+        "active": status.active,
+        "activated_at": status.activated_at,
+    }))
 }
