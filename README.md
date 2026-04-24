@@ -44,7 +44,7 @@ curl -X POST http://localhost:9001/goals \
 ```mermaid
 flowchart LR
     user([User / Dashboard]) -->|natural-language goal| gw[Gateway<br/>:9001]
-    gw -->|LLM parse| llm[(Anthropic)]
+    gw -->|LLM parse| llm[(LLM provider)]
     gw -->|DAG orchestration| nb[NullBoiler]
     nb --> agents{{9 Agents<br/>Scout · Risk · Trader<br/>Yield · Sentinel · Sniper<br/>Executor · Coordinator · Launcher}}
     agents -->|sign & broadcast| km[Keymaster<br/>:9100]
@@ -89,7 +89,7 @@ regardless of what the gateway says.
 
 - **Docker** + **Docker Compose** v2+
 - **At least one EVM RPC endpoint** — free public RPCs work for testnets (Base Sepolia, Arbitrum Sepolia); for mainnet use [Alchemy](https://alchemy.com), [Infura](https://infura.io), or [QuickNode](https://quicknode.com)
-- **Anthropic API key** — [console.anthropic.com](https://console.anthropic.com)
+- **LLM API key** — Anthropic, OpenAI, DeepSeek, Groq, or any OpenAI-compatible endpoint. Can also run self-hosted [Ollama](https://ollama.ai) with no key
 - **(Optional)** A Telegram bot for notifications — create with [@BotFather](https://t.me/BotFather)
 - **(Optional)** [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) for remote dashboard access
 
@@ -200,7 +200,24 @@ All config is driven by a single `.env` at the repo root. Generate it with
 
 | Var | Default | Required | Description |
 |---|---|---|---|
-| `ANTHROPIC_API_KEY` | *(unset)* | yes | Anthropic API key for goal parsing + agent reasoning |
+| `VESPRA_LLM_PROVIDER` | `anthropic` | yes | One of `anthropic`, `openai`, `deepseek`, `groq`, `ollama`, `custom` |
+| `VESPRA_LLM_API_KEY` | *(unset)* | yes (no for `ollama`) | API key for the chosen provider |
+| `VESPRA_LLM_MODEL` | `claude-sonnet-4-6` | yes | Model identifier (see defaults per provider below) |
+| `VESPRA_LLM_BASE_URL` | *(unset)* | required for `custom`, optional for `ollama` | OpenAI-compatible endpoint |
+
+#### Supported LLM providers
+
+| Provider | Default model | Base URL | Key required |
+|---|---|---|---|
+| `anthropic` | `claude-sonnet-4-6` | built-in | yes |
+| `openai` | `gpt-4o` | built-in | yes |
+| `deepseek` | `deepseek-chat` | `https://api.deepseek.com` | yes |
+| `groq` | `llama-3.3-70b-versatile` | `https://api.groq.com/openai/v1` | yes |
+| `ollama` | `llama3.1:8b` | `http://localhost:11434/v1` | no (local) |
+| `custom` | *(you specify)* | *(you specify)* | yes |
+
+Any OpenAI-compatible endpoint works via `custom`. `./scripts/init.sh` will walk you
+through the picker and write the right defaults.
 
 ### Fees (optional, off by default)
 
@@ -394,7 +411,7 @@ Report security issues privately via a GitHub security advisory on this repo.
 
 ### Done
 - Multi-chain goal lifecycle (SCOUTING → RISK → TRADING → EXECUTING → MONITORING → EXIT)
-- Nine specialized agents with Anthropic-backed reasoning
+- Nine specialized agents backed by the LLM provider of your choice
 - Keymaster with encrypted keystore, kill switch, per-wallet caps
 - Redis-backed auto-resume
 - Telegram notifications

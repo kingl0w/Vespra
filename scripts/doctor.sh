@@ -37,7 +37,7 @@ set -a
 . "$ENV_FILE"
 set +a
 
-required_vars="VESPRA_NETWORK_MODE KEYMASTER_MASTER_PASSWORD KEYMASTER_BEARER_TOKEN VESPRA_REDIS_URL VESPRA_KEYMASTER_URL ANTHROPIC_API_KEY"
+required_vars="VESPRA_NETWORK_MODE KEYMASTER_MASTER_PASSWORD KEYMASTER_BEARER_TOKEN VESPRA_REDIS_URL VESPRA_KEYMASTER_URL VESPRA_LLM_PROVIDER VESPRA_LLM_MODEL"
 missing_vars=""
 for v in $required_vars; do
     eval "val=\${$v-}"
@@ -46,10 +46,31 @@ for v in $required_vars; do
     fi
 done
 
+# LLM key is required for every provider except ollama (local, usually keyless).
+provider="${VESPRA_LLM_PROVIDER:-}"
+llm_key="${VESPRA_LLM_API_KEY:-}"
+if [ "$provider" != "ollama" ] && [ -z "$llm_key" ]; then
+    if [ -n "$provider" ]; then
+        missing_vars="$missing_vars VESPRA_LLM_API_KEY(for provider=$provider)"
+    else
+        missing_vars="$missing_vars VESPRA_LLM_API_KEY"
+    fi
+fi
+
 if [ -n "$missing_vars" ]; then
     fail ".env is missing required vars:$missing_vars"
 else
     pass ".env is populated with all required vars"
+fi
+
+# Deprecation warning — don't fail, just nudge.
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    info "ANTHROPIC_API_KEY is deprecated; use VESPRA_LLM_API_KEY (+ VESPRA_LLM_PROVIDER=anthropic)"
+fi
+
+# LLM configured check
+if [ -n "$provider" ] && [ -n "${VESPRA_LLM_MODEL:-}" ]; then
+    pass "LLM configured — provider=$provider, model=$VESPRA_LLM_MODEL"
 fi
 
 #─── check 2: docker installed + daemon running ────────────────

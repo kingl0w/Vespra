@@ -209,8 +209,10 @@ confident, accept the loss exposure and rotate instead.
   new password, then update `.env`. Plan this carefully or do it in a test instance
   first.
 - `KEYMASTER_BEARER_TOKEN` — change in `.env`, `make restart`.
-- `ANTHROPIC_API_KEY` — revoke in the Anthropic dashboard, generate a new key, update
-  `.env`.
+- `VESPRA_LLM_API_KEY` — revoke in whichever provider dashboard issued it (Anthropic,
+  OpenAI, DeepSeek, Groq, etc.), generate a new key, update `.env`. If you're still
+  using the legacy `ANTHROPIC_API_KEY` var, rotate that the same way and migrate to
+  the provider-agnostic name.
 - `VESPRA_TELEGRAM_BOT_TOKEN` — revoke in @BotFather (`/revoke`), generate new.
 - **All burner wallet keys** — already rotated implicitly by Step 4's sweep + fresh
   wallet creation. Confirm no funds remain on the old burners on-chain.
