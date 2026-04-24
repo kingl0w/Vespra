@@ -54,6 +54,16 @@ async fn main() -> anyhow::Result<()> {
     };
     let config = Arc::new(config);
 
+    if config.is_testnet() {
+        tracing::info!(
+            "[network] mode=testnet — relaxed risk gates, synthetic fallback pools enabled"
+        );
+    } else {
+        tracing::info!(
+            "[network] mode=mainnet — strict risk gates, real pool data required"
+        );
+    }
+
     //3. init chain registry (receives rpc_urls from config)
     let chain_registry = Arc::new(ChainRegistry::new(&config.rpc_urls));
     let available = chain_registry.available();
