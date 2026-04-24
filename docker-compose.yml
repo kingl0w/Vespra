@@ -5,7 +5,7 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     volumes:
-      - redis_data:/data
+      - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -14,80 +14,57 @@ services:
 
   keymaster:
     build: ./keymaster
+    env_file: .env
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:9100:9100"
     environment:
-      # required
-      VESPRA_MASTER_PASSWORD: ${VESPRA_MASTER_PASSWORD}
-      VESPRA_KM_AUTH_TOKEN: ${VESPRA_KM_AUTH_TOKEN}
-      # rpc urls (keymaster's convention: VESPRA_RPC_<CHAIN>)
+      # keymaster reads the app-internal names; .env carries nicer aliases.
+      VESPRA_MASTER_PASSWORD: ${KEYMASTER_MASTER_PASSWORD}
+      VESPRA_KM_AUTH_TOKEN: ${KEYMASTER_BEARER_TOKEN}
+      VESPRA_KM_HOST: 0.0.0.0
+      VESPRA_KM_PORT: 9100
+      VESPRA_KM_DB: /opt/vespra-keymaster/keymaster.db
+      VESPRA_KM_KILL_SWITCH_STATE: /opt/vespra-keymaster/kill-switch.state
+      # keymaster's rpc convention mirrors the gateway's RPC_URL_* keys.
       VESPRA_RPC_BASE: ${RPC_URL_BASE:-}
       VESPRA_RPC_BASE_SEPOLIA: ${RPC_URL_BASE_SEPOLIA:-}
       VESPRA_RPC_ARBITRUM: ${RPC_URL_ARBITRUM:-}
       VESPRA_RPC_ARBITRUM_SEPOLIA: ${RPC_URL_ARBITRUM_SEPOLIA:-}
-      VESPRA_RPC_ETHEREUM: ${RPC_URL_ETHEREUM:-}
-      VESPRA_RPC_OPTIMISM: ${RPC_URL_OPTIMISM:-}
-      # optional safe addresses (sweep targets)
-      VESPRA_SAFE_BASE: ${GNOSIS_SAFE_ADDRESS:-}
-      VESPRA_SAFE_BASE_SEPOLIA: ${GNOSIS_SAFE_ADDRESS:-}
+      FEES_ENABLED: ${FEES_ENABLED:-false}
+      TREASURY_ADDRESS: ${TREASURY_ADDRESS:-}
     volumes:
-      - keymaster_data:/data
-    depends_on:
-      redis:
-        condition: service_healthy
-
-  nullboiler:
-    build: ./nullboiler
-    restart: unless-stopped
+      - keymaster-data:/opt/vespra-keymaster
     ports:
-      - "127.0.0.1:9090:9090"
-    volumes:
-      - nullboiler_data:/data
+      - "9100:9100"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9100/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     depends_on:
       redis:
         condition: service_healthy
 
   gateway:
     build: ./gateway-rs
+    env_file: .env
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:9001:9001"
     environment:
-      # core
       VESPRA_HOST: 0.0.0.0
       VESPRA_PORT: 9001
-      VESPRA_REDIS_URL: redis://redis:6379
-      VESPRA_KEYMASTER_URL: http://keymaster:9100
-      VESPRA_KEYMASTER_TOKEN: ${VESPRA_KM_AUTH_TOKEN}
-      VESPRA_NULLBOILER_URL: http://nullboiler:9090
-      # llm
-      VESPRA_LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
-      VESPRA_LLM_API_KEY: ${LLM_API_KEY}
-      VESPRA_LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
-      VESPRA_LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
-      # chains
-      VESPRA_CHAINS: '["base","arbitrum","base_sepolia"]'
-      # rpc urls (gateway's convention: RPC_URL_<CHAIN>)
-      RPC_URL_BASE: ${RPC_URL_BASE:-}
-      RPC_URL_BASE_SEPOLIA: ${RPC_URL_BASE_SEPOLIA:-}
-      RPC_URL_ARBITRUM: ${RPC_URL_ARBITRUM:-}
-      RPC_URL_ARBITRUM_SEPOLIA: ${RPC_URL_ARBITRUM_SEPOLIA:-}
-      RPC_URL_ETHEREUM: ${RPC_URL_ETHEREUM:-}
-      RPC_URL_OPTIMISM: ${RPC_URL_OPTIMISM:-}
-      # dex routing — set one or the other
-      VESPRA_ONEINCH_API_KEY: ${ONEINCH_API_KEY:-}
-      VESPRA_PARASWAP_MODE: ${PARASWAP_MODE:-true}
-      # price oracle
-      VESPRA_PRICE_ORACLE: ${VESPRA_PRICE_ORACLE:-defillama}
-      VESPRA_PRICE_ORACLE_FALLBACK: ${VESPRA_PRICE_ORACLE_FALLBACK:-coingecko}
-      # treasury / fees
-      VESPRA_TREASURY_ADDRESS: ${GNOSIS_SAFE_ADDRESS:-}
-      FEE_RATE_BPS: ${FEE_RATE_BPS:-500}
-      # execution mode — false = dry run, no real broadcasts
-      VESPRA_AUTO_EXECUTE_ENABLED: ${VESPRA_AUTO_EXECUTE_ENABLED:-false}
-      # logging
+      VESPRA_KEYMASTER_TOKEN: ${KEYMASTER_BEARER_TOKEN}
+      VESPRA_LLM_PROVIDER: anthropic
+      VESPRA_LLM_API_KEY: ${ANTHROPIC_API_KEY}
+      VESPRA_LLM_BASE_URL: https://api.anthropic.com
       RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
       redis:
         condition: service_healthy
@@ -98,11 +75,10 @@ services:
     build: ./dashboard
     restart: unless-stopped
     ports:
-      - "127.0.0.1:9200:9200"
+      - "3000:3000"
     depends_on:
       - gateway
 
 volumes:
-  redis_data:
-  keymaster_data:
-  nullboiler_data:
+  redis-data:
+  keymaster-data:
