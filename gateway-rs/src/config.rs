@@ -139,6 +139,7 @@ fn default_yield_min_tvl_usd() -> f64 { 500_000.0 }
 fn default_yield_min_apy() -> f64 { 1.0 }
 fn default_yield_top_n() -> usize { 20 }
 fn default_testnet_monitor_timeout_minutes() -> u64 { 5 }
+fn default_max_tx_per_hour() -> Option<u32> { Some(100) }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GatewayConfig {
@@ -262,6 +263,10 @@ pub struct GatewayConfig {
     pub telegram_chat_id: Option<String>,
     #[serde(default)]
     pub network_mode: NetworkMode,
+    #[serde(default)]
+    pub max_global_wallet_value_eth: Option<f64>,
+    #[serde(default = "default_max_tx_per_hour")]
+    pub max_tx_per_hour: Option<u32>,
 }
 
 impl GatewayConfig {
