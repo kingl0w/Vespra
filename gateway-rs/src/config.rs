@@ -57,6 +57,47 @@ where
     deserializer.deserialize_any(StringOrInt)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkMode {
+    Testnet,
+    Mainnet,
+}
+
+impl Default for NetworkMode {
+    fn default() -> Self {
+        NetworkMode::Testnet
+    }
+}
+
+impl serde::Serialize for NetworkMode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            NetworkMode::Testnet => serializer.serialize_str("testnet"),
+            NetworkMode::Mainnet => serializer.serialize_str("mainnet"),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for NetworkMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.to_lowercase().as_str() {
+            "testnet" => Ok(NetworkMode::Testnet),
+            "mainnet" => Ok(NetworkMode::Mainnet),
+            _ => Err(serde::de::Error::custom(format!(
+                "invalid network mode '{}' — must be 'testnet' or 'mainnet'",
+                s
+            ))),
+        }
+    }
+}
+
 fn default_host() -> String { "127.0.0.1".into() }
 fn default_port() -> u16 { 9000 }
 fn default_redis_url() -> String { "redis://127.0.0.1:6379".into() }
@@ -219,6 +260,8 @@ pub struct GatewayConfig {
     pub telegram_bot_token: Option<String>,
     #[serde(default, deserialize_with = "deserialize_string_or_int")]
     pub telegram_chat_id: Option<String>,
+    #[serde(default)]
+    pub network_mode: NetworkMode,
 }
 
 impl GatewayConfig {
@@ -257,5 +300,44 @@ impl GatewayConfig {
         );
 
         Ok(config)
+    }
+
+    pub fn is_testnet(&self) -> bool {
+        matches!(self.network_mode, NetworkMode::Testnet)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_mode_default_is_testnet() {
+        assert_eq!(NetworkMode::default(), NetworkMode::Testnet);
+    }
+
+    #[test]
+    fn network_mode_parses_case_insensitive() {
+        for s in ["mainnet", "MAINNET", "Mainnet", "MainNet"] {
+            let json = format!("\"{}\"", s);
+            let parsed: NetworkMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, NetworkMode::Mainnet, "failed to parse {s}");
+        }
+        for s in ["testnet", "TESTNET", "Testnet"] {
+            let json = format!("\"{}\"", s);
+            let parsed: NetworkMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, NetworkMode::Testnet, "failed to parse {s}");
+        }
+    }
+
+    #[test]
+    fn network_mode_rejects_invalid() {
+        let result: Result<NetworkMode, _> = serde_json::from_str("\"foo\"");
+        let err = result.expect_err("expected error for invalid value");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("testnet") && msg.contains("mainnet"),
+            "error should list valid values, got: {msg}"
+        );
     }
 }

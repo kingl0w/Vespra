@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::agents::AgentClient;
+use crate::config::GatewayConfig;
 use crate::data::protocol::ProtocolData;
 use crate::types::decisions::{RiskDecision, RiskScore};
 use crate::types::opportunity::Opportunity;
@@ -11,15 +12,11 @@ use crate::types::opportunity::Opportunity;
 pub struct RiskContext {
     pub opportunity: Opportunity,
     pub protocol_data: ProtocolData,
-    ///chain the goal is targeting. used to apply testnet-vs-mainnet gate rules.
-    ///defaults to the opportunity's chain if not set explicitly by the caller.
+    ///chain the goal is targeting. passed through to the LLM prompt so it
+    ///can reason about chain-specific protocols, but the gate decision is
+    ///driven by NETWORK_MODE, not the chain name.
     #[serde(default)]
     pub chain: String,
-}
-
-fn is_testnet_chain(chain: &str) -> bool {
-    let c = chain.to_lowercase();
-    c.contains("sepolia") || c.contains("testnet") || c.contains("goerli")
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,11 +48,12 @@ Always score risk honestly — only the gate_pass threshold differs between test
 
 pub struct RiskAgent {
     llm: Arc<dyn AgentClient>,
+    config: Arc<GatewayConfig>,
 }
 
 impl RiskAgent {
-    pub fn new(llm: Arc<dyn AgentClient>) -> Self {
-        Self { llm }
+    pub fn new(llm: Arc<dyn AgentClient>, config: Arc<GatewayConfig>) -> Self {
+        Self { llm, config }
     }
 
     pub async fn assess(&self, ctx: &RiskContext) -> Result<RiskDecision> {
@@ -67,7 +65,7 @@ impl RiskAgent {
         } else {
             ctx.chain.clone()
         };
-        let testnet = is_testnet_chain(&effective_chain);
+        let testnet = self.config.is_testnet();
         let chain_label = if testnet { "TESTNET" } else { "MAINNET" };
 
         let task = format!(
@@ -92,7 +90,13 @@ impl RiskAgent {
 
         let gate_pass = if testnet {
             match score {
-                RiskScore::Low | RiskScore::Medium => true,
+                RiskScore::Low => true,
+                RiskScore::Medium => {
+                    tracing::info!(
+                        "[risk] testnet mode — accepting MEDIUM risk (would reject on mainnet)"
+                    );
+                    true
+                }
                 RiskScore::High => ctx.opportunity.tvl_usd > 0,
                 RiskScore::Critical => false,
             }
@@ -136,5 +140,65 @@ fn parse_gate_pass(val: &Option<serde_json::Value>) -> bool {
         Some(serde_json::Value::Bool(b)) => *b,
         Some(serde_json::Value::String(s)) => s.eq_ignore_ascii_case("true"),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct MockLlm(String);
+
+    #[async_trait]
+    impl AgentClient for MockLlm {
+        async fn call(&self, _system: &str, _task: &str) -> Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn test_config(mode: &str) -> Arc<GatewayConfig> {
+        let cfg: GatewayConfig =
+            serde_json::from_value(serde_json::json!({ "network_mode": mode })).unwrap();
+        Arc::new(cfg)
+    }
+
+    fn test_ctx() -> RiskContext {
+        RiskContext {
+            opportunity: Opportunity {
+                chain: "base".into(),
+                tvl_usd: 100_000,
+                ..Default::default()
+            },
+            protocol_data: ProtocolData::default(),
+            chain: "base".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn medium_risk_rejected_on_mainnet() {
+        let llm = Arc::new(MockLlm(
+            r#"{"score":"MEDIUM","gate_pass":true,"reason":"borderline"}"#.into(),
+        ));
+        let risk = RiskAgent::new(llm, test_config("mainnet"));
+        let decision = risk.assess(&test_ctx()).await.unwrap();
+        assert!(
+            decision.is_blocked(),
+            "MEDIUM risk must block on mainnet, got: {decision:?}"
+        );
+        assert!(matches!(decision.score(), RiskScore::Medium));
+    }
+
+    #[tokio::test]
+    async fn medium_risk_accepted_on_testnet() {
+        let llm = Arc::new(MockLlm(
+            r#"{"score":"MEDIUM","gate_pass":false,"reason":"borderline"}"#.into(),
+        ));
+        let risk = RiskAgent::new(llm, test_config("testnet"));
+        let decision = risk.assess(&test_ctx()).await.unwrap();
+        assert!(
+            !decision.is_blocked(),
+            "MEDIUM risk must pass on testnet, got: {decision:?}"
+        );
     }
 }

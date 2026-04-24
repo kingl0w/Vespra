@@ -54,6 +54,16 @@ async fn main() -> anyhow::Result<()> {
     };
     let config = Arc::new(config);
 
+    if config.is_testnet() {
+        tracing::info!(
+            "[network] mode=testnet — relaxed risk gates, synthetic fallback pools enabled"
+        );
+    } else {
+        tracing::info!(
+            "[network] mode=mainnet — strict risk gates, real pool data required"
+        );
+    }
+
     //3. init chain registry (receives rpc_urls from config)
     let chain_registry = Arc::new(ChainRegistry::new(&config.rpc_urls));
     let available = chain_registry.available();
@@ -151,8 +161,8 @@ async fn main() -> anyhow::Result<()> {
         ScoutAgent::new(llm.clone())
             .with_yield_registry(yield_registry.clone(), config.clone()),
     );
-    let risk = Arc::new(RiskAgent::new(llm.clone()));
-    let trader = Arc::new(TraderAgent::new(llm.clone()));
+    let risk = Arc::new(RiskAgent::new(llm.clone(), config.clone()));
+    let trader = Arc::new(TraderAgent::new(llm.clone(), config.clone()));
     let sentinel = Arc::new(SentinelAgent::new(
         llm.clone(),
         config.keymaster_url.clone(),
