@@ -1,5 +1,12 @@
 # Vespra
 
+## Quick Setup
+```bash
+./scripts/init.sh      # one-time setup
+make up                # start the stack
+./scripts/doctor.sh    # verify everything is running
+```
+
 Vespra is a self-hosted AI agent system that grows your crypto for you. You give it a plain English goal — *"Earn yield on 0.05 ETH on Base, WETH and USDC only"* — and a swarm of small AI agents handles the rest: finding opportunities, checking risk, executing swaps, monitoring your position, and rotating into better yields when they appear.
 
 It runs on your own machine. Your keys stay on your machine. There's no SaaS, no shared backend, no surprise fees.
