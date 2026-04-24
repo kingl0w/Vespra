@@ -123,23 +123,121 @@ else
     dim "Keeping testnet RPC defaults (Base Sepolia + Arbitrum Sepolia)."
 fi
 
-#─── step 8: ANTHROPIC_API_KEY (required, hidden input) ────────
+#─── step 8: LLM provider + key ────────────────────────────────
 bold ""
-bold "Anthropic API key (required):"
-dim "  Input is hidden. Get one at https://console.anthropic.com"
+bold "LLM provider:"
+dim "  anthropic, openai, deepseek, groq, ollama (local), or custom (OpenAI-compatible endpoint)"
+printf "Provider [anthropic]: "
+read -r provider_raw
+provider="$(printf '%s' "$provider_raw" | tr '[:upper:]' '[:lower:]')"
+case "$provider" in
+    anthropic|openai|deepseek|groq|ollama|custom) ;;
+    "") provider="anthropic" ;;
+    *)
+        err "unknown provider '$provider_raw' — must be anthropic, openai, deepseek, groq, ollama, or custom"
+        exit 1
+        ;;
+esac
+
+case "$provider" in
+    anthropic)
+        default_model="claude-sonnet-4-6"
+        default_base=""
+        key_required=1
+        key_hint="https://console.anthropic.com"
+        ;;
+    openai)
+        default_model="gpt-4o"
+        default_base=""
+        key_required=1
+        key_hint="https://platform.openai.com/api-keys"
+        ;;
+    deepseek)
+        default_model="deepseek-chat"
+        default_base="https://api.deepseek.com"
+        key_required=1
+        key_hint="https://platform.deepseek.com/api_keys"
+        ;;
+    groq)
+        default_model="llama-3.3-70b-versatile"
+        default_base="https://api.groq.com/openai/v1"
+        key_required=1
+        key_hint="https://console.groq.com/keys"
+        ;;
+    ollama)
+        default_model="llama3.1:8b"
+        default_base="http://localhost:11434/v1"
+        key_required=0
+        key_hint="local server — key optional (usually keyless)"
+        ;;
+    custom)
+        default_model=""
+        default_base=""
+        key_required=1
+        key_hint="your OpenAI-compatible endpoint"
+        ;;
+esac
+
+bold ""
+if [ "$key_required" = "1" ]; then
+    bold "$provider API key (required):"
+else
+    bold "$provider API key (optional — Enter to skip):"
+fi
+dim "  Input is hidden. $key_hint"
 while :; do
-    printf "ANTHROPIC_API_KEY: "
+    printf "API key%s: " "$([ "$key_required" = "0" ] && echo " [skip]")"
     stty -echo 2>/dev/null || true
     read -r api_key
     stty echo 2>/dev/null || true
     echo ""
-    if [ -n "$api_key" ]; then
+    if [ -n "$api_key" ] || [ "$key_required" = "0" ]; then
         break
     fi
     err "required — please paste a key."
 done
-set_env_var "ANTHROPIC_API_KEY" "$api_key"
-ok "ANTHROPIC_API_KEY set"
+
+# model prompt (only for custom, where we have no default)
+if [ "$provider" = "custom" ]; then
+    printf "Model identifier: "
+    read -r model
+    if [ -z "$model" ]; then
+        err "model is required for custom provider"
+        exit 1
+    fi
+else
+    model="$default_model"
+fi
+
+# base URL prompt (for custom; optional override for ollama)
+base_url="$default_base"
+if [ "$provider" = "custom" ]; then
+    printf "Base URL (OpenAI-compatible endpoint): "
+    read -r base_url
+    if [ -z "$base_url" ]; then
+        err "base URL is required for custom provider"
+        exit 1
+    fi
+elif [ "$provider" = "ollama" ]; then
+    printf "Base URL [%s]: " "$default_base"
+    read -r custom_base
+    if [ -n "$custom_base" ]; then
+        base_url="$custom_base"
+    fi
+fi
+
+set_env_var "VESPRA_LLM_PROVIDER" "$provider"
+set_env_var "VESPRA_LLM_API_KEY"  "$api_key"
+set_env_var "VESPRA_LLM_MODEL"    "$model"
+if [ -n "$base_url" ]; then
+    # .env.example has VESPRA_LLM_BASE_URL commented out by default; uncomment + set.
+    if grep -qE "^VESPRA_LLM_BASE_URL=" "$ENV_FILE"; then
+        set_env_var "VESPRA_LLM_BASE_URL" "$base_url"
+    else
+        uncomment_env_var "VESPRA_LLM_BASE_URL" "$base_url"
+    fi
+fi
+ok "LLM configured — provider=$provider, model=$model"
 
 #─── step 9: optional Telegram ─────────────────────────────────
 bold ""
@@ -184,7 +282,12 @@ check_var KEYMASTER_MASTER_PASSWORD
 check_var KEYMASTER_BEARER_TOKEN
 check_var VESPRA_REDIS_URL
 check_var VESPRA_KEYMASTER_URL
-check_var ANTHROPIC_API_KEY
+check_var VESPRA_LLM_PROVIDER
+check_var VESPRA_LLM_MODEL
+# Key is required for every provider except ollama (local, usually keyless).
+if [ "${VESPRA_LLM_PROVIDER:-}" != "ollama" ]; then
+    check_var VESPRA_LLM_API_KEY
+fi
 
 if [ "$missing" -gt 0 ]; then
     err "$missing required var(s) missing — re-run this script."

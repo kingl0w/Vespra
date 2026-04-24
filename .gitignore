@@ -19,6 +19,10 @@ dashboard/dist/
 *.key
 *.pem
 
+# Local compose overrides (per-developer, never committed)
+docker-compose.override.yml
+docker-compose.override.yaml
+
 # Backups / temp
 *.bak*
 *.bak.*
