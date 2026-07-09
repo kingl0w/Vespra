@@ -215,21 +215,42 @@
   .svc-meta { font-size: 11px; color: var(--accent-dim); margin-top: 4px; letter-spacing:0.03em; }
   .svc-desc { color: var(--muted); font-size: 13.5px; line-height:1.6; }
 
-  /* ---- agents: single centered stacked column ---- */
-  .agents { display:flex; flex-direction: column; gap: 12px; max-width: 620px; margin: 0 auto; width: 100%; }
-  .agent { background: var(--surface); padding: 18px 22px; border:1px solid var(--border); border-radius: 10px; cursor: pointer; transition: border-color .15s, background .15s; text-align:center; width: 100%; }
-  .agent:hover { border-color: var(--accent-dim); background: var(--surface-2); }
-  .agent.open { border-color: var(--accent); }
-  .agent-head { display:flex; align-items:center; justify-content:center; gap: 8px; }
-  .agent-name { font-weight: 700; color: var(--accent); font-size: 14px; }
-  .agent-toggle { color: var(--muted); font-size: 15px; transition: transform .2s; line-height:1; }
-  .agent.open .agent-toggle { transform: rotate(45deg); }
-  .agent-job { font-size: 12.5px; color: var(--muted); line-height:1.55; margin-top: 7px; }
-  .agent-detail { display:grid; grid-template-rows: 0fr; transition: grid-template-rows .28s ease; }
-  .agent.open .agent-detail { grid-template-rows: 1fr; }
-  .agent-detail-inner { overflow: hidden; }
-  .agent-prompt { margin-top: 12px; padding: 11px 13px; background: var(--bg); border:1px solid var(--border); border-radius: 7px; font-size: 11.5px; color: var(--muted); line-height:1.6; text-align:left; }
-  .agent-prompt .pl { color: var(--accent-dim); text-transform:uppercase; letter-spacing:0.08em; font-size:9.5px; display:block; margin-bottom:5px; }
+  /* ---- agents: swarm constellation ---- */
+  .swarm { display:flex; flex-direction:column; align-items:center; gap: 24px; }
+  .swarm-ring { position: relative; width: min(92vw, 460px); aspect-ratio: 1; margin: 0 auto; }
+  .swarm-ring .links { position:absolute; inset:0; width:100%; height:100%; overflow:visible; pointer-events:none; }
+  .swarm-ring .links line { stroke: color-mix(in srgb, var(--accent) 20%, transparent); stroke-width: 0.4; transition: stroke .2s, stroke-width .2s; }
+  .swarm-ring .links line.hot { stroke: var(--accent); stroke-width: 0.7; stroke-dasharray: 2 2; animation: flow 0.9s linear infinite; }
+  @keyframes flow { to { stroke-dashoffset: -4; } }
+  .hub {
+    position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    width: 88px; height:88px; border-radius:50%; background: var(--surface);
+    border:1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; z-index:2;
+  }
+  .hub::before { content:""; position:absolute; inset:-7px; border-radius:50%; border:1px solid color-mix(in srgb,var(--accent) 22%, transparent); animation: hubpulse 2.8s ease-in-out infinite; }
+  @keyframes hubpulse { 0%,100%{ transform:scale(1); opacity:.55 } 50%{ transform:scale(1.09); opacity:.12 } }
+  .hub .hub-t { font-size:9.5px; letter-spacing:0.16em; color:var(--muted); text-transform:uppercase; }
+  .hub .hub-n { font-family:var(--display); font-weight:900; font-size:22px; color:var(--accent); line-height:1; }
+  .node {
+    position:absolute; transform:translate(-50%,-50%); z-index:3;
+    font-family:var(--mono); font-size:11px; font-weight:600; color:var(--muted);
+    background: var(--surface); border:1px solid var(--border); border-radius:20px;
+    padding:5px 11px; cursor:pointer; white-space:nowrap; transition: color .16s, background .16s, border-color .16s, box-shadow .16s, transform .16s;
+  }
+  .node:hover { color:var(--text); border-color:var(--accent-dim); transform:translate(-50%,-50%) scale(1.07); }
+  .node.active { color:#000; background:var(--accent); border-color:var(--accent); box-shadow:0 0 20px -4px var(--accent); }
+  .swarm-detail { width:100%; max-width:560px; background:var(--surface); border:1px solid var(--border); border-radius:11px; padding: 18px 20px; min-height:120px; }
+  .swarm-detail .sd-name { font-family:var(--display); font-weight:800; color:var(--accent); font-size:18px; }
+  .swarm-detail .sd-job { color:var(--text); font-size:13.5px; margin-top:6px; line-height:1.55; }
+  .swarm-detail .sd-prompt { margin-top:12px; padding:11px 13px; background:var(--bg); border:1px solid var(--border); border-radius:7px; font-size:11.5px; color:var(--muted); line-height:1.6; }
+  .swarm-detail .sd-prompt .pl { color:var(--accent-dim); text-transform:uppercase; letter-spacing:0.08em; font-size:9.5px; display:block; margin-bottom:5px; }
+  /* mobile: collapse the ring into centered chips */
+  @media (max-width: 560px) {
+    .swarm-ring { aspect-ratio:auto; width:100%; display:flex; flex-wrap:wrap; justify-content:center; align-content:center; gap:8px; padding: 2px 0; }
+    .swarm-ring .links, .hub { display:none; }
+    .node, .node:hover, .node.active { position:static !important; transform:none !important; }
+  }
 
   /* ---- safety ---- */
   .safety { display:grid; grid-template-columns: repeat(2,1fr); gap: 12px; }
@@ -365,9 +386,15 @@
 <section id="agents">
   <div class="wrap">
     <div class="kicker">The swarm</div>
-    <h2>Nine agents, each a focused prompt</h2>
-    <p class="sub">They don't run continuously — each is a small, single-purpose LLM wrapper invoked as the goal moves through its steps. Tap any agent to see its role and a snippet of its actual prompt.</p>
-    <div class="agents" id="agents"></div>
+    <h2>Nine agents orbit one goal</h2>
+    <p class="sub">Each is a small, single-purpose LLM wrapper, invoked as your goal moves through the pipeline. Tap a node to see its role and a snippet of its real prompt.</p>
+    <div class="swarm">
+      <div class="swarm-ring" id="swarmRing">
+        <svg class="links" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg>
+        <div class="hub"><span class="hub-t">goal</span><span class="hub-n">◆</span></div>
+      </div>
+      <div class="swarm-detail" id="swarmDetail" aria-live="polite"></div>
+    </div>
   </div>
 </section>
 
@@ -638,26 +665,38 @@ $("killToggle").addEventListener("click", () => {
 
 $("runBtn").addEventListener("click", run);
 
-// ---- agents grid (clickable, expandable) ----
-const agentsEl = $("agents");
-Object.entries(AGENTS).forEach(([name, [job, prompt]]) => {
-  const d = document.createElement("button");
-  d.className = "agent"; d.type = "button"; d.setAttribute("aria-expanded", "false");
-  d.innerHTML = `
-    <div class="agent-head">
-      <span class="agent-name">${name}</span>
-      <span class="agent-toggle">+</span>
-    </div>
-    <div class="agent-job">${job}</div>
-    <div class="agent-detail"><div class="agent-detail-inner">
-      <div class="agent-prompt"><span class="pl">system prompt</span>${prompt}</div>
-    </div></div>`;
-  d.onclick = () => {
-    const open = d.classList.toggle("open");
-    d.setAttribute("aria-expanded", String(open));
-  };
-  agentsEl.appendChild(d);
+// ---- agents: swarm constellation ----
+const RING = $("swarmRing");
+const SVGNS = "http://www.w3.org/2000/svg";
+const linkSvg = RING.querySelector(".links");
+const agentNames = Object.keys(AGENTS);
+const nodeEls = {}, lineEls = {};
+const CX = 50, CY = 50, RAD = 38;
+agentNames.forEach((name, i) => {
+  const ang = (-90 + i * (360 / agentNames.length)) * Math.PI / 180;
+  const px = CX + RAD * Math.cos(ang), py = CY + RAD * Math.sin(ang);
+  const ln = document.createElementNS(SVGNS, "line");
+  ln.setAttribute("x1", CX); ln.setAttribute("y1", CY);
+  ln.setAttribute("x2", px.toFixed(2)); ln.setAttribute("y2", py.toFixed(2));
+  linkSvg.appendChild(ln); lineEls[name] = ln;
+  const b = document.createElement("button");
+  b.className = "node"; b.type = "button"; b.textContent = name;
+  b.style.left = px.toFixed(2) + "%"; b.style.top = py.toFixed(2) + "%";
+  b.setAttribute("aria-label", "Show " + name + " agent details");
+  b.onclick = () => selectAgent(name);
+  RING.appendChild(b); nodeEls[name] = b;
 });
+function selectAgent(name) {
+  agentNames.forEach((n) => {
+    nodeEls[n].classList.toggle("active", n === name);
+    lineEls[n].classList.toggle("hot", n === name);
+  });
+  const [job, prompt] = AGENTS[name];
+  $("swarmDetail").innerHTML =
+    `<div class="sd-name">${name}</div><div class="sd-job">${job}</div>` +
+    `<div class="sd-prompt"><span class="pl">system prompt</span>${prompt}</div>`;
+}
+selectAgent("scout");
 
 // ---- init ----
 selectTask("yield");
