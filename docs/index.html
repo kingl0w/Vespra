@@ -7,7 +7,7 @@
 <meta name="description" content="Vespra is a self-hosted AI agent swarm that grows your crypto from a plain-English goal. Keys stay on your machine. Interactive simulation." />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@500;700;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
 <style>
   :root {
     --bg:        #0a0a0a;
@@ -24,6 +24,7 @@
     --yellow:    #eab308;
     --orange:    #f97316;
     --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+    --display: "Roboto", "Helvetica Neue", Arial, sans-serif;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
@@ -78,12 +79,13 @@
   .eyebrow .dot { width:7px; height:7px; border-radius:50%; background: var(--green); box-shadow: 0 0 10px var(--green); animation: pulse 2.4s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
   h1 {
-    font-weight: 800;
-    font-size: clamp(30px, 6.4vw, 62px);
-    line-height: 1.04;
-    letter-spacing: -0.045em;
+    font-family: var(--display);
+    font-weight: 900;
+    font-size: clamp(32px, 6.6vw, 64px);
+    line-height: 1.02;
+    letter-spacing: -0.025em;
     max-width: 16ch;
-    margin-bottom: 24px;
+    margin-bottom: 22px;
     text-wrap: balance;
   }
   h1 .g { color: var(--accent); }
@@ -105,7 +107,7 @@
 
   section { padding: clamp(48px, 8vw, 92px) 0; border-top: 1px solid var(--border); }
   .kicker { font-size: 11.5px; letter-spacing:0.16em; text-transform:uppercase; color: var(--accent-dim); margin-bottom: 14px; }
-  h2 { font-weight: 800; font-size: clamp(23px, 3.6vw, 36px); letter-spacing:-0.035em; margin-bottom: 14px; text-wrap: balance; }
+  h2 { font-family: var(--display); font-weight: 800; font-size: clamp(24px, 3.6vw, 38px); letter-spacing:-0.02em; margin-bottom: 14px; text-wrap: balance; }
   .sub { color: var(--muted); max-width: 62ch; margin-bottom: 36px; line-height:1.65; }
   code.inline { background: var(--surface-2); border:1px solid var(--border); padding: 1px 6px; border-radius: 4px; color: var(--accent); font-size: 0.86em; white-space: nowrap; }
 
@@ -213,22 +215,20 @@
   .svc-meta { font-size: 11px; color: var(--accent-dim); margin-top: 4px; letter-spacing:0.03em; }
   .svc-desc { color: var(--muted); font-size: 13.5px; line-height:1.6; }
 
-  /* ---- agents ---- */
-  .agents { display:grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-  @media (max-width: 760px){ .agents { grid-template-columns: 1fr 1fr; } }
-  @media (max-width: 480px){ .agents { grid-template-columns: 1fr; } }
-  .agent { background: var(--surface); padding: 20px 22px; border:1px solid var(--border); border-radius: 10px; cursor: pointer; transition: border-color .15s, background .15s; text-align:left; }
+  /* ---- agents: single centered stacked column ---- */
+  .agents { display:flex; flex-direction: column; gap: 12px; max-width: 620px; margin: 0 auto; width: 100%; }
+  .agent { background: var(--surface); padding: 18px 22px; border:1px solid var(--border); border-radius: 10px; cursor: pointer; transition: border-color .15s, background .15s; text-align:center; width: 100%; }
   .agent:hover { border-color: var(--accent-dim); background: var(--surface-2); }
   .agent.open { border-color: var(--accent); }
-  .agent-head { display:flex; align-items:center; justify-content:space-between; gap: 10px; }
+  .agent-head { display:flex; align-items:center; justify-content:center; gap: 8px; }
   .agent-name { font-weight: 700; color: var(--accent); font-size: 14px; }
   .agent-toggle { color: var(--muted); font-size: 15px; transition: transform .2s; line-height:1; }
   .agent.open .agent-toggle { transform: rotate(45deg); }
-  .agent-job { font-size: 12.5px; color: var(--muted); line-height:1.55; margin-top: 8px; }
+  .agent-job { font-size: 12.5px; color: var(--muted); line-height:1.55; margin-top: 7px; }
   .agent-detail { display:grid; grid-template-rows: 0fr; transition: grid-template-rows .28s ease; }
   .agent.open .agent-detail { grid-template-rows: 1fr; }
   .agent-detail-inner { overflow: hidden; }
-  .agent-prompt { margin-top: 12px; padding: 11px 12px; background: var(--bg); border:1px solid var(--border); border-radius: 7px; font-size: 11.5px; color: var(--muted); line-height:1.6; }
+  .agent-prompt { margin-top: 12px; padding: 11px 13px; background: var(--bg); border:1px solid var(--border); border-radius: 7px; font-size: 11.5px; color: var(--muted); line-height:1.6; text-align:left; }
   .agent-prompt .pl { color: var(--accent-dim); text-transform:uppercase; letter-spacing:0.08em; font-size:9.5px; display:block; margin-bottom:5px; }
 
   /* ---- safety ---- */
@@ -266,8 +266,8 @@
 <div class="hero">
   <div class="wrap">
     <span class="eyebrow"><span class="dot"></span>self-hosted · your keys never leave your machine</span>
-    <h1>Tell it a goal.<br>A <span class="g">swarm of agents</span> does the rest.</h1>
-    <p class="lede">Vespra reads a plain-English goal — <strong>"earn yield on 0.05 ETH on Base, WETH and USDC only"</strong> — and nine small AI agents scout pools, gate risk, execute swaps, and watch the position until it hits your target. No SaaS, no shared backend. It runs on your box.</p>
+    <h1>Tell it a goal.<br>The <span class="g">swarm</span> does the rest.</h1>
+    <p class="lede">Nine AI agents take one plain-English goal and run it: scout, risk-check, swap, monitor, exit. <strong>Self-hosted. Your keys never leave your machine.</strong></p>
     <div class="cta">
       <a href="#sim" class="btn btn-primary">▸ Run the simulation</a>
       <a href="#how" class="btn btn-ghost">See how it works</a>
@@ -331,7 +331,7 @@
         </div>
       </div>
     </div>
-    <p style="font-size:11.5px;color:var(--muted);margin-top:14px;line-height:1.6;">Step names, agent roles, risk grades and statuses (<code class="inline">Confirmed</code> / <code class="inline">DryRun</code> / gate rejections) come from the gateway source. Numbers are illustrative.</p>
+    <p style="font-size:11.5px;color:var(--muted);margin-top:14px;line-height:1.6;">These are example goals for real strategies — in the app you type any goal and the LLM picks the strategy. The step names (<code class="inline">SCOUTING</code> … <code class="inline">COMPOUNDING</code>), agent roles, risk grades and statuses (<code class="inline">Confirmed</code> / <code class="inline">DryRun</code> / gate rejections) are taken from the gateway source; the numbers are illustrative. The real UI is the dashboard, not this page.</p>
   </div>
 </section>
 
@@ -416,43 +416,41 @@ const AGENTS = {
 
 // ---- tasks: each drives a distinct pipeline through different agents ----
 const S = (key, agent, node) => ({ key, agent, node });
+// Every step name below is a real goal `current_step` value from the gateway
+// (SCOUTING/RISK/TRADING/EXECUTING/MONITORING/EXITING/COMPOUNDING). Each task is
+// an example goal for one real strategy; in the app you type any goal and the
+// LLM picks the strategy.
 const TASKS = {
   yield: {
     label: "Yield rotation", ic: "◇",
     goal: "Earn yield on 0.05 ETH on Base, WETH and USDC only",
     plan: { cap: "0.05 ETH", strat: "yield_rotate", gain: "+10%", stop: "-5%" },
+    agents: ["scout","risk","trader","executor","sentinel","yield"],
     steps: [
       S("SCOUTING","scout","1"), S("RISK","risk","2"), S("TRADING","trader","3"),
       S("EXECUTING","executor","4"), S("MONITORING","sentinel","5"),
-      S("ROTATING","yield","6"), S("EXITING","executor","7"), S("COMPOUNDING","coordinator","8"),
+      S("EXITING","executor","6"), S("COMPOUNDING","runner","7"),
     ],
   },
   compound: {
     label: "Compound", ic: "∞",
     goal: "Compound my 0.1 ETH on Base aggressively",
     plan: { cap: "0.10 ETH", strat: "compound", gain: "+15%", stop: "-8%" },
+    agents: ["scout","risk","trader","executor","sentinel"],
     steps: [
       S("SCOUTING","scout","1"), S("RISK","risk","2"), S("TRADING","trader","3"),
       S("EXECUTING","executor","4"), S("MONITORING","sentinel","5"),
-      S("EXITING","executor","6"), S("COMPOUNDING","coordinator","7"),
+      S("EXITING","executor","6"), S("COMPOUNDING","runner","7"),
     ],
   },
   snipe: {
     label: "Snipe new pool", ic: "⌖",
     goal: "Snipe new pools on Base Sepolia",
     plan: { cap: "0.02 ETH", strat: "snipe", gain: "+25%", stop: "-12%" },
+    agents: ["sniper","risk","trader","executor","sentinel"],
     steps: [
-      S("SNIPING","sniper","1"), S("RISK","risk","2"), S("EXECUTING","executor","3"),
-      S("MONITORING","sentinel","4"), S("EXITING","executor","5"),
-    ],
-  },
-  launch: {
-    label: "Launch a token", ic: "▲",
-    goal: "Deploy a token VTST, 1M supply, on Base Sepolia",
-    plan: { cap: "0.03 ETH", strat: "launch", gain: "n/a", stop: "n/a" },
-    steps: [
-      S("DESIGNING","launcher","1"), S("RISK","risk","2"),
-      S("DEPLOYING","executor","3"), S("REPORTING","coordinator","4"),
+      S("SCOUTING","sniper","1"), S("RISK","risk","2"), S("TRADING","trader","3"),
+      S("EXECUTING","executor","4"), S("MONITORING","sentinel","5"), S("EXITING","executor","6"),
     ],
   },
   rug: {
@@ -460,31 +458,33 @@ const TASKS = {
     goal: "Ape 0.05 ETH into PEPE2 on a 2-hour-old unverified pool",
     plan: { cap: "0.05 ETH", strat: "adaptive", gain: "+50%", stop: "-20%" },
     reject: true,
+    agents: ["scout","risk"],
     steps: [ S("SCOUTING","scout","1"), S("RISK","risk","2") ],
   },
 };
 
-// ---- log line generators per step ----
-function stepLogs(stepKey, plan, reject) {
+// ---- log line generators per step (real step keys only) ----
+function stepLogs(stepKey, plan, reject, taskId) {
   const apy = 6 + Math.floor(Math.random()*22);
   const g = parseFloat(plan.gain) || 12;
   const tvl = (1 + Math.random()*8).toFixed(1);
   const hash = () => "0x" + Math.floor(Math.random()*0xfffff).toString(16).padStart(4,"0") + "…" + Math.floor(Math.random()*0xffff).toString(16).padStart(4,"0");
+  const scouting = taskId === "snipe"
+    ? ["sniper · watching pool-launch webhook…", "new WETH pool detected · checking lock + honeypot", `▸ candidate · $${tvl}M initial liquidity`]
+    : ["scout · querying DefiLlama pool fetchers…", `ranking WETH/USDC pools by APY`, `▸ picked WETH-USDC · ${apy}% APY · $${tvl}M TVL`];
+  const monitoring = taskId === "yield"
+    ? ["subscribed · polling price every 300s…", `position +${(g*0.4).toFixed(1)}% · yield scheduler scanning APY`, `▸ target +${g}% reached · momentum fading`]
+    : ["subscribed · polling price every 300s…", `position +${(g*0.4).toFixed(1)}% · momentum steady`, `▸ target +${g}% reached · momentum fading`];
   const M = {
-    SCOUTING: ["querying DefiLlama pool fetchers…", `ranking WETH/USDC pools by APY`, `▸ picked WETH-USDC · ${apy}% APY · $${tvl}M TVL`],
-    SNIPING: ["subscribed to pool-launch webhook…", "new pool detected · checking lock + honeypot", `▸ candidate found · $${tvl}M initial liquidity`],
+    SCOUTING: scouting,
     RISK: reject
       ? ["grading candidate through risk agent…", `TVL low · token unverified · 2h old`, `▸ score HIGH · <span class="tag high">GATE BLOCKED</span>`]
       : ["grading candidate through risk agent…", `TVL ok · token verified · pair sane`, `▸ score LOW · <span class="tag low">GATE PASS</span>`],
     TRADING: ["fetching quote from ParaSwap…", "trader evaluating entry vs hold…", `▸ decision: SWAP · ${plan.cap} in`],
-    DESIGNING: ["drafting ERC-20 params…", "name=VESPRA symbol=VTST supply=1,000,000", "▸ deployment plan ready"],
     EXECUTING: ["building exactInputSingle calldata…", "→ keymaster /swap · cap ok · min-out floor set", null],
-    DEPLOYING: ["building contract creation tx…", "→ keymaster /tx/send · cap ok", null],
-    MONITORING: ["subscribed · polling price every 300s…", `position +${(g*0.4).toFixed(1)}% · momentum steady`, `▸ target +${g}% reached · momentum fading`],
-    ROTATING: ["yield scheduler · scanning for better APY…", `found pool at ${apy+4}% · +${(apy*0.6)|0}bps edge`, "▸ rotation signal published"],
+    MONITORING: monitoring,
     EXITING: ["sentinel → exit_gain · selling to WETH…", "→ keymaster /swap · min-out floor set", null],
     COMPOUNDING: [`realized +${g}% · folding into new capital…`, "cycle 1 complete · target met", `▸ goal <span class="tag confirmed">completed</span>`],
-    REPORTING: ["coordinator summarizing deployment…", `token live at ${hash()}`, `▸ goal <span class="tag confirmed">completed</span>`],
   };
   const lines = (M[stepKey] || ["working…","…","done"]).slice();
   // execution-type steps: fill the tx line based on dry-run vs live
@@ -531,8 +531,7 @@ function applyPlan(p) {
 }
 
 function renderAgentChips(t) {
-  const uniq = [...new Set(t.steps.map((s) => s.agent))];
-  $("agentChips").innerHTML = uniq.map((a) => `<span class="achip">${a}</span>`).join("");
+  $("agentChips").innerHTML = (t.agents || []).map((a) => `<span class="achip">${a}</span>`).join("");
 }
 
 // ---- pipeline render ----
@@ -589,7 +588,7 @@ async function run() {
       finish(btn); return;
     }
     const isRejectStep = t.reject && t.steps[i].key === "RISK";
-    await runStage(i, stepLogs(t.steps[i].key, t.plan, t.reject), isRejectStep);
+    await runStage(i, stepLogs(t.steps[i].key, t.plan, t.reject, state.task), isRejectStep);
     if (state.kill) {
       banner.className = "result-banner halt show";
       banner.innerHTML = `■ Kill switch active — pipeline halted at ${t.steps[i].key}. No further steps run and nothing is broadcast.`;
