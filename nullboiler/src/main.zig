@@ -173,9 +173,19 @@ pub fn main() !void {
     _ = c.signal(c.SIGINT, onSignal);
     _ = c.signal(c.SIGTERM, onSignal);
 
+    // Dedicated SQLite connection for the engine thread. Sharing the HTTP
+    // thread's single connection let their transactions interleave on one
+    // handle — a BEGIN IMMEDIATE/ROLLBACK in the API could sweep the engine's
+    // writes into it (data-integrity bug). WAL supports concurrent readers plus
+    // a single writer across separate connections, so each thread gets its own.
+    // Registered before the engine-thread join defer so LIFO closes this
+    // connection only after the engine thread has stopped using it.
+    var engine_store = try Store.init(allocator, db_path);
+    defer engine_store.deinit();
+
     // Start DAG engine on a background thread
     const poll_ms: u64 = cfg.engine.poll_interval_ms;
-    var engine = engine_mod.Engine.init(&store, allocator, poll_ms);
+    var engine = engine_mod.Engine.init(&engine_store, allocator, poll_ms);
     engine.configure(.{
         .health_check_interval_ms = @as(i64, @intCast(cfg.engine.health_check_interval_ms)),
         .worker_failure_threshold = @as(i64, @intCast(cfg.engine.worker_failure_threshold)),

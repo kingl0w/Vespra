@@ -180,6 +180,9 @@ async fn main() -> anyhow::Result<()> {
     if dry_run {
         tracing::info!("VESPRA_DRY_RUN=true — GoalRunner will skip Keymaster calls");
     }
+    //shared kill flag — halts orchestrators AND the goal pipeline
+    let kill_flag = Arc::new(AtomicBool::new(false));
+
     let goal_runner_deps = gateway_rs::goal_runner::GoalRunnerDeps {
         pool_fetcher: pool_fetcher.clone(),
         protocol_fetcher: protocol_fetcher.clone(),
@@ -196,10 +199,10 @@ async fn main() -> anyhow::Result<()> {
         redis: redis_client.clone(),
         http_client: http_client.clone(),
         dry_run,
+        kill_flag: kill_flag.clone(),
     };
 
-    //9. build shared kill flag + orchestrator
-    let kill_flag = Arc::new(AtomicBool::new(false));
+    //9. build orchestrator (shares the kill flag created above)
     let trade_up_orchestrator = Arc::new(TradeUpOrchestrator::new(
         pool_fetcher.clone(),
         protocol_fetcher.clone(),
@@ -457,6 +460,18 @@ async fn main() -> anyhow::Result<()> {
         state.aave_fetcher.clone(),
         state.yield_registry.clone(),
     ));
+
+    //10c. register agent workers with nullboiler so it can dispatch DAG steps
+    //back to us (no-op unless VESPRA_WORKER_CALLBACK_URL is set).
+    {
+        let client = http_client.clone();
+        let nb = config.nullboiler_url.clone();
+        let cb = config.worker_callback_url.clone();
+        let tok = config.gateway_token.clone();
+        tokio::spawn(async move {
+            gateway_rs::dag_registry::register_agent_workers(&client, &nb, &cb, &tok).await;
+        });
+    }
 
     let app = routes::router(state);
 

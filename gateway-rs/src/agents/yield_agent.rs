@@ -274,7 +274,7 @@ impl YieldAgent {
                     serde_json::from_str(&raw).map_err(|e| {
                         tracing::warn!(
                             "yield agent: LLM returned invalid JSON: {e}. Raw: {}",
-                            &raw[..raw.len().min(500)]
+                            crate::truncate_chars(&raw, 500)
                         );
                         anyhow::anyhow!("Yield LLM output is not valid JSON: {e}")
                     })?;
@@ -292,7 +292,7 @@ impl YieldAgent {
                     tracing::warn!(
                         "yield agent: unexpected action '{}' in LLM output, defaulting to hold. Raw: {}",
                         action,
-                        &raw[..raw.len().min(500)]
+                        crate::truncate_chars(&raw, 500)
                     );
                 }
 

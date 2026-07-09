@@ -77,8 +77,10 @@ pub async fn create_wallet(
     //ves-117: render with eip-55 checksum so logs and stored addresses use a
     //canonical, mixed-case form rather than alloy's debug-formatted output.
     let address = signer.address().to_checksum(None);
-    let private_key_bytes = signer.to_bytes();
+    let mut private_key_bytes = signer.to_bytes();
     let encrypted = crypto::encrypt_key(private_key_bytes.as_slice(), &state.master_password)?;
+    //wipe our copy of the raw key once it's encrypted (decrypt paths already do this).
+    crypto::zeroize_bytes(private_key_bytes.as_mut_slice());
 
     let cap_wei = if let Some(cap_eth) = &req.cap_eth {
         eth_to_wei(cap_eth)?
@@ -255,6 +257,9 @@ pub async fn send_native(
         .ok_or_else(|| AppError::ChainNotConfigured(wallet.chain.clone()))?;
 
     let value = eth_to_u256(&req.amount_eth)?;
+    // VES-90: cap accounting is in wei. Log the wei value, not the ETH decimal
+    // string — total_sent_wei() parses this column as u128 wei.
+    let value_wei_str = value.to_string();
 
     let cap_wei_str = &wallet.cap_wei;
     if cap_wei_str != "0" && !cap_wei_str.is_empty() {
@@ -307,7 +312,7 @@ pub async fn send_native(
             );
             state.keystore.log_tx(
                 &req.wallet_id, &wallet.chain, None,
-                "send_native", &req.to, &req.amount_eth,
+                "send_native", &req.to, &value_wei_str,
                 "simulation_failed", Some(&reason),
             )?;
             return Ok(Json(json!({
@@ -404,7 +409,7 @@ pub async fn send_native(
         Ok(tx_hash) => {
             state.keystore.log_tx(
                 &req.wallet_id, &wallet.chain, Some(&tx_hash),
-                "send_native", &req.to, &req.amount_eth, "confirmed", None,
+                "send_native", &req.to, &value_wei_str, "confirmed", None,
             )?;
             tracing::info!(wallet_id = %req.wallet_id, tx_hash = %tx_hash, attempts = %attempts, "Sent native token");
             Ok(Json(json!({
@@ -425,7 +430,7 @@ pub async fn send_native(
         Err(e) => {
             state.keystore.log_tx(
                 &req.wallet_id, &wallet.chain, None,
-                "send_native", &req.to, &req.amount_eth, "failed", Some(&e.to_string()),
+                "send_native", &req.to, &value_wei_str, "failed", Some(&e.to_string()),
             )?;
             Err(e)
         }
@@ -458,6 +463,34 @@ pub async fn send_tx_with_data(
         Some(v) if !v.is_empty() && v != "0" => eth_to_u256(v)?,
         _ => U256::ZERO,
     };
+
+    //── enforce the lifetime spend cap on native value (was previously
+    //   unchecked here — a full bypass of the wallet cap via /tx/send_tx). ──
+    let cap_wei_str = &wallet.cap_wei;
+    if !value.is_zero() && cap_wei_str != "0" && !cap_wei_str.is_empty() {
+        let cap = cap_wei_str.parse::<u128>().map_err(|_| {
+            tracing::error!(
+                wallet_id = %req.wallet_id, raw = %cap_wei_str,
+                "VES-90: wallet cap_wei not a valid u128 — rejecting send_tx"
+            );
+            AppError::CapCorrupt(cap_wei_str.clone())
+        })?;
+        let cap_u256 = U256::from(cap);
+        let total_sent = state.keystore.total_sent_wei(&req.wallet_id)?;
+        if total_sent > cap_u256 {
+            return Err(AppError::CapIntegrity {
+                address: wallet.address.clone(),
+                total_sent: total_sent.to_string(),
+                cap: cap_u256.to_string(),
+            });
+        }
+        if value > cap_u256 - total_sent {
+            return Err(AppError::CapExceeded {
+                balance: value.to_string(),
+                cap: (cap_u256 - total_sent).to_string(),
+            });
+        }
+    }
 
     //decode hex calldata
     let data_bytes: Option<Vec<u8>> = match &req.data {
@@ -581,6 +614,8 @@ pub struct SwapRequest {
     pub token_out: String,      // 0x... ERC-20 address
     pub amount_in_wei: String,  // u256 as decimal string
     pub chain: Option<String>,  // optional override; default = wallet.chain
+    #[serde(default)]
+    pub min_amount_out_wei: Option<String>, // slippage floor; enforced as amountOutMinimum
 }
 
 pub async fn swap_handler(
@@ -603,8 +638,28 @@ pub async fn swap_handler(
         return Err(AppError::BadRequest("amount_in_wei must be > 0".into()));
     }
 
+    //slippage floor: 0 (or absent) = no protection; keymaster warns loudly in that case.
+    let min_amount_out = match req.min_amount_out_wei.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => U256::from_str_radix(s, 10)
+            .map_err(|e| AppError::BadRequest(format!("Invalid min_amount_out_wei: {e}")))?,
+        _ => U256::ZERO,
+    };
+    //fail-safe: when enforcement is on, refuse unprotected swaps instead of
+    //silently sending them with amountOutMinimum=0 (sandwich bait).
+    if state.require_min_out && min_amount_out.is_zero() {
+        return Err(AppError::BadRequest(
+            "slippage protection required: min_amount_out_wei must be > 0 \
+             (VESPRA_KM_REQUIRE_MIN_OUT is enabled)".into(),
+        ));
+    }
+
+    //the lifetime cap is ETH-denominated, so it only applies to swaps that
+    //spend the wallet's native ETH value (token_in = ETH/WETH). ERC-20→X swaps
+    //rotate tokens without spending ETH and are neither capped nor counted.
+    let native_sourced = swap::is_native_token_in(chain_name, &req.token_in);
+
     let cap_wei_str = &wallet.cap_wei;
-    if cap_wei_str != "0" && !cap_wei_str.is_empty() {
+    if native_sourced && cap_wei_str != "0" && !cap_wei_str.is_empty() {
         let cap = cap_wei_str.parse::<u128>().map_err(|_| {
             tracing::error!(
                 wallet_id = %req.wallet_id,
@@ -657,19 +712,27 @@ pub async fn swap_handler(
         &req.token_in,
         &req.token_out,
         amount_in_wei,
+        min_amount_out,
     )
     .await;
 
     match result {
         Ok(r) => {
             //audit-log the final swap tx; wrap/approve are logged by step.
+            //native-sourced swaps count toward the ETH cap (tx_type swap_native,
+            //value in wei); ERC-20-sourced swaps are recorded but not counted.
+            let (tx_type, logged_value) = if native_sourced {
+                ("swap_native", amount_in_wei.to_string())
+            } else {
+                ("swap", req.amount_in_wei.clone())
+            };
             let _ = state.keystore.log_tx(
                 &req.wallet_id,
                 chain_name,
                 Some(&r.swap_tx_hash),
-                "swap",
+                tx_type,
                 &req.token_out,
-                &req.amount_in_wei,
+                &logged_value,
                 "confirmed",
                 None,
             );

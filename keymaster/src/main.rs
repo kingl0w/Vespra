@@ -69,8 +69,17 @@ async fn main() -> anyhow::Result<()> {
         "Vespra Keymaster starting"
     );
 
+    let require_min_out = std::env::var("VESPRA_KM_REQUIRE_MIN_OUT")
+        .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    if require_min_out {
+        tracing::info!("VESPRA_KM_REQUIRE_MIN_OUT=on — swaps without a slippage floor will be rejected");
+    }
+
     let state = Arc::new(AppState {
-        config: config.clone(), keystore, master_password, auth_token,
+        config: config.clone(), keystore,
+        master_password: zeroize::Zeroizing::new(master_password),
+        auth_token, require_min_out,
     });
 
     //public read-only routes — no auth required

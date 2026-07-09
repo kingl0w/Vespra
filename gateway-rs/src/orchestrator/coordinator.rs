@@ -177,7 +177,7 @@ impl CoordinatorOrchestrator {
                     .unwrap_or_else(|_| "{}".into());
                 //truncate large outputs
                 let truncated = if output_str.len() > 500 {
-                    format!("{}...", &output_str[..500])
+                    format!("{}...", crate::truncate_chars(&output_str, 500))
                 } else {
                     output_str
                 };
@@ -267,7 +267,7 @@ impl CoordinatorOrchestrator {
                     Err(_) => {
                         tracing::warn!(
                             "coordinator: LLM returned invalid JSON: {parse_err}. Raw: {}",
-                            &raw[..raw.len().min(500)]
+                            crate::truncate_chars(&raw, 500)
                         );
                         return Err(anyhow::anyhow!(
                             "Coordinator LLM output is not valid JSON: {parse_err}"
@@ -335,11 +335,24 @@ impl CoordinatorOrchestrator {
             self.config.nullboiler_url.trim_end_matches('/')
         );
 
-        let body = serde_json::json!({
-            "dag": dag_name,
-            "wallet": wallet,
-            "chain": chain,
-        });
+        //expand the named DAG into a real multi-step workflow from the registry.
+        //unknown names fall back to a schema-valid single task so the run is at
+        //least created (rather than 400'd) instead of silently dropped.
+        let body = crate::dag_registry::workflow_for(dag_name, wallet, chain)
+            .unwrap_or_else(|| {
+                tracing::warn!("coordinator: dag '{dag_name}' not in registry — sending single-task fallback");
+                serde_json::json!({
+                    "steps": [{
+                        "id": "root",
+                        "type": "task",
+                        "worker_tags": [dag_name],
+                        "prompt_template": format!(
+                            "Run {dag_name} for wallet {{{{input.wallet}}}} on chain {{{{input.chain}}}}"
+                        ),
+                    }],
+                    "input": { "dag": dag_name, "wallet": wallet, "chain": chain },
+                })
+            });
 
         let client = self.http_client.clone();
         match client
@@ -356,7 +369,7 @@ impl CoordinatorOrchestrator {
                     "coordinator: spawned dag '{}' on nullboiler → {} {}",
                     dag_name,
                     status,
-                    &text[..text.len().min(200)]
+                    crate::truncate_chars(&text, 200)
                 );
             }
             Err(e) => {

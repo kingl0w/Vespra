@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -71,6 +72,7 @@ pub struct GoalRunnerDeps {
     pub redis: Arc<redis::Client>,
     pub http_client: reqwest::Client,
     pub dry_run: bool,
+    pub kill_flag: Arc<AtomicBool>,
 }
 
 ///run the goalrunner loop as a tokio task.
@@ -102,6 +104,17 @@ pub async fn run_goal_with_resume(
         if *cancel_rx.borrow() {
             tracing::info!("[goal {goal_id}] cancelled — exiting runner");
             break;
+        }
+
+        //── kill switch: halt the pipeline (no scouting/executing/
+        //   broadcasting) while the global flag is set; resume when cleared.
+        if deps.kill_flag.load(Ordering::SeqCst) {
+            tracing::warn!("[goal {goal_id}] kill switch active — halting until cleared");
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(PAUSE_CHECK_SECS)) => {}
+                _ = cancel_rx.changed() => {}
+            }
+            continue;
         }
 
         //── ves-86: deadline check ─────────────────────────────
@@ -268,7 +281,7 @@ pub async fn run_goal_with_resume(
                     };
                     let _ = execution_gate::execute_traced(
                         &deps.executor, &deps.config, &deps.chain_registry, &deps.http_client,
-                        cached_wallet_uuid_val, &token_out, &weth_addr, &sell_amount, &goal.chain, deps.dry_run,
+                        cached_wallet_uuid_val, &token_out, &weth_addr, &sell_amount, "0", &goal.chain, deps.dry_run,
                     ).await;
                     continue; // go back to SCOUTING on next iteration
                 }
@@ -551,6 +564,14 @@ pub async fn run_goal_with_resume(
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
         }
 
+        //slippage floor: quote the expected output now and require at least
+        //(1 - max_slippage) of it on-chain, so the BUY can't be sandwiched.
+        let buy_min_out = compute_min_out(
+            &deps, &token_in, &token_out, &swap_amount_wei, chain_id,
+            deps.config.trader_max_slippage_pct,
+        )
+        .await;
+
         //ves-91: use the wallet uuid cached at goal-runner start. never
         //re-resolve mid-lifecycle — that's the bug this fix prevents.
         let buy_tx_status = execution_gate::execute_traced(
@@ -562,6 +583,7 @@ pub async fn run_goal_with_resume(
             &token_in,
             &token_out,
             &swap_amount_wei,
+            &buy_min_out,
             &goal.chain,
             deps.dry_run,
         )
@@ -693,6 +715,12 @@ pub async fn run_goal_with_resume(
                 break;
             }
         };
+        //slippage floor on the exit leg too (token_out → WETH).
+        let sell_min_out = compute_min_out(
+            &deps, &token_out, &weth_addr, &sell_amount, chain_id,
+            deps.config.trader_max_slippage_pct,
+        )
+        .await;
         let sell_tx_status = execution_gate::execute_traced(
             &deps.executor,
             &deps.config,
@@ -702,6 +730,7 @@ pub async fn run_goal_with_resume(
             &token_out,
             &weth_addr,
             &sell_amount,
+            &sell_min_out,
             &goal.chain,
             deps.dry_run,
         )
@@ -1135,6 +1164,45 @@ async fn sleep_interruptible(cancel_rx: &mut watch::Receiver<bool>, secs: u64) {
     }
 }
 
+//── slippage floor ───────────────────────────────────────────────
+
+/// Apply a max-slippage haircut to a quoted output amount (both wei decimal
+/// strings). Pure so it's unit-testable. Returns "0" on bad input so callers
+/// fall back to no floor (keymaster logs a warning) rather than crashing.
+pub fn apply_slippage(amount_out_wei: &str, max_slippage_pct: f64) -> String {
+    let out = match amount_out_wei.trim().parse::<u128>() {
+        Ok(n) if n > 0 => n,
+        _ => return "0".to_string(),
+    };
+    let bps = (max_slippage_pct.clamp(0.0, 100.0) * 100.0).round() as u128; // 1.0% -> 100 bps
+    let keep_bps = 10_000u128.saturating_sub(bps);
+    // u128 max ~3.4e38; token wei rarely exceeds ~1e30, so *keep_bps (<=1e4) is safe.
+    (out.saturating_mul(keep_bps) / 10_000).to_string()
+}
+
+/// Quote token_in→token_out and return the minimum acceptable output after
+/// slippage, as a wei decimal string. "0" means no floor could be computed.
+async fn compute_min_out(
+    deps: &GoalRunnerDeps,
+    token_in: &str,
+    token_out: &str,
+    amount_in_wei: &str,
+    chain_id: u64,
+    max_slippage_pct: f64,
+) -> String {
+    match deps
+        .quote_fetcher
+        .fetch_quote(token_in, token_out, amount_in_wei, chain_id)
+        .await
+    {
+        Ok(q) => apply_slippage(&q.amount_out_wei, max_slippage_pct),
+        Err(e) => {
+            tracing::warn!("[goal] pre-swap quote failed ({e}) — no slippage floor set");
+            "0".to_string()
+        }
+    }
+}
+
 //── p&l calculation (pure, for testing) ──────────────────────────
 
 pub fn compute_pnl(entry_eth: f64, current_eth: f64) -> (f64, f64) {
@@ -1150,6 +1218,24 @@ pub fn compute_pnl(entry_eth: f64, current_eth: f64) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_apply_slippage() {
+        // 1% haircut on 1_000_000 -> 990_000
+        assert_eq!(apply_slippage("1000000", 1.0), "990000");
+        // 0% slippage keeps the full amount
+        assert_eq!(apply_slippage("1000000", 0.0), "1000000");
+        // 50% haircut
+        assert_eq!(apply_slippage("1000000", 50.0), "500000");
+        // bad / zero / negative input -> "0" (no floor, never panics)
+        assert_eq!(apply_slippage("0", 1.0), "0");
+        assert_eq!(apply_slippage("notanumber", 1.0), "0");
+        assert_eq!(apply_slippage("", 1.0), "0");
+        // out-of-range pct is clamped, not panicking
+        assert_eq!(apply_slippage("1000000", 999.0), "0");
+        // large 18-decimal amount stays exact
+        assert_eq!(apply_slippage("1000000000000000000", 1.0), "990000000000000000");
+    }
 
     #[test]
     fn test_pnl_calculation() {

@@ -281,9 +281,14 @@ impl Keystore {
 
     pub fn total_sent_wei(&self, wallet_id: &str) -> AppResult<U256> {
         let conn = self.conn.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+        // Count native-value (ETH) spends toward the lifetime cap: send_native,
+        // send_tx, and ETH/WETH-sourced swaps (logged as swap_native), all in
+        // wei. Plain 'swap' (ERC-20-sourced) and treasury_fee are excluded —
+        // token-denominated / already netted. value_wei is a wei decimal string.
         let mut stmt = conn.prepare(
             "SELECT COALESCE(value_wei, '0') FROM tx_log
-             WHERE wallet_id = ?1 AND tx_type = 'send_native' AND status = 'confirmed'",
+             WHERE wallet_id = ?1 AND status = 'confirmed'
+               AND tx_type IN ('send_native', 'send_tx', 'swap_native')",
         )?;
         let rows: Vec<String> = stmt
             .query_map(params![wallet_id], |row| row.get::<_, String>(0))?

@@ -4,16 +4,19 @@ use aes_gcm::{
 };
 use argon2::Argon2;
 use rand::RngCore;
+use zeroize::Zeroizing;
 
 use crate::error::{AppError, AppResult};
 
 const SALT_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 
-fn derive_key(password: &[u8], salt: &[u8]) -> AppResult<[u8; 32]> {
-    let mut key = [0u8; 32];
+/// Derive the AES key inside a `Zeroizing` wrapper so the derived key material
+/// is wiped (volatile, non-elidable) when it drops, not left on the stack.
+fn derive_key(password: &[u8], salt: &[u8]) -> AppResult<Zeroizing<[u8; 32]>> {
+    let mut key = Zeroizing::new([0u8; 32]);
     Argon2::default()
-        .hash_password_into(password, salt, &mut key)
+        .hash_password_into(password, salt, key.as_mut_slice())
         .map_err(|e| AppError::Encryption(format!("Key derivation failed: {e}")))?;
     Ok(key)
 }
@@ -26,7 +29,7 @@ pub fn encrypt_key(private_key: &[u8], master_password: &str) -> AppResult<Strin
     rng.fill_bytes(&mut nonce_bytes);
 
     let key = derive_key(master_password.as_bytes(), &salt)?;
-    let cipher = Aes256Gcm::new_from_slice(&key)
+    let cipher = Aes256Gcm::new_from_slice(key.as_slice())
         .map_err(|e| AppError::Encryption(format!("Cipher init failed: {e}")))?;
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
@@ -55,7 +58,7 @@ pub fn decrypt_key(encrypted_hex: &str, master_password: &str) -> AppResult<Vec<
     let ciphertext = &blob[SALT_LEN + NONCE_LEN..];
 
     let key = derive_key(master_password.as_bytes(), salt)?;
-    let cipher = Aes256Gcm::new_from_slice(&key)
+    let cipher = Aes256Gcm::new_from_slice(key.as_slice())
         .map_err(|e| AppError::Decryption(format!("Cipher init failed: {e}")))?;
     let nonce = Nonce::from_slice(nonce_bytes);
     let plaintext = cipher
@@ -65,10 +68,11 @@ pub fn decrypt_key(encrypted_hex: &str, master_password: &str) -> AppResult<Vec<
     Ok(plaintext)
 }
 
+/// Volatile, non-elidable wipe of secret bytes (decrypted keys). Uses the
+/// zeroize crate so the release optimizer can't remove it like a plain loop.
 pub fn zeroize_bytes(data: &mut [u8]) {
-    for byte in data.iter_mut() {
-        *byte = 0;
-    }
+    use zeroize::Zeroize;
+    data.zeroize();
 }
 
 #[cfg(test)]

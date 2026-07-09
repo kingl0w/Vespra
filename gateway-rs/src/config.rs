@@ -130,8 +130,18 @@ pub struct GatewayConfig {
     pub cors_origin: String,
     #[serde(default)]
     pub cf_access_required: bool,
+    /// Optional app-level bearer token (VESPRA_GATEWAY_TOKEN). When non-empty,
+    /// every request except the health allowlist must present it. This is what
+    /// stops an attacker who reaches :9001 from driving the keymaster proxy.
+    #[serde(default)]
+    pub gateway_token: String,
     #[serde(default = "default_nullboiler_url")]
     pub nullboiler_url: String,
+    /// URL nullboiler should call back to reach this gateway's worker endpoints
+    /// (e.g. http://gateway:9001). Empty = don't register workers with nullboiler
+    /// (the DAG integration stays off). VESPRA_WORKER_CALLBACK_URL.
+    #[serde(default)]
+    pub worker_callback_url: String,
     #[serde(default = "default_rl_webhook_rpm")]
     pub rl_webhook_rpm: u64,
     #[serde(default = "default_trader_max_slippage_pct")]

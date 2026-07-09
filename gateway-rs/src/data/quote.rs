@@ -157,7 +157,7 @@ impl QuoteFetcher {
         if !status.is_success() {
             tracing::warn!(
                 "1inch quote returned {status}: {}",
-                &body[..body.len().min(300)]
+                crate::truncate_chars(&body, 300)
             );
             return Ok(self.fallback_quote(token_in, token_out, amount_in_wei));
         }
@@ -224,7 +224,7 @@ impl QuoteFetcher {
         if !status.is_success() {
             tracing::warn!(
                 "paraswap quote returned {status}: {}",
-                &body[..body.len().min(300)]
+                crate::truncate_chars(&body, 300)
             );
             return Ok(self.fallback_quote(token_in, token_out, amount_in_wei));
         }

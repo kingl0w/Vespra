@@ -215,7 +215,7 @@ impl ScoutAgent {
                         } else {
                             tracing::warn!(
                                 "scout: LLM output is not valid JSON matching expected schema. Raw: {}",
-                                &raw[..raw.len().min(500)]
+                                crate::truncate_chars(&raw, 500)
                             );
                             return Err(anyhow::anyhow!(
                                 "Scout LLM output did not match expected schema — \
@@ -229,7 +229,7 @@ impl ScoutAgent {
                     Err(parse_err) => {
                         tracing::warn!(
                             "scout: LLM returned invalid JSON. Error: {parse_err}. Raw: {}",
-                            &raw[..raw.len().min(500)]
+                            crate::truncate_chars(&raw, 500)
                         );
                         return Err(anyhow::anyhow!(
                             "Scout LLM output is not valid JSON: {parse_err}"

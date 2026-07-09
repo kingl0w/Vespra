@@ -8,6 +8,7 @@ pub mod fees;
 pub mod goals;
 pub mod health;
 pub mod launcher;
+pub mod nullboiler_worker;
 pub mod portfolio;
 pub mod proxy;
 pub mod ratelimit;
@@ -111,6 +112,49 @@ async fn cf_access_middleware(
     next.run(request).await
 }
 
+///paths reachable without the gateway token — health only. Everything else
+///(including read endpoints that expose wallet activity, and the keymaster
+///proxy) requires the token when one is configured.
+fn is_public_path(path: &str) -> bool {
+    matches!(path, "/health" | "/api/health")
+}
+
+///middleware: app-level bearer-token auth. When `gateway_token` is empty this
+///is a no-op (backward compatible; the loopback bind / Cloudflare Access remain
+///the perimeter). When set, it is enforced on every non-public route — closing
+///the confused-deputy hole where anyone reaching :9001 could drive the
+///keymaster proxy (which injects keymaster's own bearer token).
+async fn gateway_auth_middleware(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let token = &state.config.gateway_token;
+    if token.is_empty() || is_public_path(request.uri().path()) {
+        return next.run(request).await;
+    }
+
+    let presented = request
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "));
+
+    let ok = presented
+        .map(|p| crate::constant_time_eq(p.as_bytes(), token.as_bytes()))
+        .unwrap_or(false);
+
+    if ok {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "gateway auth required"})),
+        )
+            .into_response()
+    }
+}
+
 ///middleware: inject config into request extensions for cf_access_middleware
 async fn inject_extensions(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -158,6 +202,7 @@ pub fn router(state: AppState) -> Router {
         .merge(boot::router())
         .merge(agent_config::router())
         .merge(backtest::router())
+        .merge(nullboiler_worker::router())
         .merge(proxy::router())
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
@@ -166,5 +211,6 @@ pub fn router(state: AppState) -> Router {
         ))
         .layer(middleware::from_fn_with_state(state.clone(), inject_extensions))
         .layer(middleware::from_fn(cf_access_middleware))
+        .layer(middleware::from_fn_with_state(state.clone(), gateway_auth_middleware))
         .layer(cors)
 }

@@ -60,7 +60,14 @@ services:
       VESPRA_REDIS_URL: redis://redis:6379
       VESPRA_KEYMASTER_URL: http://keymaster:9100
       VESPRA_KEYMASTER_TOKEN: ${VESPRA_KM_AUTH_TOKEN}
+      # Optional app-level auth. When set, every non-health request to :9001
+      # must carry this bearer token (the dashboard's nginx injects it). Leave
+      # empty to run open behind the loopback bind / Cloudflare Access.
+      VESPRA_GATEWAY_TOKEN: ${VESPRA_GATEWAY_TOKEN:-}
       VESPRA_NULLBOILER_URL: http://nullboiler:9090
+      # Set so nullboiler can dispatch DAG steps back to the gateway's agent
+      # workers. Empty disables the nullboiler DAG integration.
+      VESPRA_WORKER_CALLBACK_URL: ${VESPRA_WORKER_CALLBACK_URL:-http://gateway:9001}
       # llm
       VESPRA_LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
       VESPRA_LLM_API_KEY: ${LLM_API_KEY}
@@ -93,12 +100,20 @@ services:
         condition: service_healthy
       keymaster:
         condition: service_healthy
+      # start after nullboiler so worker registration usually lands first try
+      # (registration also retries, so this is ordering, not a hard dependency).
+      nullboiler:
+        condition: service_started
 
   dashboard:
     build: ./dashboard
     restart: unless-stopped
     ports:
       - "127.0.0.1:9200:9200"
+    environment:
+      # nginx injects this as the gateway bearer token on /api/ proxied calls.
+      # Must match VESPRA_GATEWAY_TOKEN on the gateway.
+      GATEWAY_TOKEN: ${VESPRA_GATEWAY_TOKEN:-}
     depends_on:
       - gateway
 
