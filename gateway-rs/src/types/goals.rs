@@ -74,6 +74,11 @@ pub struct GoalSpec {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
     pub error: Option<String>,
+    ///ves-93a: step the goal was on when it transitioned to Failed.
+    ///`current_step` can be overwritten by later cycles, so the dashboard
+    ///reads this field for failed goals to show the true failure point.
+    #[serde(default)]
+    pub failed_at_step: Option<String>,
 }
 
 fn default_step() -> String {
@@ -115,6 +120,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             error: None,
+            failed_at_step: None,
         };
 
         let json = serde_json::to_string(&spec).expect("serialize");
@@ -139,6 +145,48 @@ mod tests {
         }
         let w: Wrap = serde_json::from_str(r#"{}"#).unwrap();
         assert_eq!(w.strategy, GoalStrategy::Adaptive);
+    }
+
+    #[test]
+    fn goal_spec_failed_at_step_roundtrip() {
+        let now = Utc::now();
+        let spec = GoalSpec {
+            id: Uuid::new_v4(),
+            raw_goal: "test".into(),
+            wallet_label: "w".into(),
+            wallet_id: None,
+            chain: "base_sepolia".into(),
+            capital_eth: 0.01,
+            target_gain_pct: 10.0,
+            stop_loss_pct: 5.0,
+            strategy: GoalStrategy::Adaptive,
+            status: GoalStatus::Failed,
+            cycles: 0,
+            current_step: "COMPOUNDING".into(),
+            entry_eth: 0.01,
+            current_eth: 0.01,
+            pnl_eth: 0.0,
+            pnl_pct: 0.0,
+            token_address: None,
+            token_amount_held: None,
+            resolved_wallet_uuid: None,
+            created_at: now,
+            updated_at: now,
+            error: Some("BUY tx reverted".into()),
+            failed_at_step: Some("EXECUTING".into()),
+        };
+        let json = serde_json::to_string(&spec).expect("serialize");
+        assert!(json.contains("\"failed_at_step\":\"EXECUTING\""));
+        let back: GoalSpec = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.failed_at_step.as_deref(), Some("EXECUTING"));
+
+        //absent field defaults to None (back-compat with pre-ves-93a records)
+        let old_json = serde_json::to_value(&spec).unwrap();
+        let mut map = old_json.as_object().unwrap().clone();
+        map.remove("failed_at_step");
+        let truncated = serde_json::to_string(&map).unwrap();
+        let parsed: GoalSpec = serde_json::from_str(&truncated).expect("old record");
+        assert_eq!(parsed.failed_at_step, None);
     }
 
     #[test]

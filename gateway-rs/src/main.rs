@@ -54,6 +54,16 @@ async fn main() -> anyhow::Result<()> {
     };
     let config = Arc::new(config);
 
+    if config.is_testnet() {
+        tracing::info!(
+            "[network] mode=testnet — relaxed risk gates, synthetic fallback pools enabled"
+        );
+    } else {
+        tracing::info!(
+            "[network] mode=mainnet — strict risk gates, real pool data required"
+        );
+    }
+
     //3. init chain registry (receives rpc_urls from config)
     let chain_registry = Arc::new(ChainRegistry::new(&config.rpc_urls));
     let available = chain_registry.available();
@@ -151,8 +161,8 @@ async fn main() -> anyhow::Result<()> {
         ScoutAgent::new(llm.clone())
             .with_yield_registry(yield_registry.clone(), config.clone()),
     );
-    let risk = Arc::new(RiskAgent::new(llm.clone()));
-    let trader = Arc::new(TraderAgent::new(llm.clone()));
+    let risk = Arc::new(RiskAgent::new(llm.clone(), config.clone()));
+    let trader = Arc::new(TraderAgent::new(llm.clone(), config.clone()));
     let sentinel = Arc::new(SentinelAgent::new(
         llm.clone(),
         config.keymaster_url.clone(),
@@ -183,6 +193,23 @@ async fn main() -> anyhow::Result<()> {
     //shared kill flag — halts orchestrators AND the goal pipeline
     let kill_flag = Arc::new(AtomicBool::new(false));
 
+    let telegram = match (
+        config.telegram_bot_token.as_deref(),
+        config.telegram_chat_id.as_deref(),
+    ) {
+        (Some(token), Some(chat_id)) if !token.is_empty() && !chat_id.is_empty() => {
+            tracing::info!("telegram notifications enabled");
+            Some(gateway_rs::notifications::TelegramClient::new(
+                token.to_string(),
+                chat_id.to_string(),
+            ))
+        }
+        _ => {
+            tracing::warn!("telegram notifications disabled — VESPRA_TELEGRAM_BOT_TOKEN and/or VESPRA_TELEGRAM_CHAT_ID not set");
+            None
+        }
+    };
+
     let goal_runner_deps = gateway_rs::goal_runner::GoalRunnerDeps {
         pool_fetcher: pool_fetcher.clone(),
         protocol_fetcher: protocol_fetcher.clone(),
@@ -200,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
         http_client: http_client.clone(),
         dry_run,
         kill_flag: kill_flag.clone(),
+        telegram: telegram.clone(),
     };
 
     //9. build orchestrator (shares the kill flag created above)
@@ -332,7 +360,23 @@ async fn main() -> anyhow::Result<()> {
         sentinel_monitor: Arc::new(SentinelMonitor::new()),
         yield_scheduler_status: gateway_rs::yield_scheduler::default_status(),
         historical_feed,
+        telegram,
     };
+
+    //10a-pre. sweep terminal goals past the 30-day retention window so
+    //auto-resume (and later list_goals calls) don't pay to re-scan them.
+    match gateway_rs::routes::goals::sweep_terminal_goals(&state.redis).await {
+        Ok(report) => {
+            tracing::info!(
+                "[boot] goal sweep: scanned={}, orphans_removed={}, purged={}, ttl_backfilled={}",
+                report.scanned,
+                report.orphan_index_entries_removed,
+                report.expired_terminal_purged,
+                report.terminal_ttl_backfilled,
+            );
+        }
+        Err(e) => tracing::warn!("[boot] goal sweep failed: {e}"),
+    }
 
     //10a. auto-resume running/paused goals from previous boot
     let auto_resume = std::env::var("VESPRA_AUTO_RESUME_GOALS")
@@ -370,13 +414,33 @@ async fn main() -> anyhow::Result<()> {
                             Some(gateway_rs::goal_runner::GoalStep::Monitoring)
                         }
                         "EXECUTING" => {
-                            from_monitoring += 1;
-                            tracing::warn!(
-                                "[boot] goal {} crashed mid-execution, resuming from MONITORING \
-                                 - verify position manually",
-                                goal.id
-                            );
-                            Some(gateway_rs::goal_runner::GoalStep::Monitoring)
+                            //ves-fix: if token_address is already persisted the BUY
+                            //landed before the crash — safe to skip to MONITORING.
+                            //otherwise the BUY never recorded, so re-enter the goal
+                            //loop from the top (scouting → … → executing) and let
+                            //token_address serve as the idempotency guard against
+                            //double-spend.
+                            match goal.token_address.as_deref() {
+                                Some(addr) if !addr.is_empty() => {
+                                    from_monitoring += 1;
+                                    tracing::info!(
+                                        "[boot] goal {} crashed mid-execution but BUY \
+                                         already recorded (token={}), resuming from MONITORING",
+                                        goal.id, addr
+                                    );
+                                    Some(gateway_rs::goal_runner::GoalStep::Monitoring)
+                                }
+                                _ => {
+                                    from_scouting += 1;
+                                    tracing::warn!(
+                                        "[boot] goal {} crashed mid-execution with no \
+                                         persisted token_address — re-entering EXECUTING \
+                                         from the top to re-attempt BUY",
+                                        goal.id
+                                    );
+                                    None
+                                }
+                            }
                         }
                         _ => {
                             //scouting, risk, trading, or unknown → start from beginning
@@ -450,6 +514,7 @@ async fn main() -> anyhow::Result<()> {
         sentinel.clone(),
         state.goal_runner_deps.price_oracle.clone(),
         state.chain_registry.clone(),
+        state.telegram.clone(),
     ));
 
     //10c. spawn yieldrotationscheduler background task
@@ -471,6 +536,19 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             gateway_rs::dag_registry::register_agent_workers(&client, &nb, &cb, &tok).await;
         });
+    }
+
+    //10d. boot notification
+    {
+        let n_chains = state.chain_registry.available().len();
+        let n_goals = state.goal_runners.lock().await.len();
+        gateway_rs::notifications::notify(
+            &state,
+            format!(
+                "Vespra gateway online \u{2014} {} chains, {} goals resumed",
+                n_chains, n_goals
+            ),
+        );
     }
 
     let app = routes::router(state);

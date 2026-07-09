@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::agents::AgentClient;
+use crate::config::GatewayConfig;
 use crate::data::quote::SwapQuote;
 use crate::types::decisions::{RiskScore, TraderDecision};
 use crate::types::opportunity::Opportunity;
@@ -15,15 +16,11 @@ pub struct TraderContext {
     pub risk_score: RiskScore,
     pub min_gain_pct: f64,
     pub max_eth: f64,
-    ///chain the goal is targeting. used to apply testnet-vs-mainnet trade rules.
-    ///defaults to the opportunity's chain if not set explicitly by the caller.
+    ///chain the goal is targeting. passed through to the LLM prompt so it
+    ///can reason about chain-specific protocols, but momentum gating is
+    ///driven by NETWORK_MODE, not the chain name.
     #[serde(default)]
     pub chain: String,
-}
-
-fn is_testnet_chain(chain: &str) -> bool {
-    let c = chain.to_lowercase();
-    c.contains("sepolia") || c.contains("testnet") || c.contains("goerli")
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,11 +60,12 @@ Other rules (apply on all chains):\n\
 
 pub struct TraderAgent {
     llm: Arc<dyn AgentClient>,
+    config: Arc<GatewayConfig>,
 }
 
 impl TraderAgent {
-    pub fn new(llm: Arc<dyn AgentClient>) -> Self {
-        Self { llm }
+    pub fn new(llm: Arc<dyn AgentClient>, config: Arc<GatewayConfig>) -> Self {
+        Self { llm, config }
     }
 
     pub async fn evaluate(&self, ctx: &TraderContext) -> Result<TraderDecision> {
@@ -76,7 +74,7 @@ impl TraderAgent {
         } else {
             ctx.chain.clone()
         };
-        let testnet = is_testnet_chain(&effective_chain);
+        let testnet = self.config.is_testnet();
         let chain_label = if testnet { "TESTNET" } else { "MAINNET" };
 
         let ctx_json = serde_json::to_string(ctx)?;
@@ -111,6 +109,7 @@ impl TraderAgent {
             && !ctx.quote.token_out.is_empty()
             && !ctx.quote.amount_in_wei.is_empty()
         {
+            tracing::info!("[trader] testnet mode — skipping momentum threshold");
             tracing::info!(
                 "[trader] testnet override: HOLD(momentum) → SWAP using quote ({} → {} amount={})",
                 ctx.quote.token_in,
@@ -145,5 +144,72 @@ impl TraderAgent {
         let prompt = format!("{}\n\nHowever, for this request respond with helpful prose or JSON as appropriate. \
             Do not restrict yourself to the swap schema — answer the user's question directly.", SYSTEM_PROMPT);
         self.llm.call(&prompt, question).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct MockLlm(String);
+
+    #[async_trait]
+    impl AgentClient for MockLlm {
+        async fn call(&self, _system: &str, _task: &str) -> Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn test_config(mode: &str) -> Arc<GatewayConfig> {
+        let cfg: GatewayConfig =
+            serde_json::from_value(serde_json::json!({ "network_mode": mode })).unwrap();
+        Arc::new(cfg)
+    }
+
+    fn test_ctx() -> TraderContext {
+        TraderContext {
+            opportunity: Opportunity {
+                chain: "base".into(),
+                ..Default::default()
+            },
+            quote: SwapQuote {
+                token_in: "0xaaaa".into(),
+                token_out: "0xbbbb".into(),
+                amount_in_wei: "1000000000000000".into(),
+                ..Default::default()
+            },
+            capital_eth: 0.01,
+            risk_score: RiskScore::Low,
+            min_gain_pct: 1.0,
+            max_eth: 0.05,
+            chain: "base".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn low_momentum_holds_on_mainnet() {
+        let llm = Arc::new(MockLlm(
+            r#"{"action":"hold","reasoning":"momentum_score 0.3 below 0.6 threshold"}"#.into(),
+        ));
+        let trader = TraderAgent::new(llm, test_config("mainnet"));
+        let decision = trader.evaluate(&test_ctx()).await.unwrap();
+        assert!(
+            matches!(decision, TraderDecision::Hold { .. }),
+            "low momentum on mainnet must hold, got: {decision:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn low_momentum_proceeds_on_testnet() {
+        let llm = Arc::new(MockLlm(
+            r#"{"action":"hold","reasoning":"momentum_score 0.3 below 0.6 threshold"}"#.into(),
+        ));
+        let trader = TraderAgent::new(llm, test_config("testnet"));
+        let decision = trader.evaluate(&test_ctx()).await.unwrap();
+        assert!(
+            matches!(decision, TraderDecision::Swap { .. }),
+            "low momentum on testnet must swap via override, got: {decision:?}"
+        );
     }
 }

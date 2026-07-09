@@ -30,13 +30,33 @@ fn goal_key(id: &Uuid) -> String {
 
 const GOALS_INDEX_KEY: &str = "vespra:goals:index";
 
+///30-day TTL applied to terminal goal records so they age out rather than
+///accumulating forever. list_goals() already skips ids whose GET returns
+///None, so expiry is self-cleaning on the read path; the startup sweep
+///handles index-side orphans.
+const TERMINAL_GOAL_TTL_SECS: i64 = 30 * 24 * 60 * 60;
+
+fn is_terminal(status: &GoalStatus) -> bool {
+    matches!(
+        status,
+        GoalStatus::Completed | GoalStatus::Failed | GoalStatus::Cancelled
+    )
+}
+
 //── redis storage ───────────────────────────────────────────────
 
 pub async fn save_goal(redis: &redis::Client, goal: &GoalSpec) -> anyhow::Result<()> {
     let mut conn = redis.get_multiplexed_async_connection().await?;
     let json = serde_json::to_string(goal)?;
-    conn.set::<_, _, ()>(goal_key(&goal.id), &json).await?;
+    let key = goal_key(&goal.id);
+    conn.set::<_, _, ()>(&key, &json).await?;
     conn.sadd::<_, _, ()>(GOALS_INDEX_KEY, goal.id.to_string()).await?;
+    if is_terminal(&goal.status) {
+        //EXPIRE is idempotent — subsequent saves of an already-terminal goal
+        //just reset the 30-day window. keys remain visible to list_goals()
+        //until TTL fires, giving the dashboard a rolling-30-day history.
+        conn.expire::<_, ()>(&key, TERMINAL_GOAL_TTL_SECS).await?;
+    }
     Ok(())
 }
 
@@ -50,6 +70,71 @@ pub async fn get_goal(redis: &redis::Client, id: Uuid) -> anyhow::Result<GoalSpe
 ///public alias for use from main.rs boot resume.
 pub async fn list_goals_all(redis: &redis::Client) -> anyhow::Result<Vec<GoalSpec>> {
     list_goals(redis).await
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+pub struct GoalSweepReport {
+    pub scanned: usize,
+    ///index entries whose underlying key was already gone (TTL fired or
+    ///manually deleted). SREMed to keep the index truthful.
+    pub orphan_index_entries_removed: usize,
+    ///terminal goals older than the 30-day window — removed from both the
+    ///index and the key store immediately.
+    pub expired_terminal_purged: usize,
+    ///terminal goals within the 30-day window that didn't have a TTL yet
+    ///(pre-existing records from before this migration) — TTL applied.
+    pub terminal_ttl_backfilled: usize,
+}
+
+///ves: startup sweep. walks the goals index once at boot and brings every
+///entry into compliance with the 30-day terminal retention policy:
+/// - drops index entries pointing at already-expired keys
+/// - purges terminal goals older than 30d (key + index)
+/// - backfills the TTL on terminal goals that pre-date this migration
+///non-terminal goals are left untouched.
+pub async fn sweep_terminal_goals(
+    redis: &redis::Client,
+) -> anyhow::Result<GoalSweepReport> {
+    let mut conn = redis.get_multiplexed_async_connection().await?;
+    let ids: Vec<String> = conn.smembers(GOALS_INDEX_KEY).await?;
+    let mut report = GoalSweepReport { scanned: ids.len(), ..Default::default() };
+    let cutoff = Utc::now() - chrono::Duration::seconds(TERMINAL_GOAL_TTL_SECS);
+
+    for id_str in ids {
+        let key = format!("vespra:goal:{id_str}");
+        let raw: Option<String> = conn.get(&key).await.unwrap_or(None);
+        let Some(raw) = raw else {
+            //key gone but index stale — clean the index pointer.
+            let _: Result<(), _> = conn.srem::<_, _, ()>(GOALS_INDEX_KEY, &id_str).await;
+            report.orphan_index_entries_removed += 1;
+            continue;
+        };
+        let Ok(goal) = serde_json::from_str::<GoalSpec>(&raw) else {
+            //undeserializable blob — leave it alone; surfacing via logs is
+            //enough, and blind deletion risks losing a record we could
+            //recover after a schema fix.
+            tracing::warn!("[sweep] skip undeserializable goal {id_str}");
+            continue;
+        };
+        if !is_terminal(&goal.status) {
+            continue;
+        }
+        if goal.updated_at < cutoff {
+            let _: Result<(), _> = conn.srem::<_, _, ()>(GOALS_INDEX_KEY, &id_str).await;
+            let _: Result<(), _> = conn.del::<_, ()>(&key).await;
+            report.expired_terminal_purged += 1;
+        } else {
+            //EXPIRE returns 0 if no TTL was applied (already set). we can't
+            //distinguish "already had TTL" from "just set one" cheaply in
+            //async redis, so count every backfill attempt — the value is
+            //still useful as an upper bound on migration work.
+            if conn.expire::<_, ()>(&key, TERMINAL_GOAL_TTL_SECS).await.is_ok() {
+                report.terminal_ttl_backfilled += 1;
+            }
+        }
+    }
+
+    Ok(report)
 }
 
 async fn list_goals(redis: &redis::Client) -> anyhow::Result<Vec<GoalSpec>> {
@@ -117,7 +202,7 @@ pub struct ResolvedWallet {
     pub cap_eth: Option<f64>,
 }
 
-async fn resolve_wallet_info(
+pub async fn resolve_wallet_info(
     http_client: &reqwest::Client,
     keymaster_url: &str,
     keymaster_token: &str,
@@ -153,7 +238,6 @@ async fn resolve_wallet_info(
             let cap_eth = w["cap_wei"]
                 .as_str()
                 .and_then(|s| s.parse::<u128>().ok())
-                .filter(|c| *c > 0)
                 .map(|c| c as f64 / 1e18);
             return Ok(ResolvedWallet { id, address, cap_eth });
         }
@@ -168,18 +252,26 @@ async fn resolve_wallet_info(
 ///this much native eth for transaction fees.
 pub const GAS_RESERVE_ETH: f64 = 0.005;
 
+///ves: returns the id of an active goal on `wallet_label` + `chain`, if any.
+///concurrency is scoped per (wallet, chain) so a single wallet can run
+///goals on Base and Arbitrum simultaneously without colliding.
 pub async fn wallet_has_active_goal(
     redis: &redis::Client,
     wallet_label: &str,
+    chain: &str,
 ) -> Option<Uuid> {
     let goals = list_goals(redis).await.ok()?;
     let label_lower = wallet_label.to_lowercase();
+    let chain_lower = chain.to_lowercase();
     goals.into_iter().find_map(|g| {
         let active = matches!(
             g.status,
             GoalStatus::Pending | GoalStatus::Running | GoalStatus::Paused
         );
-        if active && g.wallet_label.to_lowercase() == label_lower {
+        if active
+            && g.wallet_label.to_lowercase() == label_lower
+            && g.chain.to_lowercase() == chain_lower
+        {
             Some(g.id)
         } else {
             None
@@ -238,6 +330,29 @@ Extract these fields from the text:\n\
 Respond with ONLY valid JSON matching this schema, no prose:\n\
 {\"capital_eth\": float, \"target_gain_pct\": float, \"stop_loss_pct\": float, \"strategy\": string, \"chain\": string}";
 
+fn classify_by_keyword(raw_goal: &str) -> Option<GoalStrategy> {
+    let lower = raw_goal.to_lowercase();
+    // yield_rotate keywords — checked first
+    for kw in &["earn yield", "yield farm", "yield", "rotate"] {
+        if lower.contains(kw) {
+            return Some(GoalStrategy::YieldRotate);
+        }
+    }
+    // compound keywords
+    for kw in &["compound", "reinvest", "auto-compound"] {
+        if lower.contains(kw) {
+            return Some(GoalStrategy::Compound);
+        }
+    }
+    // snipe keywords
+    for kw in &["snipe", "new pool", "new pair", "launch"] {
+        if lower.contains(kw) {
+            return Some(GoalStrategy::Snipe);
+        }
+    }
+    None
+}
+
 async fn parse_goal_via_llm(
     llm: &dyn AgentClient,
     raw_goal: &str,
@@ -260,15 +375,22 @@ async fn parse_goal_via_llm(
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
 
-    let strategy_str = val
-        .get("strategy")
-        .and_then(|v| v.as_str())
-        .unwrap_or("adaptive");
-    let strategy = match strategy_str {
-        "compound" => GoalStrategy::Compound,
-        "yield_rotate" => GoalStrategy::YieldRotate,
-        "snipe" => GoalStrategy::Snipe,
-        _ => GoalStrategy::Adaptive,
+    let strategy = if let Some(kw_strategy) = classify_by_keyword(raw_goal) {
+        tracing::info!("[goals] strategy classified by keyword: {:?}", kw_strategy);
+        kw_strategy
+    } else {
+        let strategy_str = val
+            .get("strategy")
+            .and_then(|v| v.as_str())
+            .unwrap_or("adaptive");
+        let llm_strategy = match strategy_str {
+            "compound" => GoalStrategy::Compound,
+            "yield_rotate" => GoalStrategy::YieldRotate,
+            "snipe" => GoalStrategy::Snipe,
+            _ => GoalStrategy::Adaptive,
+        };
+        tracing::info!("[goals] strategy classified by LLM: {:?}", llm_strategy);
+        llm_strategy
     };
 
     Ok(GoalSpec {
@@ -304,6 +426,7 @@ async fn parse_goal_via_llm(
         created_at: now,
         updated_at: now,
         error: None,
+        failed_at_step: None,
     })
 }
 
@@ -334,26 +457,10 @@ async fn create_goal(
 
     let _create_guard = state.goal_creation_lock.lock().await;
 
-    //── constraint: one active goal per wallet ────────────────────
-    if let Some(existing_id) =
-        wallet_has_active_goal(&state.redis, &body.wallet_label).await
-    {
-        tracing::info!(
-            "goal rejected — wallet {} already has active goal {}",
-            body.wallet_label,
-            existing_id
-        );
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "status": "error",
-                "error": format!(
-                    "wallet {} already has an active goal — cancel or wait for it to complete before submitting a new one",
-                    body.wallet_label
-                )
-            })),
-        );
-    }
+    //ves: the (wallet, chain) conflict check is deferred until after
+    //parse_goal_via_llm resolves the target chain. the guard above still
+    //serialises submission attempts, so moving the check later doesn't
+    //introduce a race.
 
     //── constraint: max concurrent goals ──────────────────────────
     if let Ok(running) = list_goals_by_status(&state.redis, GoalStatus::Running).await {
@@ -391,6 +498,29 @@ async fn create_goal(
         }
     };
 
+    if resolved.cap_eth == Some(0.0) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": "wallet cap is set to zero — no spending allowed on this wallet"
+            })),
+        );
+    }
+
+    // Extract the user's literal ETH amount from the raw goal text before the LLM
+    // has a chance to pre-clamp it against wallet context.
+    let user_stated_eth: Option<f64> = {
+        let words: Vec<&str> = body.raw_goal.split_whitespace().collect();
+        words.windows(2).find_map(|pair| {
+            if pair[1].eq_ignore_ascii_case("ETH") {
+                pair[0].parse::<f64>().ok()
+            } else {
+                None
+            }
+        })
+    };
+
     let mut goal = match parse_goal_via_llm(
         state.llm.as_ref(),
         &body.raw_goal,
@@ -410,6 +540,11 @@ async fn create_goal(
             );
         }
     };
+    tracing::info!(
+        "[goals] LLM parsed capital_eth={} from raw_goal={:?} (user_stated_eth={:?})",
+        goal.capital_eth, body.raw_goal, user_stated_eth
+    );
+
     if !(goal.capital_eth > 0.0) {
         return (
             StatusCode::BAD_REQUEST,
@@ -420,10 +555,56 @@ async fn create_goal(
         );
     }
 
+    //── constraint: global wallet cap across all chains ──────────
+    if let Some(cap) = state.config.max_global_wallet_value_eth {
+        let current = crate::safeguards::sum_global_wallet_value_eth(
+            &state.goal_runner_deps.wallet_fetcher,
+            &state.config.chains,
+        )
+        .await;
+        if current + goal.capital_eth > cap {
+            let msg = format!(
+                "global wallet cap exceeded: {current:.6} + {:.6} > {cap:.6} ETH",
+                goal.capital_eth
+            );
+            tracing::warn!("[goals] {msg}");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": msg,
+                })),
+            );
+        }
+    }
+
+    //── constraint: one active goal per (wallet, chain) ───────────
+    if let Some(existing_id) =
+        wallet_has_active_goal(&state.redis, &body.wallet_label, &goal.chain).await
+    {
+        tracing::info!(
+            "goal rejected — wallet {} already has active goal {} on chain {}",
+            body.wallet_label,
+            existing_id,
+            goal.chain
+        );
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": format!(
+                    "wallet {} already has an active goal on chain {} — cancel or wait for it to complete before submitting another on the same chain",
+                    body.wallet_label, goal.chain
+                )
+            })),
+        );
+    }
+
     //ves-fix: clamp capital_eth against the wallet cap so an LLM that
     //hallucinates a large default (e.g. 1.0 ETH for "compound my ETH")
     //can't trip the keymaster CapExceeded check downstream. uses 90% of
     //the cap to leave headroom for fees and slippage.
+    let original_capital_eth = goal.capital_eth;
     if let Some(cap) = resolved.cap_eth {
         let ceiling = cap * 0.9;
         if goal.capital_eth > ceiling {
@@ -437,11 +618,31 @@ async fn create_goal(
         }
     }
 
-    let rpc_url = state
-        .chain_registry
-        .get(&goal.chain)
-        .map(|c| c.rpc_url.clone())
-        .unwrap_or_default();
+    //── constraint: chain must be in the registry ─────────────────
+    let chain_config = match state.chain_registry.get(&goal.chain) {
+        Some(c) => c,
+        None => {
+            let configured: Vec<String> = state
+                .chain_registry
+                .available()
+                .iter()
+                .map(|c| c.name.clone())
+                .collect();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!(
+                        "chain '{}' is not supported. Configured chains: {}",
+                        goal.chain,
+                        configured.join(", ")
+                    )
+                })),
+            );
+        }
+    };
+
+    let rpc_url = chain_config.rpc_url.clone();
     if rpc_url.is_empty() {
         tracing::warn!(
             "balance check skipped for wallet {} — no rpc_url for chain '{}'",
@@ -458,14 +659,23 @@ async fn create_goal(
                         goal.capital_eth,
                         balance_eth
                     );
+                    let stated = user_stated_eth.unwrap_or(original_capital_eth);
+                    let detail = if stated > goal.capital_eth {
+                        format!(
+                            "insufficient wallet balance — you requested {:.4} ETH (clamped to {:.4} ETH by wallet cap), but wallet holds {:.4} ETH (reserve: {:.3} ETH)",
+                            stated, goal.capital_eth, balance_eth, GAS_RESERVE_ETH
+                        )
+                    } else {
+                        format!(
+                            "insufficient wallet balance — requested {:.4} ETH but wallet holds {:.4} ETH (reserve: {:.3} ETH)",
+                            goal.capital_eth, balance_eth, GAS_RESERVE_ETH
+                        )
+                    };
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(serde_json::json!({
                             "status": "error",
-                            "error": format!(
-                                "insufficient wallet balance — requested {:.4} ETH but wallet holds {:.4} ETH (reserve: {:.3} ETH)",
-                                goal.capital_eth, balance_eth, GAS_RESERVE_ETH
-                            )
+                            "error": detail
                         })),
                     );
                 }
@@ -709,30 +919,88 @@ mod tests {
             created_at: now,
             updated_at: now,
             error: None,
+            failed_at_step: None,
         }
     }
 
     #[test]
     fn test_wallet_uniqueness_gate() {
-        //simulate: two running goals, check if wallet "safe" has an active goal
+        //same-wallet / same-chain still conflicts; other chains & other
+        //wallets do not.
         let goals = vec![
             make_goal("safe", GoalStatus::Running, GoalStrategy::Adaptive, 0.1, 0.1),
             make_goal("hot", GoalStatus::Completed, GoalStrategy::Snipe, 0.05, 0.06),
         ];
 
-        let running: Vec<_> = goals.iter().filter(|g| g.status == GoalStatus::Running).collect();
+        let active = |label: &str, chain: &str| {
+            goals.iter().find(|g| {
+                matches!(
+                    g.status,
+                    GoalStatus::Pending | GoalStatus::Running | GoalStatus::Paused
+                ) && g.wallet_label == label
+                    && g.chain == chain
+            })
+        };
 
-        //"safe" wallet has a running goal — should be rejected
-        let conflict = running.iter().find(|g| g.wallet_label == "safe");
-        assert!(conflict.is_some(), "should find active goal for wallet 'safe'");
+        //same wallet + same chain → conflict
+        assert!(active("safe", "base").is_some());
+        //same wallet + different chain → no conflict
+        assert!(active("safe", "arbitrum").is_none());
+        //completed goal doesn't count even on the same chain
+        assert!(active("hot", "base").is_none());
+        //unknown wallet → no conflict
+        assert!(active("new", "base").is_none());
+    }
 
-        //"hot" wallet has no running goal — should be allowed
-        let no_conflict = running.iter().find(|g| g.wallet_label == "hot");
-        assert!(no_conflict.is_none(), "wallet 'hot' has no running goal");
+    #[test]
+    fn test_multi_chain_allows_same_wallet() {
+        //base + arbitrum on the same wallet should both pass the per-(wallet,
+        //chain) gate.
+        let goals = vec![
+            {
+                let mut g = make_goal("shared", GoalStatus::Running, GoalStrategy::YieldRotate, 0.1, 0.1);
+                g.chain = "base_sepolia".into();
+                g
+            },
+        ];
 
-        //"new" wallet has no goals at all — should be allowed
-        let new_wallet = running.iter().find(|g| g.wallet_label == "new");
-        assert!(new_wallet.is_none());
+        let has_conflict = |chain: &str| {
+            goals.iter().any(|g| {
+                matches!(
+                    g.status,
+                    GoalStatus::Pending | GoalStatus::Running | GoalStatus::Paused
+                ) && g.wallet_label == "shared"
+                    && g.chain.eq_ignore_ascii_case(chain)
+            })
+        };
+
+        assert!(has_conflict("base_sepolia"), "base_sepolia should still conflict");
+        assert!(
+            !has_conflict("arbitrum_sepolia"),
+            "arbitrum_sepolia must not conflict with a base_sepolia goal on the same wallet"
+        );
+    }
+
+    #[test]
+    fn test_same_wallet_same_chain_still_blocks() {
+        let goals = vec![
+            {
+                let mut g = make_goal("shared", GoalStatus::Paused, GoalStrategy::Compound, 0.1, 0.1);
+                g.chain = "base_sepolia".into();
+                g
+            },
+        ];
+
+        //a paused goal on the same (wallet, chain) still blocks — paused is
+        //an active state that can be resumed.
+        let blocked = goals.iter().any(|g| {
+            matches!(
+                g.status,
+                GoalStatus::Pending | GoalStatus::Running | GoalStatus::Paused
+            ) && g.wallet_label == "shared"
+                && g.chain == "base_sepolia"
+        });
+        assert!(blocked, "paused goal on same (wallet, chain) should still block");
     }
 
     #[test]
@@ -821,6 +1089,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             error: None,
+            failed_at_step: None,
         };
 
         //save
@@ -854,5 +1123,170 @@ mod tests {
             .query_async(&mut conn)
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn test_is_terminal_classification() {
+        assert!(is_terminal(&GoalStatus::Completed));
+        assert!(is_terminal(&GoalStatus::Failed));
+        assert!(is_terminal(&GoalStatus::Cancelled));
+        assert!(!is_terminal(&GoalStatus::Pending));
+        assert!(!is_terminal(&GoalStatus::Running));
+        assert!(!is_terminal(&GoalStatus::Paused));
+    }
+
+    #[tokio::test]
+    async fn test_save_goal_applies_ttl_for_terminal_status() {
+        let client = match redis::Client::open("redis://127.0.0.1:6379") {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if client.get_multiplexed_async_connection().await.is_err() {
+            return;
+        }
+
+        let now = Utc::now();
+        let mut goal = GoalSpec {
+            id: Uuid::new_v4(),
+            raw_goal: "ttl test".into(),
+            wallet_label: "ttl-test".into(),
+            wallet_id: None,
+            chain: "base_sepolia".into(),
+            capital_eth: 0.01,
+            target_gain_pct: 10.0,
+            stop_loss_pct: 5.0,
+            strategy: GoalStrategy::Adaptive,
+            status: GoalStatus::Running,
+            cycles: 0,
+            current_step: "SCOUTING".into(),
+            entry_eth: 0.01,
+            current_eth: 0.01,
+            pnl_eth: 0.0,
+            pnl_pct: 0.0,
+            token_address: None,
+            token_amount_held: None,
+            resolved_wallet_uuid: None,
+            created_at: now,
+            updated_at: now,
+            error: None,
+            failed_at_step: None,
+        };
+
+        save_goal(&client, &goal).await.unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(goal_key(&goal.id))
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        //non-terminal save must NOT set a TTL.
+        assert_eq!(ttl, -1, "running goal should have no TTL");
+
+        goal.status = GoalStatus::Completed;
+        save_goal(&client, &goal).await.unwrap();
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(goal_key(&goal.id))
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(ttl > 0 && ttl <= TERMINAL_GOAL_TTL_SECS,
+            "terminal goal should have a positive TTL within the 30-day window, got {ttl}");
+
+        //cleanup
+        let _: () = redis::cmd("DEL")
+            .arg(goal_key(&goal.id)).query_async(&mut conn).await.unwrap();
+        let _: () = redis::cmd("SREM")
+            .arg(GOALS_INDEX_KEY).arg(goal.id.to_string())
+            .query_async(&mut conn).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sweep_purges_and_backfills() {
+        let client = match redis::Client::open("redis://127.0.0.1:6379") {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if client.get_multiplexed_async_connection().await.is_err() {
+            return;
+        }
+
+        let now = Utc::now();
+        let make = |status: GoalStatus, age_days: i64| {
+            let ts = now - chrono::Duration::days(age_days);
+            GoalSpec {
+                id: Uuid::new_v4(),
+                raw_goal: "sweep test".into(),
+                wallet_label: "sweep-test".into(),
+                wallet_id: None,
+                chain: "base_sepolia".into(),
+                capital_eth: 0.01, target_gain_pct: 10.0, stop_loss_pct: 5.0,
+                strategy: GoalStrategy::Adaptive,
+                status,
+                cycles: 0,
+                current_step: "SCOUTING".into(),
+                entry_eth: 0.01, current_eth: 0.01, pnl_eth: 0.0, pnl_pct: 0.0,
+                token_address: None, token_amount_held: None, resolved_wallet_uuid: None,
+                created_at: ts,
+                updated_at: ts,
+                error: None,
+                failed_at_step: None,
+            }
+        };
+
+        //recent terminal → backfilled (within 30d)
+        let recent = make(GoalStatus::Completed, 5);
+        //old terminal → purged (>30d)
+        let old = make(GoalStatus::Failed, 45);
+        //active → left alone
+        let active = make(GoalStatus::Running, 5);
+
+        //write raw so we can bypass save_goal's TTL logic and simulate a
+        //pre-migration record with no TTL.
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        for g in [&recent, &old, &active] {
+            let json = serde_json::to_string(g).unwrap();
+            let _: () = conn.set(goal_key(&g.id), &json).await.unwrap();
+            let _: () = conn.sadd(GOALS_INDEX_KEY, g.id.to_string()).await.unwrap();
+        }
+
+        //also add an orphan index entry (pointing at a non-existent key)
+        let orphan_id = Uuid::new_v4();
+        let _: () = conn.sadd(GOALS_INDEX_KEY, orphan_id.to_string()).await.unwrap();
+
+        let report = sweep_terminal_goals(&client).await.unwrap();
+        assert!(report.scanned >= 4);
+        assert!(report.orphan_index_entries_removed >= 1);
+        assert!(report.expired_terminal_purged >= 1);
+        assert!(report.terminal_ttl_backfilled >= 1);
+
+        //old terminal goal: key gone, index entry gone
+        let exists_old: i64 = redis::cmd("EXISTS").arg(goal_key(&old.id))
+            .query_async(&mut conn).await.unwrap();
+        assert_eq!(exists_old, 0, "old terminal goal should be purged");
+        let in_index_old: bool = redis::cmd("SISMEMBER").arg(GOALS_INDEX_KEY).arg(old.id.to_string())
+            .query_async(&mut conn).await.unwrap();
+        assert!(!in_index_old);
+
+        //recent terminal goal: key still present, TTL now set
+        let ttl_recent: i64 = redis::cmd("TTL").arg(goal_key(&recent.id))
+            .query_async(&mut conn).await.unwrap();
+        assert!(ttl_recent > 0);
+
+        //active goal: untouched, no TTL
+        let ttl_active: i64 = redis::cmd("TTL").arg(goal_key(&active.id))
+            .query_async(&mut conn).await.unwrap();
+        assert_eq!(ttl_active, -1);
+
+        //orphan index entry gone
+        let in_index_orphan: bool = redis::cmd("SISMEMBER").arg(GOALS_INDEX_KEY).arg(orphan_id.to_string())
+            .query_async(&mut conn).await.unwrap();
+        assert!(!in_index_orphan);
+
+        //cleanup surviving records
+        for g in [&recent, &active] {
+            let _: () = redis::cmd("DEL").arg(goal_key(&g.id)).query_async(&mut conn).await.unwrap();
+            let _: () = redis::cmd("SREM").arg(GOALS_INDEX_KEY).arg(g.id.to_string())
+                .query_async(&mut conn).await.unwrap();
+        }
     }
 }

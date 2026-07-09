@@ -49,6 +49,9 @@ pub enum AppError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Kill switch active — signing disabled")]
+    KillSwitchActive,
 }
 
 impl IntoResponse for AppError {
@@ -97,6 +100,10 @@ impl IntoResponse for AppError {
             AppError::Internal(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".into())
             }
+            AppError::KillSwitchActive => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "kill switch active — signing disabled".into(),
+            ),
         };
 
         tracing::error!("AppError: {self}");
@@ -106,6 +113,25 @@ impl IntoResponse for AppError {
 }
 
 pub type AppResult<T> = Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn kill_switch_active_returns_503() {
+        let resp = AppError::KillSwitchActive.into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = resp.into_body();
+        let bytes = to_bytes(body, 1024).await.unwrap();
+        let body_str = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            body_str.contains("kill switch active") && body_str.contains("signing disabled"),
+            "expected clear error message, got: {body_str}"
+        );
+    }
+}
 
 fn sanitize_error_detail(s: &str) -> String {
     const MAX: usize = 200;

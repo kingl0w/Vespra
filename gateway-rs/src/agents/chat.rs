@@ -40,6 +40,141 @@ impl ChatHandler {
             )
         };
 
-        self.llm.call(SYSTEM_PROMPT, &task).await
+        let raw = self.llm.call(SYSTEM_PROMPT, &task).await?;
+        Ok(sanitize_llm_prose(&raw))
+    }
+}
+
+///ves-93b: the system prompt tells the LLM to return prose only, but some
+///models still wrap their answer as `{"message": "..."}`, return an array
+///of strings, etc. strip the wrapping before it reaches the dashboard so
+///users don't see raw JSON in the chat transcript.
+pub fn sanitize_llm_prose(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    //fast path: if it doesn't look like JSON, don't bother parsing.
+    let looks_like_json = trimmed.starts_with('{') || trimmed.starts_with('[');
+    if !looks_like_json {
+        return trimmed.to_string();
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(v) => unwrap_value(&v),
+        //valid-looking but malformed JSON — hand back the raw text, not an
+        //empty string; the user still benefits from seeing what came back.
+        Err(_) => trimmed.to_string(),
+    }
+}
+
+///prose keys we'll unwrap, in priority order. `message` wins over `response`
+///wins over `text` etc. so that an object carrying several fields still
+///picks the one most likely to be the user-facing prose.
+const PROSE_KEYS: &[&str] = &["message", "response", "text", "content", "result", "output"];
+
+fn unwrap_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.trim().to_string(),
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(_) | serde_json::Value::Number(_) => v.to_string(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(unwrap_value)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        serde_json::Value::Object(map) => {
+            for key in PROSE_KEYS {
+                if let Some(inner) = map.get(*key) {
+                    return unwrap_value(inner);
+                }
+            }
+            //unknown shape — pretty-print so it's at least legible, not a
+            //one-line blob. keep the raw json so developers can still
+            //debug from the transcript.
+            serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_prose_passes_through() {
+        assert_eq!(sanitize_llm_prose("Hello, world."), "Hello, world.");
+        assert_eq!(sanitize_llm_prose("  trimmed  "), "trimmed");
+    }
+
+    #[test]
+    fn unwraps_message_key() {
+        assert_eq!(
+            sanitize_llm_prose(r#"{"message": "All systems green."}"#),
+            "All systems green."
+        );
+    }
+
+    #[test]
+    fn unwraps_each_prose_key() {
+        for key in ["message", "response", "text", "content", "result", "output"] {
+            let raw = format!(r#"{{"{key}": "hi"}}"#);
+            assert_eq!(sanitize_llm_prose(&raw), "hi", "failed for key {key}");
+        }
+    }
+
+    #[test]
+    fn message_wins_over_response() {
+        //priority: message > response > text ...
+        let raw = r#"{"response": "b", "message": "a", "text": "c"}"#;
+        assert_eq!(sanitize_llm_prose(raw), "a");
+    }
+
+    #[test]
+    fn array_joined_as_paragraphs() {
+        let raw = r#"["first line", "second line"]"#;
+        assert_eq!(sanitize_llm_prose(raw), "first line\n\nsecond line");
+    }
+
+    #[test]
+    fn array_of_wrapped_objects() {
+        let raw = r#"[{"message": "one"}, {"message": "two"}]"#;
+        assert_eq!(sanitize_llm_prose(raw), "one\n\ntwo");
+    }
+
+    #[test]
+    fn unknown_object_shape_pretty_prints_instead_of_object_object() {
+        let raw = r#"{"foo": 1, "bar": 2}"#;
+        let out = sanitize_llm_prose(raw);
+        //not the raw one-liner, not empty, not "[object Object]"
+        assert!(out.contains("\"foo\""));
+        assert!(out.contains('\n'));
+        assert!(!out.contains("[object Object]"));
+    }
+
+    #[test]
+    fn nested_wrapper_is_unwrapped() {
+        let raw = r#"{"response": {"message": "deep"}}"#;
+        assert_eq!(sanitize_llm_prose(raw), "deep");
+    }
+
+    #[test]
+    fn malformed_json_returns_raw_text() {
+        let raw = r#"{"message": "unterminated"#;
+        assert_eq!(sanitize_llm_prose(raw), raw);
+    }
+
+    #[test]
+    fn empty_input_is_empty_output() {
+        assert_eq!(sanitize_llm_prose(""), "");
+        assert_eq!(sanitize_llm_prose("   "), "");
+    }
+
+    #[test]
+    fn prose_containing_braces_in_middle_is_preserved() {
+        //only the fast path triggers on leading '{' — prose that happens
+        //to mention JSON in passing is untouched.
+        let prose = "Use curly braces like {key: value} to denote maps.";
+        assert_eq!(sanitize_llm_prose(prose), prose);
     }
 }

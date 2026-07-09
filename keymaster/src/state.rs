@@ -2,6 +2,7 @@ use zeroize::Zeroizing;
 
 use crate::config::Config;
 use crate::keystore::Keystore;
+use crate::kill_switch::KillSwitch;
 
 pub struct AppState {
     pub config: Config,
@@ -12,4 +13,5 @@ pub struct AppState {
     /// When true, /swap refuses any request without a non-zero min_amount_out_wei,
     /// turning silently-unprotected swaps into loud rejections. Off by default.
     pub require_min_out: bool,
+    pub kill_switch: KillSwitch,
 }

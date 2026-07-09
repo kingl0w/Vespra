@@ -3,6 +3,101 @@ use std::collections::HashMap;
 use figment::{Figment, providers::{Env, Format, Toml}};
 use serde::{Deserialize, Serialize};
 
+/// Deserializes a value that may arrive as a string or an integer into Option<String>.
+/// Needed because env vars like VESPRA_TELEGRAM_CHAT_ID contain numeric values that
+/// Figment parses as integers, but we store them as strings.
+fn deserialize_string_or_int<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrInt;
+
+    impl<'de> de::Visitor<'de> for StringOrInt {
+        type Value = Option<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string or integer")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            if v.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(v.to_string()))
+            }
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+            if v.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(v))
+            }
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrInt)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkMode {
+    Testnet,
+    Mainnet,
+}
+
+impl Default for NetworkMode {
+    fn default() -> Self {
+        NetworkMode::Testnet
+    }
+}
+
+impl serde::Serialize for NetworkMode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            NetworkMode::Testnet => serializer.serialize_str("testnet"),
+            NetworkMode::Mainnet => serializer.serialize_str("mainnet"),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for NetworkMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.to_lowercase().as_str() {
+            "testnet" => Ok(NetworkMode::Testnet),
+            "mainnet" => Ok(NetworkMode::Mainnet),
+            _ => Err(serde::de::Error::custom(format!(
+                "invalid network mode '{}' — must be 'testnet' or 'mainnet'",
+                s
+            ))),
+        }
+    }
+}
+
 fn default_host() -> String { "127.0.0.1".into() }
 fn default_port() -> u16 { 9000 }
 fn default_redis_url() -> String { "redis://127.0.0.1:6379".into() }
@@ -43,6 +138,8 @@ fn default_yield_providers() -> String { "defillama".into() }
 fn default_yield_min_tvl_usd() -> f64 { 500_000.0 }
 fn default_yield_min_apy() -> f64 { 1.0 }
 fn default_yield_top_n() -> usize { 20 }
+fn default_testnet_monitor_timeout_minutes() -> u64 { 5 }
+fn default_max_tx_per_hour() -> Option<u32> { Some(100) }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GatewayConfig {
@@ -164,10 +261,22 @@ pub struct GatewayConfig {
     pub rate_limit_wallet_create_rph: u32,
     #[serde(default = "default_rate_limit_tx_send_rph")]
     pub rate_limit_tx_send_rph: u32,
+    #[serde(default = "default_testnet_monitor_timeout_minutes")]
+    pub testnet_monitor_timeout_minutes: u64,
     #[serde(default)]
     pub rpc_url_override: Option<String>,
     #[serde(default)]
     pub rpc_urls: HashMap<String, String>,
+    #[serde(default)]
+    pub telegram_bot_token: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_int")]
+    pub telegram_chat_id: Option<String>,
+    #[serde(default)]
+    pub network_mode: NetworkMode,
+    #[serde(default)]
+    pub max_global_wallet_value_eth: Option<f64>,
+    #[serde(default = "default_max_tx_per_hour")]
+    pub max_tx_per_hour: Option<u32>,
 }
 
 impl GatewayConfig {
@@ -206,5 +315,44 @@ impl GatewayConfig {
         );
 
         Ok(config)
+    }
+
+    pub fn is_testnet(&self) -> bool {
+        matches!(self.network_mode, NetworkMode::Testnet)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_mode_default_is_testnet() {
+        assert_eq!(NetworkMode::default(), NetworkMode::Testnet);
+    }
+
+    #[test]
+    fn network_mode_parses_case_insensitive() {
+        for s in ["mainnet", "MAINNET", "Mainnet", "MainNet"] {
+            let json = format!("\"{}\"", s);
+            let parsed: NetworkMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, NetworkMode::Mainnet, "failed to parse {s}");
+        }
+        for s in ["testnet", "TESTNET", "Testnet"] {
+            let json = format!("\"{}\"", s);
+            let parsed: NetworkMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, NetworkMode::Testnet, "failed to parse {s}");
+        }
+    }
+
+    #[test]
+    fn network_mode_rejects_invalid() {
+        let result: Result<NetworkMode, _> = serde_json::from_str("\"foo\"");
+        let err = result.expect_err("expected error for invalid value");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("testnet") && msg.contains("mainnet"),
+            "error should list valid values, got: {msg}"
+        );
     }
 }

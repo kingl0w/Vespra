@@ -12,6 +12,7 @@ pub mod nullboiler_worker;
 pub mod portfolio;
 pub mod proxy;
 pub mod ratelimit;
+pub mod safeguards;
 pub mod sentinel;
 pub mod sniper;
 pub mod swarm;
@@ -38,6 +39,7 @@ use crate::agents::AgentClient;
 use crate::agents::yield_agent::YieldAgent;
 use crate::chain::ChainRegistry;
 use crate::goal_runner::GoalRunnerDeps;
+use crate::notifications::TelegramClient;
 use crate::sentinel_monitor::SentinelMonitor;
 use crate::yield_scheduler::SharedSchedulerStatus;
 use crate::config::GatewayConfig;
@@ -82,6 +84,7 @@ pub struct AppState {
     pub sentinel_monitor: Arc<SentinelMonitor>,
     pub yield_scheduler_status: SharedSchedulerStatus,
     pub historical_feed: Arc<dyn HistoricalFeed>,
+    pub telegram: Option<TelegramClient>,
 }
 
 ///middleware: cloudflare access check
@@ -204,6 +207,7 @@ pub fn router(state: AppState) -> Router {
         .merge(backtest::router())
         .merge(nullboiler_worker::router())
         .merge(proxy::router())
+        .merge(safeguards::router())
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
             route_limiters,

@@ -235,12 +235,13 @@ async fn alchemy_webhook(
 
             let custody_label = state.config.default_custody.clone();
             if let Some(existing_id) =
-                wallet_has_active_goal(&state.redis, &custody_label).await
+                wallet_has_active_goal(&state.redis, &custody_label, &chain).await
             {
                 tracing::info!(
-                    "[sniper] auto-entry rejected — wallet {} already has active goal {} (pool {})",
+                    "[sniper] auto-entry rejected — wallet {} already has active goal {} on chain {} (pool {})",
                     custody_label,
                     existing_id,
+                    chain,
                     pool_address
                 );
                 //drop the guard before continuing the loop so the next pool
@@ -252,13 +253,35 @@ async fn alchemy_webhook(
                 let target_gain = state.config.sniper_target_gain_pct;
                 let stop_loss = state.config.sniper_stop_loss_pct;
 
+                //ves: resolve default_custody → real wallet UUID up front.
+                //lazy resolution in the runner was dropping the wallet and
+                //failing at execution. reuse the same helper create_goal uses
+                //so the two paths stay consistent.
+                let resolved = match crate::routes::goals::resolve_wallet_info(
+                    &state.http_client,
+                    &state.config.keymaster_url,
+                    &state.config.keymaster_token,
+                    &custody_label,
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!(
+                            "[sniper] auto-entry skipped — failed to resolve wallet '{custody_label}' for pool {pool_address}: {e}"
+                        );
+                        drop(_create_guard);
+                        continue;
+                    }
+                };
+
                 let goal = GoalSpec {
                     id: Uuid::new_v4(),
                     raw_goal: format!(
                         "Sniper auto-entry: {token_pair} pool {pool_address}"
                     ),
-                    wallet_label: state.config.default_custody.clone(),
-                    wallet_id: None, // resolved lazily by runner; sniper auto-entries pre-date this field
+                    wallet_label: custody_label.clone(),
+                    wallet_id: Some(resolved.id),
                     chain: chain.clone(),
                     capital_eth: position_eth,
                     target_gain_pct: target_gain,
@@ -277,6 +300,7 @@ async fn alchemy_webhook(
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
                     error: None,
+                    failed_at_step: None,
                 };
 
                 if let Err(e) = save_goal(&state.redis, &goal).await {

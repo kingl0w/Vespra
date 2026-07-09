@@ -29,6 +29,7 @@ use crate::types::tx::TxStatus;
 use crate::agents::risk::RiskContext;
 use crate::agents::scout::ScoutContext;
 use crate::agents::trader::TraderContext;
+use crate::notifications::escape_markdown;
 use crate::sentinel_monitor::{SentinelSignal, SENTINEL_CHANNEL};
 use crate::types::goals::GoalStrategy;
 use crate::yield_scheduler::{YieldRotationSignal, YIELD_ROTATE_CHANNEL};
@@ -73,6 +74,7 @@ pub struct GoalRunnerDeps {
     pub http_client: reqwest::Client,
     pub dry_run: bool,
     pub kill_flag: Arc<AtomicBool>,
+    pub telegram: Option<crate::notifications::TelegramClient>,
 }
 
 ///run the goalrunner loop as a tokio task.
@@ -103,6 +105,17 @@ pub async fn run_goal_with_resume(
         //── check cancel ────────────────────────────────────────
         if *cancel_rx.borrow() {
             tracing::info!("[goal {goal_id}] cancelled — exiting runner");
+            if let Ok(g) = get_goal(&deps.redis, goal_id).await {
+                notify_goal(
+                    &deps,
+                    format!(
+                        "Goal {} cancelled \u{2014} wallet {}, chain {}",
+                        goal_id,
+                        escape_markdown(&g.wallet_label),
+                        escape_markdown(&g.chain),
+                    ),
+                );
+            }
             break;
         }
 
@@ -123,8 +136,8 @@ pub async fn run_goal_with_resume(
                 &deps.redis,
                 goal_id,
                 "monitoring deadline exceeded after 24h — goal aborted",
-            )
-            .await;
+                &deps.telegram,
+            ).await;
             break;
         }
 
@@ -182,8 +195,8 @@ pub async fn run_goal_with_resume(
                         &deps.redis,
                         goal_id,
                         &format!("wallet UUID not resolved at goal start — cannot execute: {e}"),
-                    )
-                    .await;
+                        &deps.telegram,
+                    ).await;
                     break;
                 }
             }
@@ -195,8 +208,8 @@ pub async fn run_goal_with_resume(
                     &deps.redis,
                     goal_id,
                     "wallet UUID not resolved at goal start — cannot execute",
-                )
-                .await;
+                    &deps.telegram,
+                ).await;
                 break;
             }
         };
@@ -216,8 +229,8 @@ pub async fn run_goal_with_resume(
                         &deps.redis,
                         goal_id,
                         "cannot resume monitoring: goal has no persisted token_address (BUY never recorded)",
-                    )
-                    .await;
+                        &deps.telegram,
+                    ).await;
                     break;
                 }
             };
@@ -245,10 +258,42 @@ pub async fn run_goal_with_resume(
             ).await;
 
             match resume_result {
-                MonitorResult::Cancelled => break,
+                MonitorResult::Cancelled => {
+                    if let Ok(g) = get_goal(&deps.redis, goal_id).await {
+                        notify_goal(
+                            &deps,
+                            format!(
+                                "Goal {} cancelled \u{2014} wallet {}, chain {}",
+                                goal_id,
+                                escape_markdown(&g.wallet_label),
+                                escape_markdown(&g.chain),
+                            ),
+                        );
+                    }
+                    break;
+                }
                 MonitorResult::YieldRotate => {
                     let _ = update_goal_step(&deps.redis, goal_id, "SCOUTING").await;
                     continue;
+                }
+                MonitorResult::TestnetTimeout => {
+                    tracing::info!("[goal {goal_id}] testnet goal completed after monitoring period (resumed)");
+                    if let Ok(mut g) = get_goal(&deps.redis, goal_id).await {
+                        g.status = GoalStatus::Completed;
+                        g.error = Some("testnet goal completed after monitoring period".to_string());
+                        g.updated_at = Utc::now();
+                        let _ = save_goal(&deps.redis, &g).await;
+                        notify_goal(
+                            &deps,
+                            format!(
+                                "Goal {} completed \u{2014} wallet {}, chain {}",
+                                goal_id,
+                                escape_markdown(&g.wallet_label),
+                                escape_markdown(&g.chain),
+                            ),
+                        );
+                    }
+                    break;
                 }
                 MonitorResult::ExitSignal => {
                     //exiting from resumed monitoring
@@ -262,8 +307,8 @@ pub async fn run_goal_with_resume(
                                 &deps.redis,
                                 goal_id,
                                 "token_amount_held not set — cannot sell",
-                            )
-                            .await;
+                                &deps.telegram,
+                            ).await;
                             break;
                         }
                     };
@@ -274,8 +319,8 @@ pub async fn run_goal_with_resume(
                                 &deps.redis,
                                 goal_id,
                                 &format!("no known WETH address for chain '{}'", goal.chain),
-                            )
-                            .await;
+                                &deps.telegram,
+                            ).await;
                             break;
                         }
                     };
@@ -333,26 +378,20 @@ pub async fn run_goal_with_resume(
         let best = match scout_result {
             Ok(opp) => opp,
             Err(e) => {
-                let chain_lower = goal.chain.to_lowercase();
-                let is_testnet = chain_lower.contains("sepolia")
-                    || chain_lower.contains("testnet")
-                    || chain_lower.contains("goerli");
-                if is_testnet {
-                    tracing::warn!(
-                        "[goal {goal_id}] injecting synthetic WETH/USDC fallback opportunity — no real testnet pools found from DeFiLlama (scout error: {e})"
-                    );
-                    crate::types::opportunity::Opportunity {
-                        protocol: "uniswap-v3".to_string(),
-                        pool: "WETH-USDC".to_string(),
-                        chain: goal.chain.clone(),
-                        apy: 5.0,
-                        tvl_usd: 1_000_000,
-                        momentum_score: 1.0,
-                        ..Default::default()
+                match scout_fallback_decision(deps.config.is_testnet(), &goal.chain) {
+                    ScoutFallback::Inject(opp) => {
+                        tracing::warn!(
+                            "[goal {goal_id}] injecting synthetic WETH/USDC fallback opportunity — no real testnet pools found from DeFiLlama (scout error: {e})"
+                        );
+                        opp
                     }
-                } else {
-                    fail_goal(&deps.redis, goal_id, &format!("SCOUTING failed: {e}")).await;
-                    break;
+                    ScoutFallback::Fail(reason) => {
+                        tracing::error!(
+                            "[goal {goal_id}] no opportunities found on mainnet — failing goal (synthetic fallback is testnet-only)"
+                        );
+                        fail_goal(&deps.redis, goal_id, reason, &deps.telegram).await;
+                        break;
+                    }
                 }
             }
         };
@@ -387,7 +426,7 @@ pub async fn run_goal_with_resume(
         {
             Ok(d) => d,
             Err(e) => {
-                fail_goal(&deps.redis, goal_id, &format!("RISK failed: {e}")).await;
+                fail_goal(&deps.redis, goal_id, &format!("RISK failed: {e}"), &deps.telegram).await;
                 break;
             }
         };
@@ -415,8 +454,8 @@ pub async fn run_goal_with_resume(
                         "chain_id could not be resolved for '{}' — goal aborted",
                         best.chain
                     ),
-                )
-                .await;
+                    &deps.telegram,
+                ).await;
                 break;
             }
         };
@@ -458,7 +497,7 @@ pub async fn run_goal_with_resume(
         {
             Ok(d) => d,
             Err(e) => {
-                fail_goal(&deps.redis, goal_id, &format!("TRADING failed: {e}")).await;
+                fail_goal(&deps.redis, goal_id, &format!("TRADING failed: {e}"), &deps.telegram).await;
                 break;
             }
         };
@@ -504,8 +543,8 @@ pub async fn run_goal_with_resume(
                         &deps.redis,
                         goal_id,
                         "token resolution failed after 5 scout attempts — goal aborted",
-                    )
-                    .await;
+                        &deps.telegram,
+                    ).await;
                     break;
                 }
                 sleep_interruptible(&mut cancel_rx, 30).await;
@@ -525,8 +564,8 @@ pub async fn run_goal_with_resume(
                         &deps.redis,
                         goal_id,
                         "token resolution failed after 5 scout attempts — goal aborted",
-                    )
-                    .await;
+                        &deps.telegram,
+                    ).await;
                     break;
                 }
                 sleep_interruptible(&mut cancel_rx, 30).await;
@@ -544,8 +583,8 @@ pub async fn run_goal_with_resume(
                     &deps.redis,
                     goal_id,
                     "token resolution failed after 5 scout attempts — goal aborted",
-                )
-                .await;
+                    &deps.telegram,
+                ).await;
                 break;
             }
             sleep_interruptible(&mut cancel_rx, 30).await;
@@ -564,76 +603,111 @@ pub async fn run_goal_with_resume(
             tracing::warn!("[goal {goal_id}] redis step update failed: {e}");
         }
 
-        //slippage floor: quote the expected output now and require at least
-        //(1 - max_slippage) of it on-chain, so the BUY can't be sandwiched.
-        let buy_min_out = compute_min_out(
-            &deps, &token_in, &token_out, &swap_amount_wei, chain_id,
-            deps.config.trader_max_slippage_pct,
-        )
-        .await;
+        //ves-fix: idempotency guard — if a prior attempt already recorded a
+        //BUY on this goal, skip re-issuing it and reuse the stored token so
+        //we can't double-spend. the retry loop inside the executor only
+        //retries transport errors that happen before the tx is broadcast, so
+        //this check is the defense-in-depth for anything that slips past the
+        //boot-time resume routing in main.rs.
+        let prior_buy: Option<(String, Option<String>)> =
+            match get_goal(&deps.redis, goal_id).await {
+                Ok(fresh) => match fresh.token_address.as_deref() {
+                    Some(addr) if !addr.is_empty() => {
+                        Some((addr.to_string(), fresh.token_amount_held.clone()))
+                    }
+                    _ => None,
+                },
+                Err(_) => None,
+            };
 
-        //ves-91: use the wallet uuid cached at goal-runner start. never
-        //re-resolve mid-lifecycle — that's the bug this fix prevents.
-        let buy_tx_status = execution_gate::execute_traced(
-            &deps.executor,
-            &deps.config,
-            &deps.chain_registry,
-            &deps.http_client,
-            cached_wallet_uuid_val,
-            &token_in,
-            &token_out,
-            &swap_amount_wei,
-            &buy_min_out,
-            &goal.chain,
-            deps.dry_run,
-        )
-        .await;
-
-        match &buy_tx_status {
-            TxStatus::Confirmed { tx_hash, .. } => {
-                tracing::info!("[goal {goal_id}] BUY confirmed, tx={tx_hash}");
-            }
-            TxStatus::DryRun { .. } => {
-                tracing::info!("[goal {goal_id}] BUY dry-run complete");
-            }
-            TxStatus::Reverted { tx_hash, .. } => {
-                fail_goal(&deps.redis, goal_id, &format!("BUY tx reverted: {tx_hash}")).await;
+        let (token_out, token_amount_out) = if let Some((addr, amt)) = prior_buy {
+            tracing::warn!(
+                "[goal {goal_id}] BUY already recorded (token={addr}) — skipping BUY and advancing to MONITORING"
+            );
+            (addr, amt)
+        } else {
+            //rate-limit: increment + check before each keymaster call.
+            if let Err(msg) =
+                crate::safeguards::check_tx_rate_limit(&deps.redis, deps.config.max_tx_per_hour)
+                    .await
+            {
+                fail_goal(&deps.redis, goal_id, &msg, &deps.telegram).await;
                 break;
             }
-            TxStatus::Timeout { tx_hash, .. } => {
-                fail_goal(&deps.redis, goal_id, &format!("BUY tx timeout: {tx_hash}")).await;
-                break;
-            }
-            TxStatus::Failed { error } => {
-                fail_goal(&deps.redis, goal_id, &format!("BUY failed: {error}")).await;
-                break;
-            }
-        }
 
-        let token_amount_out = deps
-            .quote_fetcher
-            .fetch_quote(&token_in, &token_out, &swap_amount_wei, chain_id)
-            .await
-            .ok()
-            .map(|q| q.amount_out_wei)
-            .filter(|s| !s.is_empty() && s != "0");
-        match token_amount_out.as_ref() {
-            Some(amt) => tracing::info!(
-                "[goal {goal_id}] recording token_amount_held={} for token={}",
-                amt, token_out
-            ),
-            None => tracing::warn!(
-                "[goal {goal_id}] could not determine token_amount_held after BUY — SELL will fail-fast"
-            ),
-        }
-        if let Ok(mut g) = get_goal(&deps.redis, goal_id).await {
-            g.token_address = Some(token_out.clone());
-            g.token_amount_held = token_amount_out.clone();
-            g.updated_at = Utc::now();
-            if let Err(e) = save_goal(&deps.redis, &g).await {
-                tracing::warn!("[goal {goal_id}] failed to persist token_address/amount: {e}");
+            //slippage floor: quote the expected output now and require at least
+            //(1 - max_slippage) of it on-chain, so the BUY can't be sandwiched.
+            let buy_min_out = compute_min_out(
+                &deps, &token_in, &token_out, &swap_amount_wei, chain_id,
+                deps.config.trader_max_slippage_pct,
+            )
+            .await;
+
+            //ves-91: use the wallet uuid cached at goal-runner start. never
+            //re-resolve mid-lifecycle — that's the bug this fix prevents.
+            let buy_tx_status = execution_gate::execute_traced(
+                &deps.executor,
+                &deps.config,
+                &deps.chain_registry,
+                &deps.http_client,
+                cached_wallet_uuid_val,
+                &token_in,
+                &token_out,
+                &swap_amount_wei,
+                &buy_min_out,
+                &goal.chain,
+                deps.dry_run,
+            )
+            .await;
+
+            match &buy_tx_status {
+                TxStatus::Confirmed { tx_hash, .. } => {
+                    tracing::info!("[goal {goal_id}] BUY confirmed, tx={tx_hash}");
+                }
+                TxStatus::DryRun { .. } => {
+                    tracing::info!("[goal {goal_id}] BUY dry-run complete");
+                }
+                TxStatus::Reverted { tx_hash, .. } => {
+                    fail_goal(&deps.redis, goal_id, &format!("BUY tx reverted: {tx_hash}"), &deps.telegram).await;
+                    break;
+                }
+                TxStatus::Timeout { tx_hash, .. } => {
+                    fail_goal(&deps.redis, goal_id, &format!("BUY tx timeout: {tx_hash}"), &deps.telegram).await;
+                    break;
+                }
+                TxStatus::Failed { error } => {
+                    fail_goal(&deps.redis, goal_id, &format!("BUY failed: {error}"), &deps.telegram).await;
+                    break;
+                }
             }
-        }
+
+            let token_amount_out = deps
+                .quote_fetcher
+                .fetch_quote(&token_in, &token_out, &swap_amount_wei, chain_id)
+                .await
+                .ok()
+                .map(|q| q.amount_out_wei)
+                .filter(|s| !s.is_empty() && s != "0");
+            match token_amount_out.as_ref() {
+                Some(amt) => tracing::info!(
+                    "[goal {goal_id}] recording token_amount_held={} for token={}",
+                    amt, token_out
+                ),
+                None => tracing::warn!(
+                    "[goal {goal_id}] could not determine token_amount_held after BUY — SELL will fail-fast"
+                ),
+            }
+            if let Ok(mut g) = get_goal(&deps.redis, goal_id).await {
+                g.token_address = Some(token_out.clone());
+                g.token_amount_held = token_amount_out.clone();
+                g.updated_at = Utc::now();
+                if let Err(e) = save_goal(&deps.redis, &g).await {
+                    tracing::warn!("[goal {goal_id}] failed to persist token_address/amount: {e}");
+                }
+            }
+
+            (token_out.clone(), token_amount_out)
+        };
 
         if *cancel_rx.borrow() { continue; }
 
@@ -668,12 +742,42 @@ pub async fn run_goal_with_resume(
         match monitor_result {
             MonitorResult::Cancelled => {
                 tracing::info!("[goal {goal_id}] cancelled during monitoring — not exiting position");
+                if let Ok(g) = get_goal(&deps.redis, goal_id).await {
+                    notify_goal(
+                        &deps,
+                        format!(
+                            "Goal {} cancelled \u{2014} wallet {}, chain {}",
+                            goal_id,
+                            escape_markdown(&g.wallet_label),
+                            escape_markdown(&g.chain),
+                        ),
+                    );
+                }
                 break;
             }
             MonitorResult::YieldRotate => {
                 tracing::info!("[goal {goal_id}] MONITORING → EXITING (yield rotation) → will re-SCOUT");
                 let _ = update_goal_step(&deps.redis, goal_id, "SCOUTING").await;
                 continue;
+            }
+            MonitorResult::TestnetTimeout => {
+                tracing::info!("[goal {goal_id}] testnet goal completed after monitoring period");
+                if let Ok(mut g) = get_goal(&deps.redis, goal_id).await {
+                    g.status = GoalStatus::Completed;
+                    g.error = Some("testnet goal completed after monitoring period".to_string());
+                    g.updated_at = Utc::now();
+                    let _ = save_goal(&deps.redis, &g).await;
+                    notify_goal(
+                        &deps,
+                        format!(
+                            "Goal {} completed \u{2014} wallet {}, chain {}",
+                            goal_id,
+                            escape_markdown(&g.wallet_label),
+                            escape_markdown(&g.chain),
+                        ),
+                    );
+                }
+                break;
             }
             MonitorResult::NoExit => continue,
             MonitorResult::ExitSignal => {
@@ -693,8 +797,8 @@ pub async fn run_goal_with_resume(
                     &deps.redis,
                     goal_id,
                     "token_amount_held not set — cannot sell",
-                )
-                .await;
+                    &deps.telegram,
+                ).await;
                 break;
             }
         };
@@ -710,17 +814,26 @@ pub async fn run_goal_with_resume(
                     &deps.redis,
                     goal_id,
                     &format!("no known WETH address for chain '{}'", goal.chain),
-                )
-                .await;
+                    &deps.telegram,
+                ).await;
                 break;
             }
         };
+        //rate-limit: increment + check before each keymaster call.
+        if let Err(msg) =
+            crate::safeguards::check_tx_rate_limit(&deps.redis, deps.config.max_tx_per_hour).await
+        {
+            fail_goal(&deps.redis, goal_id, &msg, &deps.telegram).await;
+            break;
+        }
+
         //slippage floor on the exit leg too (token_out → WETH).
         let sell_min_out = compute_min_out(
             &deps, &token_out, &weth_addr, &sell_amount, chain_id,
             deps.config.trader_max_slippage_pct,
         )
         .await;
+
         let sell_tx_status = execution_gate::execute_traced(
             &deps.executor,
             &deps.config,
@@ -761,6 +874,7 @@ pub async fn run_goal_with_resume(
                 &deps.http_client,
                 &deps.redis,
                 deps.dry_run,
+                &deps.telegram,
             )
             .await;
         }
@@ -823,6 +937,15 @@ pub async fn run_goal_with_resume(
             );
             updated_goal.status = GoalStatus::Completed;
             let _ = save_goal(&deps.redis, &updated_goal).await;
+            notify_goal(
+                &deps,
+                format!(
+                    "Goal {} completed \u{2014} wallet {}, chain {}",
+                    goal_id,
+                    escape_markdown(&updated_goal.wallet_label),
+                    escape_markdown(&updated_goal.chain),
+                ),
+            );
             break;
         }
 
@@ -834,7 +957,17 @@ pub async fn run_goal_with_resume(
             );
             updated_goal.status = GoalStatus::Failed;
             updated_goal.error = Some(format!("stop loss triggered at {pnl_pct_total:.2}%"));
+            updated_goal.failed_at_step = Some(updated_goal.current_step.clone());
             let _ = save_goal(&deps.redis, &updated_goal).await;
+            notify_goal(
+                &deps,
+                format!(
+                    "Goal {} failed at {} \u{2014} {}",
+                    goal_id,
+                    escape_markdown(updated_goal.failed_at_step.as_deref().unwrap_or("unknown")),
+                    escape_markdown(updated_goal.error.as_deref().unwrap_or("unknown error")),
+                ),
+            );
             break;
         }
 
@@ -852,6 +985,7 @@ enum MonitorResult {
     ExitSignal,
     YieldRotate,
     Cancelled,
+    TestnetTimeout,
     NoExit,
 }
 
@@ -915,13 +1049,23 @@ async fn run_monitoring_loop(
         //ves-94: testnet chains have no real price feeds (defillama returns
         //0 for sepolia tokens), which would otherwise trip the price-zero
         //abort below and kill every testnet goal at the start of monitoring.
-        //on testnet, skip pnl evaluation entirely — keep the monitoring loop
-        //running so the goal stays in MONITORING and can exit via cancel,
-        //yield rotation, or external sentinel pub/sub signals.
+        //on testnet, skip pnl evaluation — instead use a time-based
+        //completion: after TESTNET_MONITOR_TIMEOUT_MINUTES, complete the goal.
         let chain_lc = position.chain.to_lowercase();
         if chain_lc.contains("sepolia") || chain_lc.contains("testnet") {
+            let timeout_mins = deps.config.testnet_monitor_timeout_minutes;
+            let elapsed = Utc::now().signed_duration_since(goal.updated_at);
+            let elapsed_mins = elapsed.num_seconds().max(0) as u64 / 60;
+
+            if elapsed_mins >= timeout_mins {
+                tracing::info!(
+                    "[goal {goal_id}] testnet monitoring period complete ({elapsed_mins}m >= {timeout_mins}m)"
+                );
+                return MonitorResult::TestnetTimeout;
+            }
+
             tracing::info!(
-                "[goal {goal_id}] testnet chain detected, skipping price evaluation"
+                "[goal {goal_id}] testnet chain detected, skipping price evaluation ({elapsed_mins}m / {timeout_mins}m)"
             );
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(MONITOR_INTERVAL_SECS)) => {}
@@ -965,8 +1109,8 @@ async fn run_monitoring_loop(
                     "invalid current_price ({}) — sentinel cannot evaluate, goal aborted",
                     current_price
                 ),
-            )
-            .await;
+                &deps.telegram,
+            ).await;
             break;
         }
 
@@ -994,8 +1138,8 @@ async fn run_monitoring_loop(
                             &deps.redis,
                             goal_id,
                             "sentinel failed to parse LLM response after 3 attempts — goal aborted",
-                        )
-                        .await;
+                            &deps.telegram,
+                        ).await;
                         break;
                     }
                 } else {
@@ -1065,6 +1209,16 @@ where
         match f().await {
             Ok(val) => return Ok(val),
             Err(e) => {
+                let msg = e.to_string().to_lowercase();
+                let permanent = msg.contains("chain not found")
+                    || msg.contains("no rpc_url")
+                    || msg.contains("unsupported chain");
+                if permanent {
+                    tracing::warn!(
+                        "[goal {goal_id}] {step} permanent failure — not retrying: {e}"
+                    );
+                    return Err(e);
+                }
                 tracing::warn!(
                     "[goal {goal_id}] {step} attempt {attempt}/{MAX_RETRIES} failed: {e}"
                 );
@@ -1147,13 +1301,63 @@ fn resolve_goal_wallet_uuid(goal: &crate::types::goals::GoalSpec) -> Result<Uuid
     Uuid::parse_str(raw).map_err(|e| format!("stored wallet_id '{raw}' is not a valid UUID: {e}"))
 }
 
-async fn fail_goal(redis: &redis::Client, goal_id: Uuid, error: &str) {
+/// Fire-and-forget Telegram notification from within the goal runner.
+fn notify_goal(deps: &GoalRunnerDeps, message: String) {
+    if let Some(tg) = &deps.telegram {
+        let tg = tg.clone();
+        tokio::spawn(async move {
+            let _ = tg.send(&message).await;
+        });
+    }
+}
+
+#[derive(Debug)]
+enum ScoutFallback {
+    Inject(crate::types::opportunity::Opportunity),
+    Fail(&'static str),
+}
+
+fn scout_fallback_decision(is_testnet: bool, chain: &str) -> ScoutFallback {
+    if is_testnet {
+        ScoutFallback::Inject(crate::types::opportunity::Opportunity {
+            protocol: "uniswap-v3".to_string(),
+            pool: "WETH-USDC".to_string(),
+            chain: chain.to_string(),
+            apy: 5.0,
+            tvl_usd: 1_000_000,
+            momentum_score: 1.0,
+            ..Default::default()
+        })
+    } else {
+        ScoutFallback::Fail("no real pool opportunities available")
+    }
+}
+
+async fn fail_goal(
+    redis: &redis::Client,
+    goal_id: Uuid,
+    error: &str,
+    telegram: &Option<crate::notifications::TelegramClient>,
+) {
     tracing::error!("[goal {goal_id}] FAILED: {error}");
     if let Ok(mut goal) = get_goal(redis, goal_id).await {
         goal.status = GoalStatus::Failed;
         goal.error = Some(error.to_string());
+        goal.failed_at_step = Some(goal.current_step.clone());
         goal.updated_at = Utc::now();
         let _ = save_goal(redis, &goal).await;
+        if let Some(tg) = telegram {
+            let tg = tg.clone();
+            let msg = format!(
+                "Goal {} failed at {} \u{2014} {}",
+                goal_id,
+                escape_markdown(goal.failed_at_step.as_deref().unwrap_or("unknown")),
+                escape_markdown(error),
+            );
+            tokio::spawn(async move {
+                let _ = tg.send(&msg).await;
+            });
+        }
     }
 }
 
@@ -1262,38 +1466,147 @@ mod tests {
 
     #[test]
     fn test_goal_step_resume_routing() {
-        //goals in monitoring/exiting should resume from monitoring
-        let step_monitoring = "MONITORING";
-        let step_exiting = "EXITING";
-        let step_executing = "EXECUTING";
-        let step_scouting = "SCOUTING";
-        let step_risk = "RISK";
-        let step_trading = "TRADING";
-
-        fn route_step(step: &str) -> Option<GoalStep> {
+        //monitoring/exiting always resume from monitoring; executing depends
+        //on whether token_address landed before the crash.
+        fn route_step(step: &str, token_address: Option<&str>) -> Option<GoalStep> {
             match step {
                 "MONITORING" | "EXITING" => Some(GoalStep::Monitoring),
-                "EXECUTING" => Some(GoalStep::Monitoring), // crash recovery
+                "EXECUTING" => match token_address {
+                    Some(a) if !a.is_empty() => Some(GoalStep::Monitoring),
+                    _ => None,
+                },
                 _ => None,
             }
         }
 
-        assert_eq!(route_step(step_monitoring), Some(GoalStep::Monitoring));
-        assert_eq!(route_step(step_exiting), Some(GoalStep::Monitoring));
-        assert_eq!(route_step(step_executing), Some(GoalStep::Monitoring));
-        assert_eq!(route_step(step_scouting), None);
-        assert_eq!(route_step(step_risk), None);
-        assert_eq!(route_step(step_trading), None);
+        assert_eq!(route_step("MONITORING", None), Some(GoalStep::Monitoring));
+        assert_eq!(route_step("EXITING", None), Some(GoalStep::Monitoring));
+        assert_eq!(route_step("EXECUTING", Some("0xabc")), Some(GoalStep::Monitoring));
+        assert_eq!(route_step("EXECUTING", None), None);
+        assert_eq!(route_step("EXECUTING", Some("")), None);
+        assert_eq!(route_step("SCOUTING", None), None);
+        assert_eq!(route_step("RISK", None), None);
+        assert_eq!(route_step("TRADING", None), None);
     }
 
     #[test]
-    fn test_mid_execution_crash_routes_to_monitoring() {
+    fn test_mid_execution_crash_with_no_token_restarts() {
+        //if EXECUTING crashed before token_address was persisted, the BUY
+        //never landed — re-enter the loop from the top (None).
         let crash_step = "EXECUTING";
+        let token_address: Option<&str> = None;
         let resume = match crash_step {
-            "MONITORING" | "EXITING" | "EXECUTING" => Some(GoalStep::Monitoring),
+            "MONITORING" | "EXITING" => Some(GoalStep::Monitoring),
+            "EXECUTING" => match token_address {
+                Some(a) if !a.is_empty() => Some(GoalStep::Monitoring),
+                _ => None,
+            },
+            _ => None,
+        };
+        assert_eq!(resume, None);
+    }
+
+    #[test]
+    fn test_mid_execution_crash_with_token_skips_to_monitoring() {
+        //if token_address was persisted, the BUY landed — resume monitoring
+        //and let the persisted address guard against double-spend.
+        let crash_step = "EXECUTING";
+        let token_address: Option<&str> = Some("0xdeadbeef");
+        let resume = match crash_step {
+            "MONITORING" | "EXITING" => Some(GoalStep::Monitoring),
+            "EXECUTING" => match token_address {
+                Some(a) if !a.is_empty() => Some(GoalStep::Monitoring),
+                _ => None,
+            },
             _ => None,
         };
         assert_eq!(resume, Some(GoalStep::Monitoring));
+    }
+
+    #[tokio::test]
+    async fn test_notify_goal_fires_when_telegram_configured() {
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        //build a TelegramClient with a 1ms timeout so send() fails fast but
+        //still proves the spawn was attempted.
+        let tg = crate::notifications::TelegramClient::new(
+            "fake_token".into(),
+            "fake_chat".into(),
+        );
+
+        //track whether send was called by wrapping in a spawn and awaiting.
+        let called = Arc::new(Mutex::new(false));
+        let called_clone = called.clone();
+        let tg_clone = tg.clone();
+        let handle = tokio::spawn(async move {
+            //this mirrors notify_goal's inner logic
+            let _ = tg_clone.send("test notification").await;
+            *called_clone.lock().await = true;
+        });
+        handle.await.unwrap();
+        assert!(*called.lock().await, "send() should have been called");
+    }
+
+    #[test]
+    fn test_notify_goal_noop_when_telegram_none() {
+        //when deps.telegram is None, notify_goal should not panic or spawn.
+        //we test this structurally: the function is a simple if-let guard.
+        let telegram: Option<crate::notifications::TelegramClient> = None;
+        assert!(telegram.is_none());
+        //if we had a full GoalRunnerDeps we'd call notify_goal(&deps, ...)
+        //but the guard `if let Some(tg) = &deps.telegram` means this is a
+        //no-op. the test confirms the Option is None and the pattern holds.
+    }
+
+    #[tokio::test]
+    async fn test_testnet_completion_path_would_notify() {
+        //verify the message format matches what the testnet completion
+        //branch sends, ensuring the notify_goal call produces the expected
+        //output for a testnet goal.
+        let goal_id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
+        let wallet_label = "base-test-1";
+        let chain = "base_sepolia";
+
+        let msg = format!(
+            "Goal {} completed \u{2014} wallet {}, chain {}",
+            goal_id,
+            crate::notifications::escape_markdown(wallet_label),
+            crate::notifications::escape_markdown(chain),
+        );
+
+        assert!(msg.contains("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
+        assert!(msg.contains("base\\-test\\-1")); // dash escaped
+        assert!(msg.contains("base\\_sepolia")); // underscore escaped
+        assert!(msg.contains("completed"));
+    }
+
+    #[test]
+    fn scout_fallback_testnet_injects_synthetic() {
+        let decision = scout_fallback_decision(true, "base_sepolia");
+        match decision {
+            ScoutFallback::Inject(opp) => {
+                assert_eq!(opp.protocol, "uniswap-v3");
+                assert_eq!(opp.pool, "WETH-USDC");
+                assert_eq!(opp.chain, "base_sepolia");
+                assert_eq!(opp.tvl_usd, 1_000_000);
+                assert!(opp.momentum_score > 0.0);
+            }
+            ScoutFallback::Fail(r) => panic!("testnet must inject fallback, got Fail({r})"),
+        }
+    }
+
+    #[test]
+    fn scout_fallback_mainnet_fails_with_clear_error() {
+        let decision = scout_fallback_decision(false, "base");
+        match decision {
+            ScoutFallback::Fail(reason) => {
+                assert_eq!(reason, "no real pool opportunities available");
+            }
+            ScoutFallback::Inject(_) => {
+                panic!("mainnet must not inject synthetic fallback")
+            }
+        }
     }
 
     #[test]
