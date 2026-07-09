@@ -56,6 +56,14 @@ services:
       VESPRA_LLM_PROVIDER: anthropic
       VESPRA_LLM_API_KEY: ${ANTHROPIC_API_KEY}
       VESPRA_LLM_BASE_URL: https://api.anthropic.com
+      # Optional app-level auth. When set, every non-health request to :9001
+      # must carry this bearer token (the dashboard's nginx injects it). Leave
+      # empty to run open behind the loopback bind / Cloudflare Access.
+      VESPRA_GATEWAY_TOKEN: ${VESPRA_GATEWAY_TOKEN:-}
+      # nullboiler DAG integration is opt-in: run a nullboiler service, then set
+      # VESPRA_WORKER_CALLBACK_URL (e.g. http://gateway:9001) so it can dispatch
+      # DAG steps back to the gateway. Empty (default) disables it.
+      VESPRA_WORKER_CALLBACK_URL: ${VESPRA_WORKER_CALLBACK_URL:-}
       RUST_LOG: ${RUST_LOG:-info}
     ports:
       - "9001:9001"
@@ -76,6 +84,10 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
+    environment:
+      # nginx injects this as the gateway bearer token on /api/ proxied calls.
+      # Must match VESPRA_GATEWAY_TOKEN on the gateway.
+      GATEWAY_TOKEN: ${VESPRA_GATEWAY_TOKEN:-}
     depends_on:
       - gateway
 

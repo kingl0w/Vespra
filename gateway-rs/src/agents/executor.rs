@@ -41,11 +41,26 @@ impl ExecutorAgent {
         amount_wei: &str,
         chain: &str,
     ) -> Result<ExecutorResult> {
+        //"0" = no slippage floor; keymaster warns. Use execute_with_min_out to protect.
+        self.execute_with_min_out(wallet_id, token_in, token_out, amount_wei, "0", chain)
+            .await
+    }
+
+    pub async fn execute_with_min_out(
+        &self,
+        wallet_id: uuid::Uuid,
+        token_in: &str,
+        token_out: &str,
+        amount_wei: &str,
+        min_amount_out_wei: &str,
+        chain: &str,
+    ) -> Result<ExecutorResult> {
         let payload = serde_json::json!({
             "wallet_id": wallet_id,
             "token_in": token_in,
             "token_out": token_out,
             "amount_in_wei": amount_wei,
+            "min_amount_out_wei": min_amount_out_wei,
             "chain": chain,
         });
 

@@ -97,6 +97,7 @@ pub async fn collect_exit_fee(
         "WETH",
         &treasury,
         &fee_wei,
+        "0",
         chain,
         dry_run,
     )

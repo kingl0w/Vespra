@@ -89,17 +89,21 @@ impl RiskAgent {
         let llm_gate_pass = parse_gate_pass(&parsed.gate_pass);
 
         let gate_pass = if testnet {
-            match score {
-                RiskScore::Low => true,
-                RiskScore::Medium => {
-                    tracing::info!(
-                        "[risk] testnet mode — accepting MEDIUM risk (would reject on mainnet)"
-                    );
-                    true
-                }
+            let pass = match score {
+                RiskScore::Low | RiskScore::Medium => true,
                 RiskScore::High => ctx.opportunity.tvl_usd > 0,
                 RiskScore::Critical => false,
+            };
+            //make the relaxation loud: a Medium/High score that would be BLOCKED
+            //on mainnet is being allowed only because the chain is a testnet.
+            if pass && !matches!(score, RiskScore::Low) {
+                tracing::warn!(
+                    "RISK GATE RELAXED (testnet '{}'): score {:?} passed — this would be \
+                     BLOCKED on mainnet. Naming a chain *sepolia*/*testnet* loosens the gate.",
+                    effective_chain, score
+                );
             }
+            pass
         } else {
             //mainnet: strict low-only gate.
             matches!(score, RiskScore::Low) && llm_gate_pass

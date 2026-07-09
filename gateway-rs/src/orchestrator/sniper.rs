@@ -214,14 +214,18 @@ impl SniperOrchestrator {
                     .chain_id(&event.chain.to_lowercase())
                     .unwrap_or(8453);
                 let amount_wei = format!("{:.0}", entry_eth * 1e18);
-                let _quote = self.quote_fetcher
+                let quote = self.quote_fetcher
                     .fetch_quote("WETH", &event.token1, &amount_wei, chain_id)
                     .await
                     .unwrap_or_default();
+                //slippage floor from the quote we just fetched (was discarded before).
+                let min_out = crate::goal_runner::apply_slippage(
+                    &quote.amount_out_wei, self.config.trader_max_slippage_pct,
+                );
 
                 //execute swap via keymaster
                 let exec_result = match self.executor
-                    .execute(wallet_id, "WETH", &event.token1, &amount_wei, &event.chain)
+                    .execute_with_min_out(wallet_id, "WETH", &event.token1, &amount_wei, &min_out, &event.chain)
                     .await
                 {
                     Ok(r) => r,

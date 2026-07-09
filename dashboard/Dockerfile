@@ -8,7 +8,10 @@ RUN npm run build
 FROM nginx:1.27-alpine
 RUN apk add --no-cache curl
 COPY --from=builder /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# As a template so ${GATEWAY_TOKEN} is substituted from the env at container
+# start (nginx image runs envsubst over /etc/nginx/templates/*.template).
+COPY nginx.conf /etc/nginx/templates/default.conf.template
+ENV GATEWAY_TOKEN=""
 EXPOSE 3000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=5s --retries=3 \
   CMD curl -fsS http://127.0.0.1:3000/ || exit 1

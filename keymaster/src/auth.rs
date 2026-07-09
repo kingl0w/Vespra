@@ -10,6 +10,20 @@ use std::sync::Arc;
 
 use crate::state::AppState;
 
+/// Constant-time byte comparison so a wrong bearer token can't be recovered
+/// via response-timing. `black_box` stops the optimizer short-circuiting the
+/// fold. Length is not treated as secret (token length isn't the secret material).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    std::hint::black_box(diff) == 0
+}
+
 pub async fn require_auth(
     State(state): State<Arc<AppState>>,
     req: Request,
@@ -25,7 +39,7 @@ pub async fn require_auth(
     match auth_header {
         Some(header) if header.starts_with("Bearer ") => {
             let provided = &header[7..];
-            if provided == token {
+            if constant_time_eq(provided.as_bytes(), token.as_bytes()) {
                 Ok(next.run(req).await)
             } else {
                 tracing::warn!("Auth failed: invalid token");

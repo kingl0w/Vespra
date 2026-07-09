@@ -52,11 +52,11 @@ impl AgentClient for LlmClient {
 
         let status = resp.status();
         let raw = resp.text().await?;
-        tracing::debug!("LLM raw response ({}): {}", status, &raw[..raw.len().min(500)]);
+        tracing::debug!("LLM raw response ({}): {}", status, crate::truncate_chars(&raw, 500));
         let data: serde_json::Value = serde_json::from_str(&raw)
-            .map_err(|e| anyhow::anyhow!("JSON parse error: {} | body: {}", e, &raw[..raw.len().min(300)]))?;
+            .map_err(|e| anyhow::anyhow!("JSON parse error: {} | body: {}", e, crate::truncate_chars(&raw, 300)))?;
         if !status.is_success() {
-            return Err(anyhow::anyhow!("LLM API error {}: {}", status, &raw[..raw.len().min(300)]));
+            return Err(anyhow::anyhow!("LLM API error {}: {}", status, crate::truncate_chars(&raw, 300)));
         }
         let content = data["choices"][0]["message"]["content"]
             .as_str()

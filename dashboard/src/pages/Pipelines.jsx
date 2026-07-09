@@ -23,7 +23,7 @@ const PRESETS = {
         {
           id: "execute-swap",
           worker_tags: ["executor"],
-          prompt_template: "Execute this swap plan: {{build-swap.output}}",
+          prompt_template: "Execute this swap plan: {{steps.build-swap.output}}",
           depends_on: ["build-swap"],
         },
       ],
@@ -42,13 +42,13 @@ const PRESETS = {
         {
           id: "assess-risk",
           worker_tags: ["risk"],
-          prompt_template: "Evaluate risk for: {{find-yield.output}}",
+          prompt_template: "Evaluate risk for: {{steps.find-yield.output}}",
           depends_on: ["find-yield"],
         },
         {
           id: "build-deposit",
           worker_tags: ["yield"],
-          prompt_template: "Build a deposit plan for the best opportunity from: {{find-yield.output}}",
+          prompt_template: "Build a deposit plan for the best opportunity from: {{steps.find-yield.output}}",
           depends_on: ["find-yield", "assess-risk"],
         },
       ],
@@ -67,13 +67,13 @@ const PRESETS = {
         {
           id: "assess-alerts",
           worker_tags: ["risk"],
-          prompt_template: "Evaluate these position alerts: {{check-positions.output}}",
+          prompt_template: "Evaluate these position alerts: {{steps.check-positions.output}}",
           depends_on: ["check-positions"],
         },
         {
           id: "report",
           worker_tags: ["coordinator"],
-          prompt_template: "Summarize position health and risk assessment: Positions: {{check-positions.output}} Risk: {{assess-alerts.output}}",
+          prompt_template: "Summarize position health and risk assessment: Positions: {{steps.check-positions.output}} Risk: {{steps.assess-alerts.output}}",
           depends_on: ["check-positions", "assess-alerts"],
         },
       ],
@@ -92,13 +92,13 @@ const PRESETS = {
         {
           id: "risk-review",
           worker_tags: ["risk"],
-          prompt_template: "Review this token deployment plan for risks: {{design-token.output}}",
+          prompt_template: "Review this token deployment plan for risks: {{steps.design-token.output}}",
           depends_on: ["design-token"],
         },
         {
           id: "report",
           worker_tags: ["coordinator"],
-          prompt_template: "Summarize token launch plan and risk review: Plan: {{design-token.output}} Risk: {{risk-review.output}}",
+          prompt_template: "Summarize token launch plan and risk review: Plan: {{steps.design-token.output}} Risk: {{steps.risk-review.output}}",
           depends_on: ["design-token", "risk-review"],
         },
       ],

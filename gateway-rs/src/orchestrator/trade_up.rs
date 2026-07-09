@@ -473,10 +473,27 @@ impl TradeUpOrchestrator {
                         .with_capital(capital_eth);
                 }
 
+                //slippage floor: quote the actual token_in→token_out leg now.
+                let min_out = {
+                    let cid = self
+                        .chain_registry
+                        .chain_id(&best.chain.to_lowercase())
+                        .unwrap_or(8453);
+                    let q = self
+                        .quote_fetcher
+                        .fetch_quote(&token_in, &token_out, &amount_in_wei, cid)
+                        .await
+                        .unwrap_or_default();
+                    crate::goal_runner::apply_slippage(
+                        &q.amount_out_wei,
+                        self.config.trader_max_slippage_pct,
+                    )
+                };
+
                 //execute via keymaster
                 let exec_result = match self
                     .executor
-                    .execute(wallet_id, &token_in, &token_out, &amount_in_wei, &best.chain)
+                    .execute_with_min_out(wallet_id, &token_in, &token_out, &amount_in_wei, &min_out, &best.chain)
                     .await
                 {
                     Ok(r) => r,

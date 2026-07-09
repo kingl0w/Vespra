@@ -15,18 +15,23 @@ const RECEIPT_POLL_INTERVAL_SECS: u64 = 3;
 
 ///execute a swap through the full traced path:
 ///quote → decision → calldata → keymaster → receipt polling
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_traced(
     executor: &ExecutorAgent,
-    _config: &GatewayConfig,
+    config: &GatewayConfig,
     chain_registry: &ChainRegistry,
     http_client: &reqwest::Client,
     wallet_id: uuid::Uuid,
     token_in: &str,
     token_out: &str,
     amount_wei: &str,
+    min_amount_out_wei: &str,
     chain: &str,
     dry_run: bool,
 ) -> TxStatus {
+    //honor the documented safety toggle: auto_execute_enabled=false forces dry-run
+    //so a broadcast never happens when the operator believes it's disabled.
+    let dry_run = dry_run || !config.auto_execute_enabled;
     //── step 3: build calldata ──────────────────────────────────
     let calldata = serde_json::json!({
         "wallet_id": wallet_id.to_string(),
@@ -73,7 +78,7 @@ pub async fn execute_traced(
     );
 
     let exec_result = match executor
-        .execute(wallet_id, token_in, token_out, amount_wei, chain)
+        .execute_with_min_out(wallet_id, token_in, token_out, amount_wei, min_amount_out_wei, chain)
         .await
     {
         Ok(r) => r,

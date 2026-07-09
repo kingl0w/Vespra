@@ -65,6 +65,21 @@ pub fn swap_config(chain_name: &str) -> Option<ChainSwapConfig> {
     }
 }
 
+/// True when a swap's `token_in` spends the wallet's native ETH value — i.e.
+/// literal "eth" or the chain's WETH address. Used to decide whether the swap
+/// counts against the (ETH-denominated) lifetime cap. ERC-20→X swaps rotate
+/// tokens and don't spend ETH, so they return false.
+pub fn is_native_token_in(chain_name: &str, token_in: &str) -> bool {
+    let t = token_in.trim().to_lowercase();
+    if t == "eth" {
+        return true;
+    }
+    match swap_config(chain_name) {
+        Some(cfg) => t == cfg.weth.to_string().to_lowercase(),
+        None => false,
+    }
+}
+
 //─── abi encode helpers ────────────────────────────────────────────
 
 pub fn encode_weth_deposit() -> Vec<u8> {
@@ -80,6 +95,7 @@ pub fn encode_exact_input_single(
     token_out: Address,
     recipient: Address,
     amount_in: U256,
+    min_out: U256,
 ) -> Vec<u8> {
     let params = ISwapRouter02::ExactInputSingleParams {
         tokenIn: token_in,
@@ -87,7 +103,7 @@ pub fn encode_exact_input_single(
         fee: alloy::primitives::Uint::<24, 1>::from(3000u32),
         recipient,
         amountIn: amount_in,
-        amountOutMinimum: U256::ZERO,
+        amountOutMinimum: min_out,
         sqrtPriceLimitX96: alloy::primitives::U160::ZERO,
     };
     ISwapRouter02::exactInputSingleCall { params }.abi_encode()
@@ -138,7 +154,14 @@ pub async fn execute_swap(
     token_in_input: &str,
     token_out: &str,
     amount_in_wei: U256,
+    min_amount_out: U256,
 ) -> AppResult<SwapResult> {
+    if min_amount_out.is_zero() {
+        tracing::warn!(
+            "[swap] min_amount_out is 0 — swap has NO slippage protection and can be \
+             sandwiched. Caller should pass min_amount_out_wei."
+        );
+    }
     let cfg = swap_config(chain_name).ok_or_else(|| {
         AppError::BadRequest(format!("Swap not configured for chain '{chain_name}'"))
     })?;
@@ -174,6 +197,7 @@ pub async fn execute_swap(
         token_in,
         token_out_addr,
         amount_in_wei,
+        min_amount_out,
         is_eth_input || token_in == cfg.weth,
     )
     .await;
@@ -190,6 +214,7 @@ async fn execute_swap_inner(
     token_in: Address,
     token_out: Address,
     amount_in_wei: U256,
+    min_amount_out: U256,
     token_in_is_weth: bool,
 ) -> AppResult<SwapResult> {
     let mut wrap_tx_hash: Option<String> = None;
@@ -287,7 +312,7 @@ async fn execute_swap_inner(
         router = %cfg.router.to_checksum(None),
         "[swap] sending exactInputSingle"
     );
-    let data = encode_exact_input_single(token_in, token_out, wallet_addr, amount_in_wei);
+    let data = encode_exact_input_single(token_in, token_out, wallet_addr, amount_in_wei, min_amount_out);
     let swap_tx_hash = rpc::send_tx_and_wait(
         chain,
         pk_bytes,

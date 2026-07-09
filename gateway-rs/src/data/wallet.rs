@@ -58,7 +58,7 @@ impl WalletFetcher {
         let body = resp.text().await.context("failed to read keymaster response body")?;
 
         if !status.is_success() {
-            tracing::warn!("keymaster /wallets returned {status}: {}", &body[..body.len().min(200)]);
+            tracing::warn!("keymaster /wallets returned {status}: {}", crate::truncate_chars(&body, 200));
             return Ok(vec![]);
         }
 
