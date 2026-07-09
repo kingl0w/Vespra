@@ -1,6 +1,6 @@
 # Vespra
 
-**A self-hosted DeFi agent swarm that turns plain-English goals into autonomous on-chain execution.**
+**A self hosted DeFi agent swarm that turns plain English goals into autonomous onchain execution.**
 
 [![build](https://img.shields.io/badge/build-passing-brightgreen)](#)
 [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
@@ -8,15 +8,15 @@
 [![docker pulls](https://img.shields.io/badge/docker-pulls-informational)](#)
 [![status](https://img.shields.io/badge/status-beta-yellow)](#roadmap)
 
----
+***
 
 ## What is Vespra?
 
-Vespra is a free and open-source DeFi agent swarm that turns natural-language goals
+Vespra is a free and open source DeFi agent swarm that turns natural language goals
 (*"compound 1 ETH on Base at the best yield, exit if drawdown exceeds 5%"*) into
-autonomous on-chain execution. It runs nine specialized agents
+autonomous onchain execution. It runs nine specialized agents
 (**Scout, Risk, Trader, Yield, Sentinel, Sniper, Executor, Coordinator, Launcher**)
-orchestrated through a DAG across multiple EVM chains. Self-hosted, no middleman, no
+orchestrated through a DAG across multiple EVM chains. Self hosted, no middleman, no
 fees by default.
 
 ## Quick Setup
@@ -37,13 +37,13 @@ curl -X POST http://localhost:9001/goals \
   -d '{"raw_goal":"Earn yield on 0.01 ETH on base_sepolia","wallet_label":"my-first-wallet"}'
 ```
 
----
+***
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    user([User / Dashboard]) -->|natural-language goal| gw[Gateway<br/>:9001]
+    user([User / Dashboard]) -->|natural language goal| gw[Gateway<br/>:9001]
     gw -->|LLM parse| llm[(LLM provider)]
     gw -->|DAG orchestration| nb[NullBoiler]
     nb --> agents{{9 Agents<br/>Scout · Risk · Trader<br/>Yield · Sentinel · Sniper<br/>Executor · Coordinator · Launcher}}
@@ -58,44 +58,44 @@ flowchart LR
 | Component | Role | Port |
 |---|---|---|
 | **Gateway** (`gateway-rs`) | HTTP API, agent orchestration, goal lifecycle | 9001 |
-| **Keymaster** | Encrypted burner-wallet vault + signing service | 9100 |
-| **Redis** | Goal state, rate counters, kill-switch mirror | 6379 |
+| **Keymaster** | Encrypted burner wallet vault + signing service | 9100 |
+| **Redis** | Goal state, rate counters, kill switch mirror | 6379 |
 | **Dashboard** | Web UI (nginx + SPA) | 3000 |
 | **NullBoiler** | DAG workflow scheduler *(optional)* | 9090 |
 
 Only Keymaster holds keys. The gateway can request a signature, but cannot exfiltrate
-a key — and if the kill switch is active, Keymaster refuses every signing request
+a key, and if the kill switch is active, Keymaster refuses every signing request
 regardless of what the gateway says.
 
----
+***
 
 ## Features
 
-- **Natural-language goals** — parsed by an LLM into a structured plan (capital, target, stop-loss, chain, strategy)
-- **Multi-chain, concurrent goals** — run several on Base, Arbitrum, and their testnets in parallel
-- **Sentinel monitoring** — a background loop wakes every 5 minutes to check gain/stop-loss on every open position
-- **Yield rotation** — the yield scheduler rotates capital between pools when APY deltas exceed a configurable threshold
-- **On-chain sniper** — detects new pool launches and enters with a configurable cap
-- **Auto-resume** — on gateway restart, running/paused goals pick up where they left off
-- **Telegram notifications** — lifecycle events, failures, kill-switch transitions
-- **Keymaster-enforced kill switch** — signing disabled regardless of gateway state
-- **Encrypted burner wallets** — AES-256-GCM at rest, decrypted only in-memory on sign
-- **Optional fee model** — off by default, off in the repo, no hardcoded treasury
-- **Fully self-hostable** — one `docker compose up`, no SaaS, no shared backend
+* **Natural language goals**, parsed by an LLM into a structured plan (capital, target, stop loss, chain, strategy)
+* **Multichain, concurrent goals**, run several on Base, Arbitrum, and their testnets in parallel
+* **Sentinel monitoring**, a background loop wakes every 5 minutes to check gain/stop loss on every open position
+* **Yield rotation**, the yield scheduler rotates capital between pools when APY deltas exceed a configurable threshold
+* **Onchain sniper**, detects new pool launches and enters with a configurable cap
+* **Auto resume**, on gateway restart, running/paused goals pick up where they left off
+* **Telegram notifications**, lifecycle events, failures, kill switch transitions
+* **Keymaster enforced kill switch**, signing disabled regardless of gateway state
+* **Encrypted burner wallets**, AES-256-GCM at rest, decrypted only in-memory on sign
+* **Optional fee model**, off by default, off in the repo, no hardcoded treasury
+* **Fully self hostable**, one `docker compose up`, no SaaS, no shared backend
 
----
+***
 
 ## Prerequisites
 
-- **Docker** + **Docker Compose** v2+
-- **At least one EVM RPC endpoint** — free public RPCs work for testnets (Base Sepolia, Arbitrum Sepolia); for mainnet use [Alchemy](https://alchemy.com), [Infura](https://infura.io), or [QuickNode](https://quicknode.com)
-- **LLM API key** — Anthropic, OpenAI, DeepSeek, Groq, or any OpenAI-compatible endpoint. Can also run self-hosted [Ollama](https://ollama.ai) with no key
-- **(Optional)** A Telegram bot for notifications — create with [@BotFather](https://t.me/BotFather)
-- **(Optional)** [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) for remote dashboard access
+* **Docker** + **Docker Compose** v2+
+* **At least one EVM RPC endpoint**, free public RPCs work for testnets (Base Sepolia, Arbitrum Sepolia); for mainnet use [Alchemy](https://alchemy.com), [Infura](https://infura.io), or [QuickNode](https://quicknode.com)
+* **LLM API key**, Anthropic, OpenAI, DeepSeek, Groq, or any OpenAI compatible endpoint. Can also run self hosted [Ollama](https://ollama.ai) with no key
+* **(Optional)** A Telegram bot for notifications, create with [@BotFather](https://t.me/BotFather)
+* **(Optional)** [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) for remote dashboard access
 
----
+***
 
-## First-Goal Walkthrough
+## First Goal Walkthrough
 
 Assuming the stack is up and `doctor.sh` shows all green:
 
@@ -114,8 +114,8 @@ leaves Keymaster.
 
 ### 2. Fund it from a testnet faucet
 
-- Base Sepolia: https://www.alchemy.com/faucets/base-sepolia
-- Arbitrum Sepolia: https://www.alchemy.com/faucets/arbitrum-sepolia
+* Base Sepolia: https://www.alchemy.com/faucets/base-sepolia
+* Arbitrum Sepolia: https://www.alchemy.com/faucets/arbitrum-sepolia
 
 Send ~0.01 ETH to the wallet address from step 1.
 
@@ -147,9 +147,9 @@ open http://localhost:3000
 ### 5. Check Telegram
 
 If you configured `VESPRA_TELEGRAM_BOT_TOKEN` + `VESPRA_TELEGRAM_CHAT_ID`, you'll get
-messages on every lifecycle transition — goal created, entered, exited, stopped out.
+messages on every lifecycle transition, goal created, entered, exited, stopped out.
 
----
+***
 
 ## Configuration Reference
 
@@ -185,7 +185,7 @@ All config is driven by a single `.env` at the repo root. Generate it with
 | `VESPRA_REDIS_URL` | `redis://redis:6379` | yes | Redis connection string |
 | `VESPRA_KEYMASTER_URL` | `http://keymaster:9100` | yes | Keymaster URL the gateway posts signing requests to |
 | `VESPRA_AUTO_RESUME_GOALS` | `true` | no | On boot, resume running/paused goals from Redis |
-| `VESPRA_MAX_TX_PER_HOUR` | `100` | no | Gateway-wide rate limit on executor calls |
+| `VESPRA_MAX_TX_PER_HOUR` | `100` | no | Gateway wide rate limit on executor calls |
 | `VESPRA_MAX_GLOBAL_WALLET_VALUE_ETH` | *(unset)* | no | Global cap across all burner wallets. Unset = no cap |
 | `VESPRA_DRY_RUN` | `false` | no | Set `true` to skip all Keymaster broadcasts (simulation mode) |
 
@@ -203,7 +203,7 @@ All config is driven by a single `.env` at the repo root. Generate it with
 | `VESPRA_LLM_PROVIDER` | `anthropic` | yes | One of `anthropic`, `openai`, `deepseek`, `groq`, `ollama`, `custom` |
 | `VESPRA_LLM_API_KEY` | *(unset)* | yes (no for `ollama`) | API key for the chosen provider |
 | `VESPRA_LLM_MODEL` | `claude-sonnet-4-6` | yes | Model identifier (see defaults per provider below) |
-| `VESPRA_LLM_BASE_URL` | *(unset)* | required for `custom`, optional for `ollama` | OpenAI-compatible endpoint |
+| `VESPRA_LLM_BASE_URL` | *(unset)* | required for `custom`, optional for `ollama` | OpenAI compatible endpoint |
 
 #### Supported LLM providers
 
@@ -216,7 +216,7 @@ All config is driven by a single `.env` at the repo root. Generate it with
 | `ollama` | `llama3.1:8b` | `http://localhost:11434/v1` | no (local) |
 | `custom` | *(you specify)* | *(you specify)* | yes |
 
-Any OpenAI-compatible endpoint works via `custom`. `./scripts/init.sh` will walk you
+Any OpenAI compatible endpoint works via `custom`. `./scripts/init.sh` will walk you
 through the picker and write the right defaults.
 
 ### Fees (optional, off by default)
@@ -226,7 +226,7 @@ through the picker and write the right defaults.
 | `FEES_ENABLED` | `false` | no | Enable performance + AUM fees |
 | `TREASURY_ADDRESS` | *(unset)* | if `FEES_ENABLED=true` | Address that receives fee sweeps |
 
----
+***
 
 ## Testnet → Mainnet Transition
 
@@ -234,7 +234,7 @@ through the picker and write the right defaults.
 
 ### 1. Create and fund a mainnet burner wallet
 
-Start small — ≤ 0.1 ETH for your first run. Set a wallet `cap_eth` so Keymaster refuses
+Start small, ≤ 0.1 ETH for your first run. Set a wallet `cap_eth` so Keymaster refuses
 to send more than that per transaction:
 
 ```bash
@@ -299,19 +299,19 @@ Watch it closely for the first few runs. If anything looks off, hit the kill swi
 curl -X POST http://localhost:9001/swarm/kill
 ```
 
----
+***
 
 ## Troubleshooting
 
 ### "telegram notifications disabled"
 Expected if you didn't set `VESPRA_TELEGRAM_BOT_TOKEN` or `VESPRA_TELEGRAM_CHAT_ID`.
-Safe to ignore — everything else runs fine without it.
+Safe to ignore, everything else runs fine without it.
 
 ### "no opportunities" on mainnet
-Low-liquidity window or the scout couldn't find a pool matching your goal. Wait and
+Low liquidity window or the scout couldn't find a pool matching your goal. Wait and
 retry, loosen the strategy (lower `min_tvl_usd`), or pick a more liquid chain.
 
-### Keymaster returns 503: "kill switch active — signing disabled"
+### Keymaster returns 503: "kill switch active, signing disabled"
 The kill switch is on. Deactivate:
 
 ```bash
@@ -329,14 +329,14 @@ docker compose ps redis
 docker compose logs gateway | grep -i redis
 ```
 
-If running outside Docker, `redis://redis:6379` won't resolve — use
+If running outside Docker, `redis://redis:6379` won't resolve, use
 `redis://127.0.0.1:6379`.
 
 ### `docker compose build` fails on Rust services
 Cargo caching can be stale. Rebuild clean:
 
 ```bash
-make reset    # wipes volumes too — only on first-time setup!
+make reset    # wipes volumes too, only on first time setup!
 make build
 ```
 
@@ -350,7 +350,7 @@ curl -X PUT http://localhost:9100/wallets/<wallet_id>/cap \
   -d '{"cap_eth":"0.2"}'
 ```
 
----
+***
 
 ## Optional Fees
 
@@ -367,100 +367,100 @@ TREASURY_ADDRESS=0xYourOwnTreasury
 
 Current fee schedule when enabled:
 
-- **Performance fee:** 5% of realized profit, swept on exit
-- **AUM fee:** 0.5% annualized, swept weekly
-- Both have a dust threshold (0.0001 ETH) below which sweeps are skipped
+* **Performance fee:** 5% of realized profit, swept on exit
+* **AUM fee:** 0.5% annualized, swept weekly
+* Both have a dust threshold (0.0001 ETH) below which sweeps are skipped
 
-Keymaster enforces `TREASURY_ADDRESS` is a valid checksum address at boot — no fees
+Keymaster enforces `TREASURY_ADDRESS` is a valid checksum address at boot, no fees
 fire without it.
 
----
+***
 
 ## Security Model
 
-- **Burner wallets are encrypted at rest** with AES-256-GCM, derived from
+* **Burner wallets are encrypted at rest** with AES-256-GCM, derived from
   `KEYMASTER_MASTER_PASSWORD` via Argon2id. Keys are decrypted in-memory only when a
   signing request lands.
-- **Keymaster enforces the kill switch.** The flag is persisted to disk at
+* **Keymaster enforces the kill switch.** The flag is persisted to disk at
   `/opt/vespra-keymaster/kill-switch.state` and re-loaded on restart. A compromised
-  gateway **cannot** drain wallets if the kill switch is on — every signing route
+  gateway **cannot** drain wallets if the kill switch is on, every signing route
   returns 503.
-- **Bearer auth on all Keymaster write endpoints.** No write call goes through without
+* **Bearer auth on all Keymaster write endpoints.** No write call goes through without
   `Authorization: Bearer $KEYMASTER_BEARER_TOKEN`.
-- **Per-wallet spend caps** and **gateway-wide TX rate limits** prevent runaway
-  execution — a misbehaving LLM can't drain a wallet faster than `max_tx_per_hour`.
-- **Global wallet cap** (optional) rejects new goals if total custody would exceed the
+* **Per wallet spend caps** and **gateway wide TX rate limits** prevent runaway
+  execution, a misbehaving LLM can't drain a wallet faster than `max_tx_per_hour`.
+* **Global wallet cap** (optional) rejects new goals if total custody would exceed the
   configured limit.
-- **Dry-run mode** (`VESPRA_DRY_RUN=true`) runs the full pipeline without touching
-  Keymaster — useful for a first pass.
+* **Dry run mode** (`VESPRA_DRY_RUN=true`) runs the full pipeline without touching
+  Keymaster, useful for a first pass.
 
 **Vespra has not been externally audited.** Known limitations:
 
-- LLM hallucinations can produce invalid swap parameters; the pipeline validates, but
+* LLM hallucinations can produce invalid swap parameters; the pipeline validates, but
   the surface area is large
-- Keymaster and gateway share a host by default — co-location reduces the kill-switch
+* Keymaster and gateway share a host by default, colocation reduces the kill switch
   guarantee in practice
-- Chain-level MEV is not defended against
-- Off-chain price oracles can lag or be wrong; stop-loss relies on them
+* Chain level MEV is not defended against
+* Offchain price oracles can lag or be wrong; stop loss relies on them
 
 Report security issues privately via a GitHub security advisory on this repo.
 
----
+***
 
 ## Roadmap
 
 ### Done
-- Multi-chain goal lifecycle (SCOUTING → RISK → TRADING → EXECUTING → MONITORING → EXIT)
-- Nine specialized agents backed by the LLM provider of your choice
-- Keymaster with encrypted keystore, kill switch, per-wallet caps
-- Redis-backed auto-resume
-- Telegram notifications
-- Network-mode flag (testnet/mainnet) gating synthetic fallback + risk relaxations
-- Global cap + per-hour TX rate limits
-- Docker Compose stack with `make up` / `./scripts/doctor.sh`
+* Multichain goal lifecycle (SCOUTING → RISK → TRADING → EXECUTING → MONITORING → EXIT)
+* Nine specialized agents backed by the LLM provider of your choice
+* Keymaster with encrypted keystore, kill switch, per wallet caps
+* Redis backed auto resume
+* Telegram notifications
+* Network mode flag (testnet/mainnet) gating synthetic fallback + risk relaxations
+* Global cap + per hour TX rate limits
+* Docker Compose stack with `make up` / `./scripts/doctor.sh`
 
 ### Next
-- Additional chain adapters (Optimism, Polygon zkEVM)
-- On-chain fee sweeper with Safe multisig support
-- Dashboard goal editor (currently read-only)
-- Per-goal spend cap (not just per-wallet)
-- Agent response caching for cheaper cycles
+* Additional chain adapters (Optimism, Polygon zkEVM)
+* Onchain fee sweeper with Safe multisig support
+* Dashboard goal editor (currently read only)
+* Per goal spend cap (not just per wallet)
+* Agent response caching for cheaper cycles
 
 ### Not in scope
-- Custodial mode
-- Cross-chain bridging as a first-class goal primitive
-- Non-EVM chains
-- **Mainnet-audit-ready claim.** This is beta software. Run with money you can afford
+* Custodial mode
+* Cross chain bridging as a first class goal primitive
+* Non EVM chains
+* **Mainnet audit ready claim.** This is beta software. Run with money you can afford
   to lose.
 
----
+***
 
 ## Contributing
 
 Issues and PRs welcome.
 
-- **Bug reports:** open a GitHub issue with reproduction steps, `docker compose logs`,
+* **Bug reports:** open a GitHub issue with reproduction steps, `docker compose logs`,
   and the redacted `.env` you booted with
-- **Feature requests:** issue first — discuss scope before opening a PR
-- **PRs:** feature branch → PR against `main`. CI must pass; add tests for new
+* **Feature requests:** issue first, discuss scope before opening a PR
+* **PRs:** feature branch → PR against `main`. CI must pass; add tests for new
   behavior. Match the existing Rust formatting (`cargo fmt`) and keep comments
   minimal (code should be self-explanatory)
-- **Security issues:** use GitHub security advisories, not public issues
+* **Security issues:** use GitHub security advisories, not public issues
 
----
+***
 
 ## License
 
-MIT — see [LICENSE](./LICENSE). Do whatever you want, just don't blame me.
+MIT, see [LICENSE](./LICENSE). Do whatever you want, just don't blame me.
 
----
+***
 
 ## Disclaimer
 
 Vespra interacts with real funds on real blockchains. You are responsible for any
 losses you incur. **Always test on testnet first.** This is not financial advice.
 The software has not been audited. Past results don't predict future returns. Keep
-backups of your `.env` (specifically `KEYMASTER_MASTER_PASSWORD`) — lose that file and
+backups of your `.env` (specifically `KEYMASTER_MASTER_PASSWORD`), lose that file and
 you lose access to every wallet the Keymaster created.
 
 Run with money you can afford to lose.
