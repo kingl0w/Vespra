@@ -217,14 +217,14 @@
 
   /* ---- agents: swarm constellation ---- */
   .swarm { display:flex; flex-direction:column; align-items:center; gap: 24px; }
-  .swarm-ring { position: relative; width: min(92vw, 460px); aspect-ratio: 1; margin: 0 auto; }
+  .swarm-ring { position: relative; width: min(94vw, 560px); aspect-ratio: 1; margin: 0 auto; }
   .swarm-ring .links { position:absolute; inset:0; width:100%; height:100%; overflow:visible; pointer-events:none; }
   .swarm-ring .links line { stroke: color-mix(in srgb, var(--accent) 20%, transparent); stroke-width: 0.4; transition: stroke .2s, stroke-width .2s; }
   .swarm-ring .links line.hot { stroke: var(--accent); stroke-width: 0.7; stroke-dasharray: 2 2; animation: flow 0.9s linear infinite; }
   @keyframes flow { to { stroke-dashoffset: -4; } }
   .hub {
     position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
-    width: 88px; height:88px; border-radius:50%; background: var(--surface);
+    width: 98px; height:98px; border-radius:50%; background: var(--surface);
     border:1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
     display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; z-index:2;
   }
@@ -234,9 +234,9 @@
   .hub .hub-n { font-family:var(--display); font-weight:900; font-size:22px; color:var(--accent); line-height:1; }
   .node {
     position:absolute; transform:translate(-50%,-50%); z-index:3;
-    font-family:var(--mono); font-size:11px; font-weight:600; color:var(--muted);
+    font-family:var(--mono); font-size:12px; font-weight:600; color:var(--muted);
     background: var(--surface); border:1px solid var(--border); border-radius:20px;
-    padding:5px 11px; cursor:pointer; white-space:nowrap; transition: color .16s, background .16s, border-color .16s, box-shadow .16s, transform .16s;
+    padding:6px 12px; cursor:pointer; white-space:nowrap; transition: color .16s, background .16s, border-color .16s, box-shadow .16s, transform .16s;
   }
   .node:hover { color:var(--text); border-color:var(--accent-dim); transform:translate(-50%,-50%) scale(1.07); }
   .node.active { color:#000; background:var(--accent); border-color:var(--accent); box-shadow:0 0 20px -4px var(--accent); }
