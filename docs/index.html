@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Vespra — self-hosted crypto agent swarm</title>
+<title>Vespra: self-hosted crypto agent swarm</title>
 <meta name="description" content="Vespra is a self-hosted AI agent swarm that grows your crypto from a plain-English goal. Keys stay on your machine. Interactive simulation." />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -71,13 +71,6 @@
     background: radial-gradient(70% 60% at 82% 0%, color-mix(in srgb, var(--accent) 13%, transparent), transparent 68%);
     pointer-events:none;
   }
-  .eyebrow {
-    display:inline-flex; align-items:center; gap:8px;
-    font-size: 11.5px; letter-spacing: 0.16em; text-transform: uppercase;
-    color: var(--muted); margin-bottom: 24px;
-  }
-  .eyebrow .dot { width:7px; height:7px; border-radius:50%; background: var(--green); box-shadow: 0 0 10px var(--green); animation: pulse 2.4s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
   h1 {
     font-family: var(--display);
     font-weight: 900;
@@ -286,7 +279,6 @@
 
 <div class="hero">
   <div class="wrap">
-    <span class="eyebrow"><span class="dot"></span>self-hosted · your keys never leave your machine</span>
     <h1>Tell it a goal.<br>The <span class="g">swarm</span> does the rest.</h1>
     <p class="lede">Nine AI agents take one plain-English goal and run it: scout, risk-check, swap, monitor, exit. <strong>Self-hosted. Your keys never leave your machine.</strong></p>
     <div class="cta">
@@ -301,7 +293,7 @@
   <div class="wrap">
     <div class="kicker">Interactive demo</div>
     <h2>Pick a task. Watch the right agents run it.</h2>
-    <p class="sub">Each task drives a different pipeline through a different subset of the swarm. Toggle dry-run, or hit the kill switch mid-run to watch the pipeline halt. Runs entirely in your browser — no wallet, no keys, no funds, no backend.</p>
+    <p class="sub">Each task drives a different pipeline through a different subset of the swarm. Toggle dry-run, or hit the kill switch mid-run to watch the pipeline halt. Runs entirely in your browser: no wallet, no keys, no funds, no backend.</p>
 
     <div class="sim">
       <div class="sim-top">
@@ -352,7 +344,7 @@
         </div>
       </div>
     </div>
-    <p style="font-size:11.5px;color:var(--muted);margin-top:14px;line-height:1.6;">These are example goals for real strategies — in the app you type any goal and the LLM picks the strategy. The step names (<code class="inline">SCOUTING</code> … <code class="inline">COMPOUNDING</code>), agent roles, risk grades and statuses (<code class="inline">Confirmed</code> / <code class="inline">DryRun</code> / gate rejections) are taken from the gateway source; the numbers are illustrative. The real UI is the dashboard, not this page.</p>
+    <p style="font-size:11.5px;color:var(--muted);margin-top:14px;line-height:1.6;">These are example goals for real strategies; in the app you type any goal and the LLM picks the strategy. The step names (<code class="inline">SCOUTING</code> … <code class="inline">COMPOUNDING</code>), agent roles, risk grades and statuses (<code class="inline">Confirmed</code> / <code class="inline">DryRun</code> / gate rejections) are taken from the gateway source; the numbers are illustrative. The real UI is the dashboard, not this page.</p>
   </div>
 </section>
 
@@ -365,11 +357,11 @@
 
     <div class="svc-row">
       <div><div class="svc-name">gateway-rs</div><div class="svc-meta">RUST · :9001 · the brain</div></div>
-      <div class="svc-desc">Where the agents live and the goal pipeline runs. Parses your goal with an LLM, walks it through the state machine, and runs two background loops — a sentinel that checks positions every 5 min and a yield scheduler that hunts better APY every 30 min.</div>
+      <div class="svc-desc">Where the agents live and the goal pipeline runs. Parses your goal with an LLM, walks it through the state machine, and runs two background loops: a sentinel that checks positions every 5 min and a yield scheduler that hunts better APY every 30 min.</div>
     </div>
     <div class="svc-row">
       <div><div class="svc-name">keymaster</div><div class="svc-meta">RUST · :9100 · the vault</div></div>
-      <div class="svc-desc">Owns your private keys and is the only thing that ever signs. The gateway never sees a key — it asks keymaster to swap, and keymaster checks the wallet's spend cap, enforces a slippage floor, signs, and broadcasts. Keys are encrypted at rest (AES-256-GCM + Argon2id).</div>
+      <div class="svc-desc">Owns your private keys and is the only thing that ever signs. The gateway never sees a key; it asks keymaster to swap, and keymaster checks the wallet's spend cap, enforces a slippage floor, signs, and broadcasts. Keys are encrypted at rest (AES-256-GCM + Argon2id).</div>
     </div>
     <div class="svc-row">
       <div><div class="svc-name">nullboiler</div><div class="svc-meta">ZIG · :9090 · the workflows</div></div>
@@ -403,17 +395,17 @@
   <div class="wrap">
     <div class="kicker">Guardrails</div>
     <h2>Layers between an LLM and your money</h2>
-    <p class="sub">The design goal: nothing can lose you more than you explicitly authorized. In order of defense —</p>
+    <p class="sub">The design goal: nothing can lose you more than you explicitly authorized. In order of defense:</p>
     <div class="safety">
       <div class="safe-card"><h4>① Wallet caps</h4><p>Every wallet has a lifetime spend ceiling. Keymaster refuses to sign anything that would push it over the cap.</p></div>
       <div class="safe-card"><h4>② Capital clamp</h4><p>Even if the LLM hallucinates a giant number, the gateway clamps capital to 90% of the wallet cap before the goal starts.</p></div>
-      <div class="safe-card"><h4>③ Risk gate</h4><p>Every candidate passes the risk agent first. HIGH risk — low TVL, unverified token, weird pair — means no trade. Try the "rug check" task above.</p></div>
+      <div class="safe-card"><h4>③ Risk gate</h4><p>Every candidate passes the risk agent first. HIGH risk (low TVL, unverified token, weird pair) means no trade. Try the "rug check" task above.</p></div>
       <div class="safe-card"><h4>④ Slippage floor</h4><p>Every swap carries an on-chain minimum-out from a live quote, so a trade can't be sandwiched to zero.</p></div>
-      <div class="safe-card"><h4>⑤ Kill switch</h4><p>One flag halts the whole swarm — orchestrators and the goal pipeline both. Flip the toggle in the demo to feel it.</p></div>
+      <div class="safe-card"><h4>⑤ Kill switch</h4><p>One flag halts the whole swarm: orchestrators and the goal pipeline both. Flip the toggle in the demo to feel it.</p></div>
       <div class="safe-card"><h4>⑥ Dry-run mode</h4><p>Go through every step including building the calldata, but never broadcast. Test your prompts without spending gas.</p></div>
     </div>
     <div class="disclaim">
-      <strong>It's still your money, and this is early software.</strong> Vespra points an LLM at a live wallet — start on a testnet, run in dry-run first, watch the logs, and never trust it with more than you'd be okay losing.
+      <strong>It's still your money, and this is early software.</strong> Vespra points an LLM at a live wallet, so start on a testnet, run in dry-run first, watch the logs, and never trust it with more than you'd be okay losing.
     </div>
   </div>
 </section>
@@ -430,8 +422,8 @@
 
 // ---- agent catalogue (roles + real prompt snippets) ----
 const AGENTS = {
-  scout:       ["Finds candidate pools & tokens matching your goal — APY, liquidity, age.", "You are Scout, opportunity finder of the Vespra swarm. Rank candidates by APY, TVL, liquidity and age. Respond with valid JSON only."],
-  risk:        ["Grades candidates LOW / MEDIUM / HIGH and rejects the bad ones.", "You are Risk, safety evaluator. GATE RULES — mainnet: gate_pass=true ONLY when score is LOW and honeypot_risk is not HIGH. Respond with JSON only."],
+  scout:       ["Finds candidate pools & tokens matching your goal: APY, liquidity, age.", "You are Scout, opportunity finder of the Vespra swarm. Rank candidates by APY, TVL, liquidity and age. Respond with valid JSON only."],
+  risk:        ["Grades candidates LOW / MEDIUM / HIGH and rejects the bad ones.", "You are Risk, safety evaluator. GATE RULES for mainnet: gate_pass=true ONLY when score is LOW and honeypot_risk is not HIGH. Respond with JSON only."],
   trader:      ["Decides whether to enter, hold, or exit a position.", "You are Trader. Decide enter / hold / exit and produce a plan. Never exceed the clamped capital. JSON only."],
   executor:    ["Builds the swap transaction and hands it to keymaster.", "Builds exactInputSingle calldata with an amountOutMinimum floor, posts to keymaster /swap, then polls the chain for the receipt."],
   sentinel:    ["Watches open positions, triggers exits on gain target or stop loss.", "You are Sentinel, the watchdog. action: hold | exit_gain | exit_loss. If gain ≥ target and momentum fades → exit_gain. JSON only."],
@@ -611,19 +603,19 @@ async function run() {
   for (let i = 0; i < t.steps.length; i++) {
     if (state.kill) {
       banner.className = "result-banner halt show";
-      banner.innerHTML = `■ Kill switch active — pipeline halted at ${t.steps[i].key}. No further steps run and nothing is broadcast.`;
+      banner.innerHTML = `■ Kill switch active. Pipeline halted at ${t.steps[i].key}; no further steps run and nothing is broadcast.`;
       finish(btn); return;
     }
     const isRejectStep = t.reject && t.steps[i].key === "RISK";
     await runStage(i, stepLogs(t.steps[i].key, t.plan, t.reject, state.task), isRejectStep);
     if (state.kill) {
       banner.className = "result-banner halt show";
-      banner.innerHTML = `■ Kill switch active — pipeline halted at ${t.steps[i].key}. No further steps run and nothing is broadcast.`;
+      banner.innerHTML = `■ Kill switch active. Pipeline halted at ${t.steps[i].key}; no further steps run and nothing is broadcast.`;
       finish(btn); return;
     }
     if (isRejectStep) {
       banner.className = "result-banner block show";
-      banner.innerHTML = `⚠ Risk gate blocked this trade — score HIGH. The swarm refused to enter. <strong>0 funds moved.</strong>`;
+      banner.innerHTML = `⚠ Risk gate blocked this trade: score HIGH. The swarm refused to enter. <strong>0 funds moved.</strong>`;
       finish(btn); return;
     }
   }
